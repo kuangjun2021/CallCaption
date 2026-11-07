@@ -26,8 +26,19 @@ jobs:
         run: |
           export THEOS=$HOME/theos
           make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+      - name: Repack - relocate bundle binary
+        run: |
+          rm -rf /tmp/rp && mkdir -p /tmp/rp
+          dpkg-deb -R packages/*.deb /tmp/rp/pkg
+          if [ -d /tmp/rp/pkg/var/jb/CallCaptionPrefs.bundle ]; then
+            mv /tmp/rp/pkg/var/jb/CallCaptionPrefs.bundle/* /tmp/rp/pkg/var/jb/Library/PreferenceBundles/CallCaptionPrefs.bundle/
+            rm -rf /tmp/rp/pkg/var/jb/CallCaptionPrefs.bundle
+          fi
+          chmod 755 /tmp/rp/pkg/var/jb/Library/PreferenceBundles/CallCaptionPrefs.bundle/CallCaptionPrefs 2>/dev/null || true
+          dpkg-deb -b /tmp/rp/pkg /tmp/rp/fixed.deb
           mkdir -p out
-          cp packages/*.deb out/
+          cp /tmp/rp/fixed.deb out/
+
 
       - name: Upload deb
         uses: actions/upload-artifact@v4

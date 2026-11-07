@@ -478,6 +478,7 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
 
 + (void)collapsePanel {
     dispatch_async(dispatch_get_main_queue(), ^{
+        CCLogf(@"panel: collapse");
         if (!g_panelWin) return;
         EnsureMiniUI();
         g_miniWin.center = g_panelCard.center;
@@ -489,6 +490,7 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
 
 + (void)expandPanel {
     dispatch_async(dispatch_get_main_queue(), ^{
+        CCLogf(@"panel: expand");
         if (g_miniWin) g_miniWin.hidden = YES;
         EnsurePanelUI();
         g_panelWin.hidden = NO;
@@ -498,8 +500,8 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
 }
 
 + (void)outsideTapped:(id)sender {
-    CCLogf(@"panel: outside tap");
-    if (g_panelExpanded) [self collapsePanel];
+    CCLogf(@"panel: outside tap (expanded=%d)", g_panelExpanded);
+    [self collapsePanel];
 }
 
 + (void)openSettings:(id)sender {

@@ -20,6 +20,7 @@
 @end
 
 #define CC_TAP_PID_SPEAKER   (-2)
+#define CC_TAP_PID_SYSTEM    (-1)
 #define CC_TAP_PID_MIC       (-3)
 #define CC_AQ_TAP_FLAG       0x800
 #define CC_AQ_PROP_TAP       0x71746F62    // 'qtob'
@@ -533,9 +534,13 @@ static void CheckArm(void) {
             if (ch->frames != ch->lastFrameSeen) {
                 ch->lastFrameSeen = ch->frames;
                 ch->lastFrameChangeAt = now;
-            } else if (now - ch->lastFrameChangeAt > 15.0) {
-                CCLogf(@"%@: audio stalled (frames=%llu), restarting tap",
-                       ch.tag, (unsigned long long)ch->frames);
+            } else if (now - ch->lastFrameChangeAt > 8.0) {
+                if ([ch.tag isEqualToString:@"remote"]) {
+                    ch->tapPID = (ch->tapPID == CC_TAP_PID_SPEAKER)
+                                 ? CC_TAP_PID_SYSTEM : CC_TAP_PID_SPEAKER;
+                }
+                CCLogf(@"%@: audio stalled (frames=%llu), restarting tap pid=%d",
+                       ch.tag, (unsigned long long)ch->frames, ch->tapPID);
                 [ch stop];
                 ch->lastAttempt = 0;
                 ch->lastFrameChangeAt = now;
@@ -580,7 +585,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.12.8)");
+        CCLogLine(@"audioservice started (v0.12.9)");
 
         g_stateQ = dispatch_queue_create("net.user.callcaption.audio", DISPATCH_QUEUE_SERIAL);
 

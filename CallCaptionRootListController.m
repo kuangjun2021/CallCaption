@@ -15,7 +15,13 @@ __attribute__((visibility("default")))
 
 - (NSArray *)specifiers {
     if (!_specifiers) {
-        _specifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];
+        NSBundle *b = self.bundle;
+        if (!b) {
+            b = [NSBundle bundleWithPath:@"/var/jb/Library/PreferenceBundles/CallCaptionPrefs.bundle"];
+            if (b) self.bundle = b;
+        }
+        _specifiers = [self loadSpecifiersFromPlistName:@"Root" target:self bundle:b];
+        NSLog(@"[CallCaption] specifiers=%lu bundle=%@", (unsigned long)_specifiers.count, b.bundlePath);
     }
     return _specifiers;
 }

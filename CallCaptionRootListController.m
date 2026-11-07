@@ -12,15 +12,15 @@
 - (void)setSpecifiers:(NSArray *)specifiers;
 @end
 
-typedef NS_ENUM(NSInteger, CCRowKind) {
-    CCRowKindSwitch = 0,
-    CCRowKindText,
-    CCRowKindChoice,
-    CCRowKindAction,
+typedef NS_ENUM(NSInteger, CCPrefsItemKind) {
+    CCPrefsItemKindSwitch = 0,
+    CCPrefsItemKindText,
+    CCPrefsItemKindChoice,
+    CCPrefsItemKindAction,
 };
 
-@interface CCRow : NSObject
-@property (nonatomic) CCRowKind kind;
+@interface CCPrefsItem : NSObject
+@property (nonatomic) CCPrefsItemKind kind;
 @property (nonatomic, copy) NSString *key;
 @property (nonatomic, copy) NSString *title;
 @property (nonatomic, copy) NSString *placeholder;
@@ -30,19 +30,19 @@ typedef NS_ENUM(NSInteger, CCRowKind) {
 @property (nonatomic, copy) NSArray<NSString *> *choiceValues;
 @property (nonatomic, copy) NSArray<NSString *> *choiceTitles;
 @end
-@implementation CCRow @end
+@implementation CCPrefsItem @end
 
-@interface CCSwitch : UISwitch
+@interface CCPrefsSwitch : UISwitch
 @property (nonatomic, copy) NSString *prefKey;
 @end
-@implementation CCSwitch @end
+@implementation CCPrefsSwitch @end
 
-@interface CCRowCell : UITableViewCell
+@interface CCPrefsTextCell : UITableViewCell
 @property (nonatomic, strong) UILabel *nameLabel;
 @property (nonatomic, strong) UITextField *field;
 @end
 
-@implementation CCRowCell
+@implementation CCPrefsTextCell
 - (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
     self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
     if (self) {
@@ -78,11 +78,11 @@ __attribute__((visibility("default")))
 @interface CallCaptionRootListController : PSListController
     <UITableViewDataSource, UITableViewDelegate, UITextFieldDelegate>
 @property (nonatomic, strong) UITableView *ccTable;
-@property (nonatomic, strong) NSArray<NSArray<CCRow *> *> *sections;
+@property (nonatomic, strong) NSArray<NSArray<CCPrefsItem *> *> *sections;
 @property (nonatomic, strong) NSArray<NSString *> *sectionTitles;
 @property (nonatomic, strong) NSArray<NSString *> *sectionFooters;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, id> *values;
-@property (nonatomic, strong) NSArray<CCRow *> *textRows;
+@property (nonatomic, strong) NSArray<CCPrefsItem *> *textRows;
 @end
 
 @implementation CallCaptionRootListController
@@ -93,8 +93,8 @@ __attribute__((visibility("default")))
 }
 
 - (void)viewDidLoad {
-    [super viewDidLoad];
-    [self setSpecifiers:@[]];
+    // 不调用 [super viewDidLoad]：绕开 PSListController 内部的 plist/table 初始化（本环境会闪退）
+    if (!self.view) self.view = [[UIView alloc] initWithFrame:[UIScreen mainScreen].bounds];
     self.title = @"CallCaption";
     self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
 
@@ -136,27 +136,27 @@ __attribute__((visibility("default")))
 
 // ---------- 模型 ----------
 
-static CCRow *MkSwitch(NSString *key, NSString *title, BOOL def) {
-    CCRow *r = [CCRow new];
-    r.kind = CCRowKindSwitch; r.key = key; r.title = title; r.defBool = def;
+static CCPrefsItem *MkSwitch(NSString *key, NSString *title, BOOL def) {
+    CCPrefsItem *r = [CCPrefsItem new];
+    r.kind = CCPrefsItemKindSwitch; r.key = key; r.title = title; r.defBool = def;
     return r;
 }
-static CCRow *MkText(NSString *key, NSString *title, NSString *def, BOOL secure, NSString *ph) {
-    CCRow *r = [CCRow new];
-    r.kind = CCRowKindText; r.key = key; r.title = title; r.defString = def;
+static CCPrefsItem *MkText(NSString *key, NSString *title, NSString *def, BOOL secure, NSString *ph) {
+    CCPrefsItem *r = [CCPrefsItem new];
+    r.kind = CCPrefsItemKindText; r.key = key; r.title = title; r.defString = def;
     r.secure = secure; r.placeholder = ph;
     return r;
 }
-static CCRow *MkChoice(NSString *key, NSString *title, NSString *def,
+static CCPrefsItem *MkChoice(NSString *key, NSString *title, NSString *def,
                        NSArray<NSString *> *vals, NSArray<NSString *> *titles) {
-    CCRow *r = [CCRow new];
-    r.kind = CCRowKindChoice; r.key = key; r.title = title; r.defString = def;
+    CCPrefsItem *r = [CCPrefsItem new];
+    r.kind = CCPrefsItemKindChoice; r.key = key; r.title = title; r.defString = def;
     r.choiceValues = vals; r.choiceTitles = titles;
     return r;
 }
-static CCRow *MkAction(NSString *key, NSString *title) {
-    CCRow *r = [CCRow new];
-    r.kind = CCRowKindAction; r.title = title; r.key = key;
+static CCPrefsItem *MkAction(NSString *key, NSString *title) {
+    CCPrefsItem *r = [CCPrefsItem new];
+    r.kind = CCPrefsItemKindAction; r.title = title; r.key = key;
     return r;
 }
 
@@ -233,8 +233,8 @@ static void VoiceLists(NSString *prefix,
 
     NSMutableArray *tr = [NSMutableArray array];
     for (NSArray *sec in self.sections)
-        for (CCRow *r in sec)
-            if (r.kind == CCRowKindText) [tr addObject:r];
+        for (CCPrefsItem *r in sec)
+            if (r.kind == CCPrefsItemKindText) [tr addObject:r];
     self.textRows = tr;
 }
 
@@ -243,24 +243,24 @@ static void VoiceLists(NSString *prefix,
 - (void)loadValues {
     self.values = [NSMutableDictionary dictionary];
     for (NSArray *sec in self.sections) {
-        for (CCRow *r in sec) {
+        for (CCPrefsItem *r in sec) {
             if (r.key.length == 0) continue;
             id v = (__bridge_transfer id)CFPreferencesCopyAppValue(
                        (__bridge CFStringRef)r.key, (__bridge CFStringRef)CC_DOMAIN);
-            if (!v) v = (r.kind == CCRowKindSwitch) ? @(r.defBool) : (r.defString ?: @"");
+            if (!v) v = (r.kind == CCPrefsItemKindSwitch) ? @(r.defBool) : (r.defString ?: @"");
             self.values[r.key] = v;
         }
     }
 }
 
-- (NSString *)stringFor:(CCRow *)r {
+- (NSString *)stringFor:(CCPrefsItem *)r {
     id v = self.values[r.key];
     if ([v isKindOfClass:[NSString class]]) return v;
     if ([v isKindOfClass:[NSNumber class]]) return [v stringValue];
     return r.defString ?: @"";
 }
 
-- (BOOL)boolFor:(CCRow *)r {
+- (BOOL)boolFor:(CCPrefsItem *)r {
     id v = self.values[r.key];
     if ([v isKindOfClass:[NSNumber class]]) return [v boolValue];
     if ([v isKindOfClass:[NSString class]]) return [v boolValue] || [v isEqualToString:@"YES"] || [v isEqualToString:@"1"];
@@ -292,30 +292,30 @@ static void VoiceLists(NSString *prefix,
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
-    CCRow *row = self.sections[(NSUInteger)ip.section][(NSUInteger)ip.row];
+    CCPrefsItem *row = self.sections[(NSUInteger)ip.section][(NSUInteger)ip.row];
 
-    if (row.kind == CCRowKindSwitch) {
+    if (row.kind == CCPrefsItemKindSwitch) {
         static NSString *cid = @"sw";
         UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:cid];
         if (!cell) {
             cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:cid];
             cell.selectionStyle = UITableViewCellSelectionStyleNone;
-            CCSwitch *sw = [[CCSwitch alloc] initWithFrame:CGRectMake(0, 0, 51, 31)];
+            CCPrefsSwitch *sw = [[CCPrefsSwitch alloc] initWithFrame:CGRectMake(0, 0, 51, 31)];
             [sw addTarget:self action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];
             cell.accessoryView = sw;
         }
         cell.textLabel.text = row.title;
         cell.textLabel.font = [UIFont systemFontOfSize:16];
-        CCSwitch *sw = (CCSwitch *)cell.accessoryView;
+        CCPrefsSwitch *sw = (CCPrefsSwitch *)cell.accessoryView;
         sw.prefKey = row.key;
         sw.on = [self boolFor:row];
         return cell;
     }
 
-    if (row.kind == CCRowKindText) {
+    if (row.kind == CCPrefsItemKindText) {
         static NSString *cid = @"txt";
-        CCRowCell *cell = [tv dequeueReusableCellWithIdentifier:cid];
-        if (!cell) cell = [[CCRowCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:cid];
+        CCPrefsTextCell *cell = [tv dequeueReusableCellWithIdentifier:cid];
+        if (!cell) cell = [[CCPrefsTextCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:cid];
         cell.nameLabel.text = row.title;
         cell.field.placeholder = row.placeholder;
         cell.field.secureTextEntry = row.secure;
@@ -326,7 +326,7 @@ static void VoiceLists(NSString *prefix,
         return cell;
     }
 
-    if (row.kind == CCRowKindChoice) {
+    if (row.kind == CCPrefsItemKindChoice) {
         static NSString *cid = @"choice";
         UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:cid];
         if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:cid];
@@ -349,7 +349,7 @@ static void VoiceLists(NSString *prefix,
     return cell;
 }
 
-- (NSString *)titleForChoice:(CCRow *)row value:(NSString *)val {
+- (NSString *)titleForChoice:(CCPrefsItem *)row value:(NSString *)val {
     NSUInteger i = [row.choiceValues indexOfObject:val];
     if (i != NSNotFound && i < row.choiceTitles.count) return row.choiceTitles[i];
     return row.choiceTitles.firstObject ?: val;
@@ -357,31 +357,31 @@ static void VoiceLists(NSString *prefix,
 
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
-    CCRow *row = self.sections[(NSUInteger)ip.section][(NSUInteger)ip.row];
+    CCPrefsItem *row = self.sections[(NSUInteger)ip.section][(NSUInteger)ip.row];
 
-    if (row.kind == CCRowKindText) {
+    if (row.kind == CCPrefsItemKindText) {
         UITableViewCell *cell = [tv cellForRowAtIndexPath:ip];
-        if ([cell isKindOfClass:[CCRowCell class]]) [[(CCRowCell *)cell field] becomeFirstResponder];
+        if ([cell isKindOfClass:[CCPrefsTextCell class]]) [[(CCPrefsTextCell *)cell field] becomeFirstResponder];
         return;
     }
-    if (row.kind == CCRowKindChoice) {
+    if (row.kind == CCPrefsItemKindChoice) {
         [self presentChoices:row cell:[tv cellForRowAtIndexPath:ip]];
         return;
     }
-    if (row.kind == CCRowKindAction && [row.key isEqualToString:@"openLog"]) {
+    if (row.kind == CCPrefsItemKindAction && [row.key isEqualToString:@"openLog"]) {
         [self presentLogMenu:[tv cellForRowAtIndexPath:ip]];
     }
 }
 
 // ---------- 交互 ----------
 
-- (void)switchChanged:(CCSwitch *)sw {
+- (void)switchChanged:(CCPrefsSwitch *)sw {
     [self setPrefValue:@(sw.on) forKey:sw.prefKey];
 }
 
 - (void)textFieldDidEndEditing:(UITextField *)tf {
     if (tf.tag >= 0 && (NSUInteger)tf.tag < self.textRows.count) {
-        CCRow *r = self.textRows[(NSUInteger)tf.tag];
+        CCPrefsItem *r = self.textRows[(NSUInteger)tf.tag];
         [self setPrefValue:(tf.text ?: @"") forKey:r.key];
     }
 }
@@ -391,7 +391,7 @@ static void VoiceLists(NSString *prefix,
     return YES;
 }
 
-- (void)presentChoices:(CCRow *)row cell:(UITableViewCell *)cell {
+- (void)presentChoices:(CCPrefsItem *)row cell:(UITableViewCell *)cell {
     NSString *cur = [self stringFor:row];
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:row.title
                                                                   message:nil

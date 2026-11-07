@@ -29,7 +29,8 @@ static NSString *g_texts[4];       // 0 对方原文 / 1 对方译文 / 2 我方
 static NSString *g_stateText;
 
 static UITapGestureRecognizer *g_outsideTap;
-static UIWindow *g_overlayWin;
+static id g_panelGuard;
+static UIView *g_panelCard;
 
 static CGFloat ScreenW(void) { return [UIScreen mainScreen].bounds.size.width; }
 static CGFloat ScreenH(void) { return [UIScreen mainScreen].bounds.size.height; }
@@ -94,31 +95,16 @@ static void RefreshBoxes(void);
 }
 @end
 
-// 展开面板时铺一层透明覆盖窗（低于面板、高于普通 App），点任意空白处收起面板。
-// 比“给 key window 加手势”可靠：不依赖当前是哪个 App、哪个 window。
-static void EnsureOverlay(void) {
-    if (g_overlayWin) return;
-    @try {
-        UIWindow *w = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-        w.windowLevel = UIWindowLevelStatusBar - 1;
-        w.backgroundColor = [UIColor clearColor];
-        UIViewController *vc = [[UIViewController alloc] init];
-        vc.view.backgroundColor = [UIColor clearColor];
-        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
-            initWithTarget:[CCUIHelper class] action:@selector(outsideTapped:)];
-        [vc.view addGestureRecognizer:tap];
-        w.rootViewController = vc;
-        AttachScene(w);
-        w.hidden = YES;
-        g_overlayWin = w;
-        g_outsideTap = tap;
-    } @catch (NSException *e) { }
+// 面板窗口是全屏透明窗：背景任意位置点按=收起；面板卡片本身不触发。
+@interface CCPanelTapGuard : NSObject <UIGestureRecognizerDelegate>
+@property (nonatomic, weak) UIView *card;
+@end
+@implementation CCPanelTapGuard
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)g shouldReceiveTouch:(UITouch *)touch {
+    if (self.card && [touch.view isDescendantOfView:self.card]) return NO;
+    return YES;
 }
-
-static void SetOverlayVisible(BOOL on) {
-    if (on) EnsureOverlay();
-    if (g_overlayWin) g_overlayWin.hidden = !on;
-}
+@end
 
 // ---------- 控制面板 ----------
 
@@ -127,17 +113,20 @@ static void EnsurePanelUI(void) {
     @try {
         CGFloat w = CardWidth();
         CGFloat h = 150;
-        UIWindow *win = [[UIWindow alloc] initWithFrame:CGRectMake((ScreenW() - w) / 2.0,
-                                                                   ScreenH() - h - 150, w, h)];
+        UIWindow *win = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
         win.windowLevel = UIWindowLevelStatusBar + 102;
         win.backgroundColor = [UIColor clearColor];
 
+        UIView *bg = [[UIView alloc] initWithFrame:win.bounds];
+        bg.backgroundColor = [UIColor clearColor];
+        [win addSubview:bg];
+
         UIVisualEffectView *blur = [[UIVisualEffectView alloc]
             initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark]];
-        blur.frame = win.bounds;
+        blur.frame = CGRectMake((ScreenW() - w) / 2.0, ScreenH() - h - 150, w, h);
         blur.layer.cornerRadius = 22;
         blur.layer.masksToBounds = YES;
-        [win addSubview:blur];
+        [bg addSubview:blur];
 
         UIView *ov = [[UIView alloc] initWithFrame:blur.bounds];
         ov.backgroundColor = [UIColor colorWithWhite:0 alpha:0.28];
@@ -186,9 +175,19 @@ static void EnsurePanelUI(void) {
             initWithTarget:[CCUIHelper class] action:@selector(handlePanelPan:)];
         [blur addGestureRecognizer:pan];
 
+        CCPanelTapGuard *guard = [CCPanelTapGuard new];
+        guard.card = blur;
+        g_panelGuard = guard;
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
+            initWithTarget:[CCUIHelper class] action:@selector(outsideTapped:)];
+        tap.delegate = guard;
+        [bg addGestureRecognizer:tap];
+        g_outsideTap = tap;
+
         AttachScene(win);
         win.hidden = YES;
         g_panelWin = win;
+        g_panelCard = blur;
     } @catch (NSException *e) { }
 }
 
@@ -467,11 +466,10 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!g_panelWin) return;
         EnsureMiniUI();
-        g_miniWin.center = g_panelWin.center;
+        g_miniWin.center = g_panelCard.center;
         g_miniWin.hidden = NO;
         g_panelWin.hidden = YES;
         g_panelExpanded = NO;
-        SetOverlayVisible(NO);
     });
 }
 
@@ -482,7 +480,6 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
         g_panelWin.hidden = NO;
         g_panelExpanded = YES;
         [self refreshPanel];
-        SetOverlayVisible(YES);
     });
 }
 
@@ -491,13 +488,17 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
 }
 
 + (void)handlePanelPan:(UIPanGestureRecognizer *)p {
+    UIView *card = g_panelCard;
+    if (!card) return;
     CGPoint t = [p translationInView:nil];
-    CGRect f = g_panelWin.frame;
+    CGRect f = card.frame;
     f.origin.x += t.x;
     f.origin.y += t.y;
+    if (f.origin.x < 0) f.origin.x = 0;
+    if (f.origin.x > ScreenW() - f.size.width) f.origin.x = ScreenW() - f.size.width;
     if (f.origin.y < 60) f.origin.y = 60;
     if (f.origin.y > ScreenH() - 120) f.origin.y = ScreenH() - 120;
-    g_panelWin.frame = f;
+    card.frame = f;
     [p setTranslation:CGPointZero inView:nil];
 }
 
@@ -546,7 +547,6 @@ static void CCUIHandleCallActive(BOOL active) {
         g_miniWin.hidden = NO;
         g_panelWin.hidden = YES;
         g_panelExpanded = NO;
-        SetOverlayVisible(NO);
         if (CCPrefBool(CC_K_ALWAYS_PANEL, NO)) [[CCUIHelper class] expandPanel];
     } else {
         if (g_sessionActive) {
@@ -557,7 +557,6 @@ static void CCUIHandleCallActive(BOOL active) {
         if (g_panelWin) g_panelWin.hidden = YES;
         if (g_miniWin) g_miniWin.hidden = YES;
         g_panelExpanded = NO;
-        SetOverlayVisible(NO);
         [[CCUIHelper class] hideCaption];
     }
 }

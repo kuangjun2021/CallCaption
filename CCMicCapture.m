@@ -107,16 +107,21 @@ static void StartEngine(void) {
 void CCMicStart(void) {
     if (g_running) return;
     @try {
-        [SFSpeechRecognizer requestAuthorization:^(SFSpeechRecognizerAuthorizationStatus status) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                CCLogf(@"mic speech auth: %ld", (long)status);
-                if (status != SFSpeechRecognizerAuthorizationStatusAuthorized) {
-                    CCLogf(@"mic: not authorized");
-                    return;
-                }
-                StartEngine();
-            });
-        }];
+        // v0.9.3: 绝不调用 requestAuthorization（SpringBoard 无 NSSpeechRecognitionUsageDescription，
+        // 申请权限会被 tccd 直接 SIGKILL 处决）。改为只读检查——权限需预先通过 TCC 数据库授予。
+        SFSpeechRecognizerAuthorizationStatus st = [SFSpeechRecognizer authorizationStatus];
+        CCLogf(@"mic: speech auth status %ld", (long)st);
+        if (st != SFSpeechRecognizerAuthorizationStatusAuthorized) {
+            CCLogf(@"mic: speech recognition NOT authorized (TCC grant missing)");
+            CCUIDeliverState(@"● 请在 TCC 授权后重试");
+            return;
+        }
+        if ([[AVAudioSession sharedInstance] recordPermission] != AVAudioSessionRecordPermissionGranted) {
+            CCLogf(@"mic: microphone NOT authorized (TCC grant missing)");
+            CCUIDeliverState(@"● 请在 TCC 授权后重试");
+            return;
+        }
+        StartEngine();
     } @catch (NSException *e) { }
 }
 

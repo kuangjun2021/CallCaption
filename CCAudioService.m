@@ -536,11 +536,11 @@ static void CheckArm(void) {
                 ch->lastFrameChangeAt = now;
             } else if (now - ch->lastFrameChangeAt > 8.0) {
                 if ([ch.tag isEqualToString:@"remote"]) {
-                    ch->tapPID = (ch->tapPID == CC_TAP_PID_SPEAKER)
+                    ch.tapPID = (ch.tapPID == CC_TAP_PID_SPEAKER)
                                  ? CC_TAP_PID_SYSTEM : CC_TAP_PID_SPEAKER;
                 }
                 CCLogf(@"%@: audio stalled (frames=%llu), restarting tap pid=%d",
-                       ch.tag, (unsigned long long)ch->frames, ch->tapPID);
+                       ch.tag, (unsigned long long)ch->frames, ch.tapPID);
                 [ch stop];
                 ch->lastAttempt = 0;
                 ch->lastFrameChangeAt = now;

@@ -7,11 +7,26 @@
 #define CC_DOMAIN @"net.user.callcaption"
 #define CC_NOTIF  @"net.user.callcaption.prefschanged"
 
+static void SLog(NSString *fmt, ...) {
+    @try {
+        va_list ap; va_start(ap, fmt);
+        NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
+        va_end(ap);
+        NSString *path = @"/var/mobile/Library/CallCaption/settings.log";
+        NSString *line = [NSString stringWithFormat:@"[%@] %@\n", [NSDate date], msg];
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (!fh) [line writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        else { [fh seekToEndOfFile]; [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; }
+    } @catch (NSException *e) { }
+}
+
 __attribute__((visibility("default")))
 @interface CallCaptionRootListController : PSListController
 @end
 
 @implementation CallCaptionRootListController
+
++ (void)load { SLog(@"bundle loaded"); }
 
 - (NSArray *)specifiers {
     if (!_specifiers) {
@@ -20,8 +35,21 @@ __attribute__((visibility("default")))
             b = [NSBundle bundleWithPath:@"/var/jb/Library/PreferenceBundles/CallCaptionPrefs.bundle"];
             if (b) self.bundle = b;
         }
+        SLog(@"specifiers: bundle=%@", b.bundlePath);
         _specifiers = [self loadSpecifiersFromPlistName:@"Root" target:self bundle:b];
-        NSLog(@"[CallCaption] specifiers=%lu bundle=%@", (unsigned long)_specifiers.count, b.bundlePath);
+        SLog(@"Root count=%lu", (unsigned long)_specifiers.count);
+        if (!_specifiers.count) {
+            _specifiers = [self loadSpecifiersFromPlistName:@"CallCaptionRootListController" target:self bundle:b];
+            SLog(@"fallback count=%lu", (unsigned long)_specifiers.count);
+        }
+        if (!_specifiers.count) {
+            Class PS = NSClassFromString(@"PSSpecifier");
+            PSSpecifier *g = [PS groupSpecifierWithName:@"CallCaption"];
+            PSSpecifier *t = [PS preferenceSpecifierNamed:@"加载失败：请把 settings.log 发给开发者"
+                                                   target:nil set:nil get:nil detail:nil
+                                                     cell:PSStaticTextCell edit:nil];
+            _specifiers = [@[g, t] mutableCopy];
+        }
     }
     return _specifiers;
 }

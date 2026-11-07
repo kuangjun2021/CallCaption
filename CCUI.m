@@ -30,6 +30,7 @@ static NSString *g_stateText;
 
 static UIView *g_panelCard;
 static UIWindow *g_settingsWin;
+static id g_panelGuard;
 
 static CGFloat ScreenW(void) { return [UIScreen mainScreen].bounds.size.width; }
 static CGFloat ScreenH(void) { return [UIScreen mainScreen].bounds.size.height; }
@@ -64,6 +65,16 @@ static void AttachScene(UIWindow *win) {
         }
     }
 }
+
+@interface CCPanelTapGuard : NSObject <UIGestureRecognizerDelegate>
+@property (nonatomic, weak) UIView *card;
+@end
+@implementation CCPanelTapGuard
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)g shouldReceiveTouch:(UITouch *)touch {
+    if (self.card && [touch.view isDescendantOfView:self.card]) return NO;
+    return YES;
+}
+@end
 
 // 在 SpringBoard 内直接弹出设置（不经过 Settings.app）
 static void CCOpenSettings(void) {
@@ -130,12 +141,6 @@ static void EnsurePanelUI(void) {
         bg.backgroundColor = [UIColor clearColor];
         [win addSubview:bg];
 
-        UIButton *catcher = [UIButton buttonWithType:UIButtonTypeCustom];
-        catcher.frame = bg.bounds;
-        catcher.backgroundColor = [UIColor clearColor];
-        [catcher addTarget:[CCUIHelper class] action:@selector(outsideTapped:)
-          forControlEvents:UIControlEventTouchUpInside];
-        [bg addSubview:catcher];
 
         UIVisualEffectView *blur = [[UIVisualEffectView alloc]
             initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark]];
@@ -194,6 +199,14 @@ static void EnsurePanelUI(void) {
         UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
             initWithTarget:[CCUIHelper class] action:@selector(openSettings:)];
         [blur addGestureRecognizer:lp];
+
+        CCPanelTapGuard *guard = [CCPanelTapGuard new];
+        guard.card = blur;
+        g_panelGuard = guard;
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
+            initWithTarget:[CCUIHelper class] action:@selector(outsideTapped:)];
+        tap.delegate = guard;
+        [bg addGestureRecognizer:tap];
 
         AttachScene(win);
         win.hidden = YES;

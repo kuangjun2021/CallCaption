@@ -99,8 +99,10 @@ static void CCSpeakEnglish(NSString *text) {
     BOOL onDevice;
     BOOL ttsPaused;              // 因 TTS 正在外放而暂停识别
     uint64_t frames;
-    uint64_t lastFrameSeen;      // 帧停滞看门狗
+    uint64_t audioBytes;         // 原始音频字节（不依赖识别请求）
+    uint64_t lastAudioSeen;
     CFAbsoluteTime lastFrameChangeAt;
+    CFAbsoluteTime lastRecogTry;
     CFAbsoluteTime lastAttempt;
     CFAbsoluteTime lastPartialAt;
     CFAbsoluteTime lastStatsAt;
@@ -140,6 +142,8 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
             SFSpeechAudioBufferRecognitionRequest *r = ch->req;
             AVAudioFormat *monoFmt = ch->mono;
             AVAudioFormat *srcFmt = ch->fmt;
+            if (buf->mAudioData && buf->mAudioDataByteSize > 0)
+                __atomic_add_fetch(&ch->audioBytes, buf->mAudioDataByteSize, __ATOMIC_RELAXED);
             if (r && monoFmt && srcFmt && buf->mAudioData && buf->mAudioDataByteSize > 0) {
                 const AudioStreamBasicDescription *sa = srcFmt.streamDescription;
                 UInt32 bpf = sa->mBytesPerFrame ? sa->mBytesPerFrame : 8;
@@ -255,8 +259,10 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
     restartPending = NO;
     onDevice = YES;
     frames = 0;
-    lastFrameSeen = 0;
+    audioBytes = 0;
+    lastAudioSeen = 0;
     lastFrameChangeAt = CFAbsoluteTimeGetCurrent();
+    lastRecogTry = 0;
     lastStatsAt = CFAbsoluteTimeGetCurrent();
     [self recogStart];
 
@@ -301,6 +307,7 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
 
 - (void)recogStart {
     if (!capturing) return;
+    lastRecogTry = CFAbsoluteTimeGetCurrent();
     @try {
         if (!recog) {
             recog = [[SFSpeechRecognizer alloc] initWithLocale:
@@ -327,6 +334,9 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
         }
         req = r;
         lastPartialAt = 0;
+        CCLogf(@"%@ recog: task start (auth=%ld avail=%d cloud=%d locale=%@)",
+               self.tag, (long)[SFSpeechRecognizer authorizationStatus],
+               recog.isAvailable, !CCPrefBool(CC_K_CLOUD_ASR, YES), self.locale);
 
         __weak CCChannel *weakSelf = self;
         SFSpeechRecognitionTask *t = [recog recognitionTaskWithRequest:r
@@ -531,9 +541,13 @@ static void CheckArm(void) {
         // 帧停滞看门狗：换通话/音频会话重建后 Tap 可能不再送音频，自动重挂
         for (CCChannel *ch in chans) {
             if (!ch->capturing) continue;
-            if (ch->frames != ch->lastFrameSeen) {
-                ch->lastFrameSeen = ch->frames;
+            if (ch->audioBytes != ch->lastAudioSeen) {
+                ch->lastAudioSeen = ch->audioBytes;
                 ch->lastFrameChangeAt = now;
+                if (!ch->req && now - ch->lastRecogTry > 5.0) {
+                    CCLogf(@"%@: audio flowing but no recognition request, restarting recog", ch.tag);
+                    [ch recogStart];
+                }
             } else if (now - ch->lastFrameChangeAt > 8.0) {
                 if ([ch.tag isEqualToString:@"remote"]) {
                     ch.tapPID = (ch.tapPID == CC_TAP_PID_SPEAKER)
@@ -549,11 +563,15 @@ static void CheckArm(void) {
 
         if (g_remote->capturing && now - g_remote->lastStatsAt >= 5.0) {
             g_remote->lastStatsAt = now;
-            CCLogf(@"remote: alive, frames=%llu", (unsigned long long)g_remote->frames);
+            CCLogf(@"remote: alive, audio=%llu frames=%llu",
+                   (unsigned long long)g_remote->audioBytes,
+                   (unsigned long long)g_remote->frames);
         }
         if (g_local->capturing && now - g_local->lastStatsAt >= 5.0) {
             g_local->lastStatsAt = now;
-            CCLogf(@"local: alive, frames=%llu", (unsigned long long)g_local->frames);
+            CCLogf(@"local: alive, audio=%llu frames=%llu",
+                   (unsigned long long)g_local->audioBytes,
+                   (unsigned long long)g_local->frames);
         }
     } @catch (NSException *e) { }
 }
@@ -585,7 +603,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.12.9)");
+        CCLogLine(@"audioservice started (v0.13.0)");
 
         g_stateQ = dispatch_queue_create("net.user.callcaption.audio", DISPATCH_QUEUE_SERIAL);
 

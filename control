@@ -1,7 +1,7 @@
 Package: net.user.callcaption
 Name: CallCaption
 Depends: mobilesubstrate
-Version: 0.12.4
+Version: 0.12.5
 Architecture: iphoneos-arm64
 Description: Live call translation captions with DeepL/AI engines, TTS and settings panel. Personal build.
 Maintainer: user <user@localhost>

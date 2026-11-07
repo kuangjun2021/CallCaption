@@ -29,7 +29,7 @@ static NSString *g_texts[4];       // 0 对方原文 / 1 对方译文 / 2 我方
 static NSString *g_stateText;
 
 static UITapGestureRecognizer *g_outsideTap;
-static id g_touchGuard;
+static UIWindow *g_overlayWin;
 
 static CGFloat ScreenW(void) { return [UIScreen mainScreen].bounds.size.width; }
 static CGFloat ScreenH(void) { return [UIScreen mainScreen].bounds.size.height; }
@@ -94,32 +94,30 @@ static void RefreshBoxes(void);
 }
 @end
 
-@interface CCUITouchGuard : NSObject <UIGestureRecognizerDelegate>
-@end
-@implementation CCUITouchGuard
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)g shouldReceiveTouch:(UITouch *)touch {
-    if (touch.window == g_panelWin || touch.window == g_miniWin) return NO;
-    return YES;
+// 展开面板时铺一层透明覆盖窗（低于面板、高于普通 App），点任意空白处收起面板。
+// 比“给 key window 加手势”可靠：不依赖当前是哪个 App、哪个 window。
+static void EnsureOverlay(void) {
+    if (g_overlayWin) return;
+    @try {
+        UIWindow *w = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+        w.windowLevel = UIWindowLevelStatusBar - 1;
+        w.backgroundColor = [UIColor clearColor];
+        UIViewController *vc = [[UIViewController alloc] init];
+        vc.view.backgroundColor = [UIColor clearColor];
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
+            initWithTarget:[CCUIHelper class] action:@selector(outsideTapped:)];
+        [vc.view addGestureRecognizer:tap];
+        w.rootViewController = vc;
+        AttachScene(w);
+        w.hidden = YES;
+        g_overlayWin = w;
+        g_outsideTap = tap;
+    } @catch (NSException *e) { }
 }
-@end
 
-static void SetOutsideTap(BOOL on) {
-    if (g_outsideTap) {
-        [g_outsideTap.view removeGestureRecognizer:g_outsideTap];
-        g_outsideTap = nil;
-    }
-    if (!on) return;
-    UIWindow *key = nil;
-    for (UIWindow *w in [UIApplication sharedApplication].windows) {
-        if (w.isKeyWindow) { key = w; break; }
-    }
-    if (!key) return;
-    if (!g_touchGuard) g_touchGuard = [CCUITouchGuard new];
-    g_outsideTap = [[UITapGestureRecognizer alloc]
-        initWithTarget:[CCUIHelper class] action:@selector(outsideTapped:)];
-    g_outsideTap.cancelsTouchesInView = NO;
-    g_outsideTap.delegate = (id<UIGestureRecognizerDelegate>)g_touchGuard;
-    [key addGestureRecognizer:g_outsideTap];
+static void SetOverlayVisible(BOOL on) {
+    if (on) EnsureOverlay();
+    if (g_overlayWin) g_overlayWin.hidden = !on;
 }
 
 // ---------- 控制面板 ----------
@@ -473,7 +471,7 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
         g_miniWin.hidden = NO;
         g_panelWin.hidden = YES;
         g_panelExpanded = NO;
-        SetOutsideTap(NO);
+        SetOverlayVisible(NO);
     });
 }
 
@@ -484,7 +482,7 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
         g_panelWin.hidden = NO;
         g_panelExpanded = YES;
         [self refreshPanel];
-        SetOutsideTap(YES);
+        SetOverlayVisible(YES);
     });
 }
 
@@ -548,7 +546,7 @@ static void CCUIHandleCallActive(BOOL active) {
         g_miniWin.hidden = NO;
         g_panelWin.hidden = YES;
         g_panelExpanded = NO;
-        SetOutsideTap(NO);
+        SetOverlayVisible(NO);
         if (CCPrefBool(CC_K_ALWAYS_PANEL, NO)) [[CCUIHelper class] expandPanel];
     } else {
         if (g_sessionActive) {
@@ -559,7 +557,7 @@ static void CCUIHandleCallActive(BOOL active) {
         if (g_panelWin) g_panelWin.hidden = YES;
         if (g_miniWin) g_miniWin.hidden = YES;
         g_panelExpanded = NO;
-        SetOutsideTap(NO);
+        SetOverlayVisible(NO);
         [[CCUIHelper class] hideCaption];
     }
 }

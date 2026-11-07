@@ -142,7 +142,52 @@ static void TranslateAI(NSString *text, NSString *from, NSString *to,
     [task resume];
 }
 
-// ---------- 对外入口（含缓存与主备降级） ----------
+// ---------- Google（免费 web 接口，无需 Key） ----------
+static void TranslateGoogle(NSString *text, NSString *from, NSString *to,
+                            void (^done)(NSString *, NSError *)) {
+    NSString *urlStr = [NSString stringWithFormat:
+        @"https://translate.googleapis.com/translate_a/single?client=gtx&sl=%@&tl=%@&dt=t&q=%@",
+        [from lowercaseString], [to lowercaseString], CCEscape(text)];
+    NSURL *url = [NSURL URLWithString:urlStr];
+    if (!url) {
+        done(nil, [NSError errorWithDomain:CC_DOMAIN code:21
+                                   userInfo:@{NSLocalizedDescriptionKey: @"bad google url"}]);
+        return;
+    }
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+    req.timeoutInterval = 15;
+
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req
+        completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+            @try {
+                if (err || !data) {
+                    done(nil, err ?: [NSError errorWithDomain:CC_DOMAIN code:22 userInfo:nil]);
+                    return;
+                }
+                id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                NSMutableString *out = [NSMutableString string];
+                if ([json isKindOfClass:[NSArray class]] && [(NSArray *)json count] > 0) {
+                    id segs = [(NSArray *)json objectAtIndex:0];
+                    if ([segs isKindOfClass:[NSArray class]]) {
+                        for (id seg in (NSArray *)segs) {
+                            if ([seg isKindOfClass:[NSArray class]] && [(NSArray *)seg count] > 0) {
+                                id piece = [(NSArray *)seg objectAtIndex:0];
+                                if ([piece isKindOfClass:[NSString class]]) [out appendString:piece];
+                            }
+                        }
+                    }
+                }
+                NSString *res = [out stringByTrimmingCharactersInSet:
+                                 [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                if (res.length) done(res, nil);
+                else done(nil, [NSError errorWithDomain:CC_DOMAIN code:23
+                                               userInfo:@{NSLocalizedDescriptionKey: @"bad google response"}]);
+            } @catch (NSException *e) { done(nil, nil); }
+        }];
+    [task resume];
+}
+
+// ---------- 对外入口（会话缓存 + 多引擎降级链） ----------
 
 void CCTranslate(NSString *text, NSString *fromLang, NSString *toLang,
                  void (^done)(NSString *translated)) {
@@ -158,38 +203,47 @@ void CCTranslate(NSString *text, NSString *fromLang, NSString *toLang,
         BOOL aiReady = CCPrefStr(CC_K_AI_URL, @"").length > 0 &&
                        CCPrefStr(CC_K_AI_KEY, @"").length > 0;
 
-        void (^handle)(NSString *res, NSString *primary, NSError *perr) =
-            ^(NSString *res, NSString *primary, NSError *perr) {
-            if (res.length) {
-                CachePut(text, res);
-                dispatch_async(dispatch_get_main_queue(), ^{ done(res); });
+        // 引擎优先级：选中的排第一，其余按可用性降级，Google 永远兜底
+        NSMutableArray<NSString *> *order = [NSMutableArray array];
+        if ([engine isEqualToString:@"deepl"]) {
+            if (dk.length) [order addObject:@"deepl"];
+            if (aiReady) [order addObject:@"ai"];
+            [order addObject:@"google"];
+        } else if ([engine isEqualToString:@"ai"]) {
+            if (aiReady) [order addObject:@"ai"];
+            if (dk.length) [order addObject:@"deepl"];
+            [order addObject:@"google"];
+        } else if ([engine isEqualToString:@"google"]) {
+            [order addObject:@"google"];
+            if (dk.length) [order addObject:@"deepl"];
+            if (aiReady) [order addObject:@"ai"];
+        } else { // auto
+            if (dk.length) [order addObject:@"deepl"];
+            if (aiReady) [order addObject:@"ai"];
+            [order addObject:@"google"];
+        }
+
+        __block NSUInteger idx = 0;
+        __block void (^next)(void) = nil;
+        next = ^{
+            if (idx >= order.count) {
+                dispatch_async(dispatch_get_main_queue(), ^{ done(nil); });
                 return;
             }
-            if (perr) CCLogf(@"translate[%@] failed: %@", primary, perr.localizedDescription);
-            // 降级：primary 失败，试另一个
-            if ([primary isEqualToString:@"deepl"] && aiReady) {
-                TranslateAI(text, fromLang, toLang, ^(NSString *r2, NSError *e2) {
-                    if (!r2.length && e2) CCLogf(@"translate[ai] failed: %@", e2.localizedDescription);
-                    if (r2.length) CachePut(text, r2);
-                    dispatch_async(dispatch_get_main_queue(), ^{ done(r2); });
-                });
-            } else if ([primary isEqualToString:@"ai"] && dk.length) {
-                TranslateDeepL(text, fromLang, toLang, ^(NSString *r2, NSError *e2) {
-                    if (!r2.length && e2) CCLogf(@"translate[deepl] failed: %@", e2.localizedDescription);
-                    if (r2.length) CachePut(text, r2);
-                    dispatch_async(dispatch_get_main_queue(), ^{ done(r2); });
-                });
-            } else {
-                dispatch_async(dispatch_get_main_queue(), ^{ done(nil); });
-            }
+            NSString *eng = order[idx++];
+            void (^cb)(NSString *, NSError *) = ^(NSString *r, NSError *e) {
+                if (r.length) {
+                    CachePut(text, r);
+                    dispatch_async(dispatch_get_main_queue(), ^{ done(r); });
+                    return;
+                }
+                if (e) CCLogf(@"translate[%@] failed: %@", eng, e.localizedDescription);
+                next();
+            };
+            if ([eng isEqualToString:@"deepl"]) TranslateDeepL(text, fromLang, toLang, cb);
+            else if ([eng isEqualToString:@"ai"]) TranslateAI(text, fromLang, toLang, cb);
+            else TranslateGoogle(text, fromLang, toLang, cb);
         };
-
-        if ([engine isEqualToString:@"deepl"] || ([engine isEqualToString:@"auto"] && dk.length)) {
-            TranslateDeepL(text, fromLang, toLang, ^(NSString *r, NSError *e) { handle(r, @"deepl", e); });
-        } else if ([engine isEqualToString:@"ai"] || ([engine isEqualToString:@"auto"] && aiReady)) {
-            TranslateAI(text, fromLang, toLang, ^(NSString *r, NSError *e) { handle(r, @"ai", e); });
-        } else {
-            done(nil); // 没配任何引擎
-        }
+        next();
     });
 }

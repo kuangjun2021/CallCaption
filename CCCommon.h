@@ -21,6 +21,8 @@
 #define CC_K_AI_URL           @"AIURL"
 #define CC_K_AI_KEY           @"AIKey"
 #define CC_K_AI_MODEL         @"AIModel"
+#define CC_K_REMOTE_LOCALE    @"RemoteLocale"     // 对方识别语言（默认 en-US）
+#define CC_K_LOCAL_LOCALE     @"LocalLocale"      // 我方识别语言（默认 zh-CN）
 #define CC_K_LARGE_CAPTIONS   @"LargeCaptions"
 #define CC_K_DIAGNOSTICS      @"Diagnostics"
 #define CC_K_CAPTION_X        @"CaptionX"

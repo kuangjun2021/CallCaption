@@ -1,9 +1,11 @@
-// CallCaptionRootListController.m — 真 bundle 设置面板控制器（Choicy/Crane 同款结构）
+// CallCaptionRootListController.m — 设置面板控制器
+// v0.11: PSListController 不会自动加载同名 plist，必须显式 loadSpecifiersFromPlistName:
 #import <UIKit/UIKit.h>
 
-// Preferences.framework（私有）中的列表控制器基类
+// Preferences.framework（私有）基类
 @interface PSListController : UIViewController
 @property (nonatomic, copy) NSArray *specifiers;
+- (NSArray *)loadSpecifiersFromPlistName:(NSString *)name target:(id)target;
 @end
 
 __attribute__((visibility("default")))
@@ -11,6 +13,13 @@ __attribute__((visibility("default")))
 @end
 
 @implementation CallCaptionRootListController
-// 空实现即可：PSListController 会自动加载 bundle 内与本类同名的
-// CallCaptionRootListController.plist 并把条目字典转换为 PSSpecifier
+
+- (NSArray *)specifiers {
+    NSArray *cur = [super specifiers];
+    if (cur.count) return cur;
+    NSArray *loaded = [self loadSpecifiersFromPlistName:@"CallCaptionRootListController" target:self];
+    if (loaded) [self setSpecifiers:loaded];
+    return loaded ?: @[];
+}
+
 @end

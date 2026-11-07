@@ -249,8 +249,13 @@ static void SBDeliverLine(NSString *line) {
     CCPrefsReload();   // 设置面板改动后即时生效
     NSString *dbg = line.length > 70 ? [line substringToIndex:70] : line;
     CCLogf(@"ui line: %@", dbg);
-    // 行格式： R|<译文>  /  I|<英文原文>  /  S|<状态>
-    if ([line hasPrefix:@"R|"]) {
+    // 行格式： R|<译文>  /  I|<原文>  /  S|<状态>
+    //          LR|<我方英文译文>  /  LI|<我方原文>（双向模式，不再重复 TTS）
+    if ([line hasPrefix:@"LR|"]) {
+        CCUIDeliverCaption([@"【我方】" stringByAppendingString:[line substringFromIndex:3]]);
+    } else if ([line hasPrefix:@"LI|"]) {
+        CCUIDeliverOriginal([@"我：" stringByAppendingString:[line substringFromIndex:3]]);
+    } else if ([line hasPrefix:@"R|"]) {
         NSString *t = [line substringFromIndex:2];
         CCUIDeliverCaption(t);
         if (CCPrefBool(CC_K_TTS_ENABLED, YES)) CCUISpeakText(t);

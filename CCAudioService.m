@@ -1,19 +1,15 @@
-// CCAudioService.m — v0.10 音频守护进程：系统级 Tap 抓取“对方声音”（无需钩子/无需 mediaserverd）
-// 架构参考（开源）：Lessica/TrollRecorder cli/call-recorder.mm
-//   ATAudioTapDescription(-2=speaker) + ATAudioTap + AudioQueue(kAudioQueueProperty_TapOutputBypass='qtob')
-// 权限：ldid 签名 entitlements（CanTapTelephony / CanRecordWithoutSessionActivation /
-//       SystemWideTap / app-tap / TCC allow）——见 entitlements/CallCaptionAudioService.plist
-//
-// 控制流：
-//   SB 侧按钮 → 创建/删除 /var/mobile/Library/CallCaption/armed → 本进程每秒检查
-//   识别结果 → CCTransportSendLine("I|原文"/"R|译文") → SB 字幕 + TTS
+// CCAudioService.m — v0.11 音频守护进程：双通道系统级 Tap（无钩子 / 不碰 mediaserverd）
+//   remote 通道：PID -2（speaker）→ 对方语言识别 → 中文 → 字幕 + SB 播报
+//   local  通道：PID -3（microphone）→ 我的语言识别 → 英文 → LR| + 守护进程英文 TTS（免提外放给对方）
+// 参考实现：Lessica/TrollRecorder（ATAudioTap + AudioQueue 'qtob'）
+// 权限：entitlements/CallCaptionAudioService.plist
 #import "CCCommon.h"
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <Speech/Speech.h>
 #import <objc/runtime.h>
 
-// ---------- 私有 AudioToolbox Tap API（iOS 16+，来自 TrollRecorder 逆向结果） ----------
+// ---------- 私有 AudioToolbox Tap API（iOS 16+） ----------
 @interface ATAudioTapDescription : NSObject
 - (instancetype)initTapInternalWithFormat:(AVAudioFormat *)format PIDs:(NSArray *)pids;
 - (instancetype)initProcessTapInternalWithFormat:(AVAudioFormat *)format PID:(int)pid;
@@ -23,47 +19,15 @@
 - (instancetype)initWithTapDescription:(ATAudioTapDescription *)desc;
 @end
 
-#define CC_TAP_PID_SPEAKER   (-2)          // 对方声音（扬声器/下行）
-#define CC_TAP_PID_MIC       (-3)          // 本机麦克风（预留）
-#define CC_AQ_TAP_FLAG       0x800         // 私有标志：允许 Tap 接入
-#define CC_AQ_PROP_TAP       0x71746F62    // 'qtob' TapOutputBypass
+#define CC_TAP_PID_SPEAKER   (-2)
+#define CC_TAP_PID_MIC       (-3)
+#define CC_AQ_TAP_FLAG       0x800
+#define CC_AQ_PROP_TAP       0x71746F62    // 'qtob'
 
-static AudioQueueRef g_queue;
-static ATAudioTap *g_tap;
-static AVAudioFormat *g_fmt;               // tap 格式：Float32 44.1k 2ch interleaved
-static AVAudioFormat *g_monoFmt;           // 识别格式：Float32 44.1k 1ch
-static SFSpeechRecognizer *g_recog;
-static SFSpeechAudioBufferRecognitionRequest *g_req;
-static SFSpeechRecognitionTask *g_task;
 static dispatch_queue_t g_stateQ;
-static BOOL g_capturing;
-static BOOL g_restartPending;
-static BOOL g_onDevice = YES;              // 优先离线识别，失败自动切服务器
-static uint64_t g_frames;
-static CFAbsoluteTime g_lastAttempt;
-static CFAbsoluteTime g_lastStatsLog;
-static CFAbsoluteTime g_lastAuthLog;
-static NSString *g_lastText;
-static CFAbsoluteTime g_lastTextAt;
-static CFAbsoluteTime g_lastPartialAt;
-static CFAbsoluteTime g_lastEngineWarnAt;
-
-// 翻译引擎是否已就绪（只看有没有配 Key，不发送任何密钥内容）
-static BOOL CCTranslationReady(void) {
-    NSString *engine = CCPrefStr(CC_K_ENGINE, @"auto").lowercaseString;
-    BOOL dk = CCPrefStr(CC_K_DEEPL_KEY, @"").length > 0;
-    BOOL ai = CCPrefStr(CC_K_AI_URL, @"").length > 0 &&
-              CCPrefStr(CC_K_AI_KEY, @"").length > 0;
-    if ([engine isEqualToString:@"deepl"]) return dk;
-    if ([engine isEqualToString:@"ai"]) return ai;
-    return dk || ai;
-}
-
-// ---------- 工具 ----------
-
-static void CCASendState(NSString *s) {
-    CCTransportSendLine([@"S|" stringByAppendingString:s]);
-}
+static CFAbsoluteTime g_muteUntil;         // 英文 TTS 播放期间两路识别都静音，防回声自激
+static CFAbsoluteTime g_lastPrefsLoad;
+static AVSpeechSynthesizer *g_enTTS;
 
 static BOOL CCContainsCJK(NSString *s) {
     NSUInteger n = s.length;
@@ -74,310 +38,423 @@ static BOOL CCContainsCJK(NSString *s) {
     return NO;
 }
 
-// ---------- 识别 ----------
+static NSString *CCTrim(NSString *s) {
+    return [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
 
-static void CCRecogRestart(double delay);
+static void CCASendState(NSString *s) {
+    CCTransportSendLine([@"S|" stringByAppendingString:s]);
+}
 
-static void CCDeliverFinal(NSString *text) {
-    NSString *t = [text stringByTrimmingCharactersInSet:
-                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (t.length < 2) return;
-    if (CCContainsCJK(t)) {
-        CCLogf(@"recog: skip CJK echo (%@)", t);
-        return;
-    }
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (g_lastText && [g_lastText isEqualToString:t] && (now - g_lastTextAt) < 3.0) return;
-    g_lastText = t;
-    g_lastTextAt = now;
-
-    CCPrefsReload();   // root 进程：每次取 mobile 域最新设置
-    BOOL ready = CCTranslationReady();
-    CCLogf(@"recog: %@ (translateReady=%d)", t, ready);
-    CCTransportSendLine([@"I|" stringByAppendingString:t]);
-    if (!CCPrefBool(CC_K_REMOTE_ENABLED, YES)) return;
-
-    if (!ready) {
-        CFAbsoluteTime now2 = CFAbsoluteTimeGetCurrent();
-        if (now2 - g_lastEngineWarnAt > 20.0) {
-            g_lastEngineWarnAt = now2;
-            CCLogf(@"trans: engine NOT configured (DeepLKey/AIKey empty)");
-            CCASendState(@"● 未配置翻译引擎：请到设置填写 DeepL Key 或 AI Key");
-        }
-        return;
-    }
-
-    CCTranslate(t, @"en", @"zh", ^(NSString *out) {
+// 英文 TTS（我方通道）：同时设置静音窗口，避免喇叭外放的英文被两路 Tap 又听回去
+static void CCSpeakEnglish(NSString *text) {
+    if (text.length == 0) return;
+    double dur = 1.0 + 0.075 * (double)text.length;
+    if (dur > 15.0) dur = 15.0;
+    g_muteUntil = CFAbsoluteTimeGetCurrent() + dur;
+    dispatch_async(dispatch_get_main_queue(), ^{
         @try {
-            if (out.length == 0) {
-                CCLogf(@"trans: FAILED (network/key rejected)");
-                return;
-            }
-            CCLogf(@"trans: %@", out);
-            CCTransportSendLine([@"R|" stringByAppendingString:out]);
-        } @catch (NSException *e) { }
+            if (!g_enTTS) g_enTTS = [[AVSpeechSynthesizer alloc] init];
+            AVSpeechUtterance *u = [[AVSpeechUtterance alloc] initWithString:text];
+            u.voice = [AVSpeechSynthesisVoice voiceWithLanguage:@"en-US"];
+            [g_enTTS speakUtterance:u];
+            CCLogf(@"local tts en: %@", text);
+        } @catch (NSException *e) { CCLogf(@"local tts exc: %@", e.reason); }
     });
 }
 
-static void CCRecogStart(void) {
-    if (!g_capturing) return;
-    @try {
-        if (!g_recog) {
-            g_recog = [[SFSpeechRecognizer alloc] initWithLocale:
-                       [NSLocale localeWithLocaleIdentifier:@"en-US"]];
-        }
-        if (!g_recog) { CCLogf(@"recog: init failed"); return; }
-        if (!g_recog.isAvailable) {
-            CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-            if (now - g_lastAuthLog > 10) {
-                g_lastAuthLog = now;
-                CCLogf(@"recog: recognizer not available");
-                CCASendState(@"● 识别服务不可用（重试中）");
-            }
-            CCRecogRestart(2.0);
-            return;
-        }
-        if (g_task) { [g_task cancel]; g_task = nil; }
-        if (g_req) { [g_req endAudio]; g_req = nil; }
+// ---------- 通道 ----------
 
-        SFSpeechAudioBufferRecognitionRequest *req =
-            [[SFSpeechAudioBufferRecognitionRequest alloc] init];
-        req.shouldReportPartialResults = YES;   // v0.10.2: 边说边显示
-        if (@available(iOS 13.0, *)) {
-            req.taskHint = SFSpeechRecognitionTaskHintDictation;
-            if (g_recog.supportsOnDeviceRecognition && g_onDevice)
-                req.requiresOnDeviceRecognition = YES;
-        }
-        g_req = req;
-        g_lastPartialAt = 0;
-
-        SFSpeechRecognitionTask *task = [g_recog recognitionTaskWithRequest:req
-                                       resultHandler:^(SFSpeechRecognitionResult *result, NSError *error) {
-            @try {
-                if (result) {
-                    NSString *txt = [result.bestTranscription.formattedString
-                        stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-                    if (result.isFinal) {
-                        CCDeliverFinal(txt);
-                        if (g_capturing) CCRecogRestart(0.25);
-                        return;
-                    }
-                    // 实时原文（0.7s 节流），让用户先看到东西
-                    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-                    if (txt.length > 1 && now - g_lastPartialAt > 0.7 &&
-                        !CCContainsCJK(txt)) {
-                        g_lastPartialAt = now;
-                        CCTransportSendLine([@"I|" stringByAppendingString:txt]);
-                    }
-                }
-                if (error) {
-                    NSInteger code = error.code;
-                    BOOL benign = (code == 216 /* cancelled */ || code == 1110 /* no speech */);
-                    if (!benign) {
-                        CCLogf(@"recog err: %@ (code=%ld onDevice=%d)",
-                               error.localizedDescription, (long)code, g_onDevice);
-                        if (g_onDevice) {
-                            g_onDevice = NO;
-                            CCLogf(@"recog: fallback to server recognition");
-                        }
-                    }
-                    if (g_capturing) CCRecogRestart(benign ? 0.5 : 1.5);
-                }
-            } @catch (NSException *e) { }
-        }];
-        g_task = task;
-
-        // v0.10.2: 连续说话时也每 8 秒收一段，避免一直等不到 final
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)8 * NSEC_PER_SEC),
-                       g_stateQ, ^{
-            if (g_capturing && g_task == task) {
-                CCLogf(@"recog: force finalize (8s chunk)");
-                [task finish];
-            }
-        });
-    } @catch (NSException *e) {
-        CCLogf(@"recog exc: %@", e.reason);
-        CCRecogRestart(2.0);
-    }
+@interface CCChannel : NSObject {
+@public
+    AudioQueueRef queue;
+    ATAudioTap *tap;
+    AVAudioFormat *fmt;
+    AVAudioFormat *mono;
+    SFSpeechRecognizer *recog;
+    SFSpeechAudioBufferRecognitionRequest *req;
+    SFSpeechRecognitionTask *task;
+    BOOL capturing;
+    BOOL restartPending;
+    BOOL onDevice;
+    uint64_t frames;
+    CFAbsoluteTime lastAttempt;
+    CFAbsoluteTime lastPartialAt;
+    CFAbsoluteTime lastStatsAt;
+    CFAbsoluteTime lastAuthLog;
+    NSString *lastText;
+    CFAbsoluteTime lastTextAt;
 }
+@property (nonatomic, assign) int tapPID;
+@property (nonatomic, copy) NSString *tag;
+@property (nonatomic, copy) NSString *locale;
+@property (nonatomic, copy) NSString *srcLang;
+@property (nonatomic, copy) NSString *dstLang;
+@property (nonatomic, assign) BOOL expectCJK;     // YES: 我方通道，识别中文
+@property (nonatomic, assign) BOOL speakEnglish;  // YES: 译文用英文 TTS 外放
+- (void)configure;
+- (BOOL)start;
+- (void)stop;
+- (void)recogStart;
+- (void)recogRestart:(double)delay;
+- (void)handleResult:(SFSpeechRecognitionResult *)result error:(NSError *)error;
+- (void)deliverFinal:(NSString *)text;
+@end
 
-static void CCRecogRestart(double delay) {
-    if (g_restartPending) return;
-    g_restartPending = YES;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
-                   g_stateQ, ^{
-        g_restartPending = NO;
-        if (g_capturing) CCRecogStart();
-    });
-}
+static CCChannel *g_remote;
+static CCChannel *g_local;
 
 // ---------- 音频回调 ----------
 
 static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
                          const AudioTimeStamp *ts, UInt32 numPackets,
                          const AudioStreamPacketDescription *descs) {
+    CCChannel *ch = (__bridge CCChannel *)ud;
     @autoreleasepool {
         @try {
-            SFSpeechAudioBufferRecognitionRequest *req = g_req;
-            AVAudioFormat *mono = g_monoFmt;
-            if (req && mono && buf->mAudioData && buf->mAudioDataByteSize > 0) {
-                const AudioStreamBasicDescription *srcFmt = g_fmt.streamDescription;
-                UInt32 srcBpf = srcFmt->mBytesPerFrame;
-                if (srcBpf == 0) srcBpf = 8;
-                AVAudioFrameCount frames = buf->mAudioDataByteSize / srcBpf;
-                if (frames > 0) {
+            SFSpeechAudioBufferRecognitionRequest *r = ch->req;
+            AVAudioFormat *monoFmt = ch->mono;
+            AVAudioFormat *srcFmt = ch->fmt;
+            if (r && monoFmt && srcFmt && buf->mAudioData && buf->mAudioDataByteSize > 0) {
+                const AudioStreamBasicDescription *sa = srcFmt.streamDescription;
+                UInt32 bpf = sa->mBytesPerFrame ? sa->mBytesPerFrame : 8;
+                AVAudioFrameCount nf = buf->mAudioDataByteSize / bpf;
+                if (nf > 0) {
                     AVAudioPCMBuffer *pcm =
-                        [[AVAudioPCMBuffer alloc] initWithPCMFormat:mono frameCapacity:frames];
+                        [[AVAudioPCMBuffer alloc] initWithPCMFormat:monoFmt frameCapacity:nf];
                     if (pcm) {
-                        pcm.frameLength = frames;
+                        pcm.frameLength = nf;
                         float *dst = pcm.floatChannelData[0];
                         const float *src = (const float *)buf->mAudioData;
-                        if (srcFmt->mChannelsPerFrame >= 2) {
-                            for (AVAudioFrameCount i = 0; i < frames; i++)
+                        if (sa->mChannelsPerFrame >= 2) {
+                            for (AVAudioFrameCount i = 0; i < nf; i++)
                                 dst[i] = (src[2 * i] + src[2 * i + 1]) * 0.5f;
                         } else {
-                            memcpy(dst, src, frames * sizeof(float));
+                            memcpy(dst, src, nf * sizeof(float));
                         }
-                        [req appendAudioPCMBuffer:pcm];
-                        __atomic_add_fetch(&g_frames, frames, __ATOMIC_RELAXED);
+                        [r appendAudioPCMBuffer:pcm];
+                        __atomic_add_fetch(&ch->frames, nf, __ATOMIC_RELAXED);
                     }
                 }
             }
         } @catch (NSException *e) { }
-        if (g_capturing && g_queue) AudioQueueEnqueueBuffer(g_queue, buf, 0, NULL);
+        if (ch->capturing && ch->queue) AudioQueueEnqueueBuffer(ch->queue, buf, 0, NULL);
     }
 }
 
-// ---------- 采集启停 ----------
+@implementation CCChannel
 
-static void StopCapture(void) {
-    if (!g_capturing && !g_queue) return;
-    g_capturing = NO;
-    g_restartPending = NO;
+- (void)configure {
+    if (self.tapPID == CC_TAP_PID_MIC) {
+        self.locale = CCPrefStr(CC_K_LOCAL_LOCALE, @"zh-CN");
+        self.srcLang = @"zh";
+        self.dstLang = @"en";
+        self.expectCJK = YES;
+        self.speakEnglish = YES;
+    } else {
+        self.locale = CCPrefStr(CC_K_REMOTE_LOCALE, @"en-US");
+        NSArray *parts = [self.locale componentsSeparatedByString:@"-"];
+        self.srcLang = parts.count > 0 ? parts[0] : @"en";
+        self.dstLang = @"zh";
+        self.expectCJK = NO;
+        self.speakEnglish = NO;
+    }
+}
+
+- (BOOL)start {
+    if (capturing) return YES;
+
+    SFSpeechRecognizerAuthorizationStatus auth = [SFSpeechRecognizer authorizationStatus];
+    if (auth != SFSpeechRecognizerAuthorizationStatusAuthorized) {
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (now - lastAuthLog > 10) {
+            lastAuthLog = now;
+            CCLogf(@"%@: speech NOT authorized (status=%ld)", self.tag, (long)auth);
+            CCASendState(@"● 语音识别未授权（查看 probe.log）");
+        }
+        return NO;
+    }
+
+    Class descCls = NSClassFromString(@"ATAudioTapDescription");
+    Class tapCls = NSClassFromString(@"ATAudioTap");
+    if (!descCls || !tapCls) {
+        CCLogf(@"%@: ATAudioTap classes not found", self.tag);
+        return NO;
+    }
+
+    fmt = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32
+                                           sampleRate:44100.0 channels:2 interleaved:YES];
+    mono = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32
+                                            sampleRate:44100.0 channels:1 interleaved:NO];
+    if (!fmt || !mono) { CCLogf(@"%@: format init failed", self.tag); return NO; }
+
+    id desc = nil;
+    if ([descCls instancesRespondToSelector:@selector(initTapInternalWithFormat:PIDs:)]) {
+        desc = [[descCls alloc] initTapInternalWithFormat:fmt PIDs:@[ @(self.tapPID) ]];
+    } else if ([descCls instancesRespondToSelector:@selector(initProcessTapInternalWithFormat:PID:)]) {
+        desc = [[descCls alloc] initProcessTapInternalWithFormat:fmt PID:self.tapPID];
+    }
+    if (!desc) { CCLogf(@"%@: description init failed", self.tag); return NO; }
+
+    tap = [[tapCls alloc] initWithTapDescription:desc];
+    if (!tap) { CCLogf(@"%@: tap init failed", self.tag); return NO; }
+
+    AudioStreamBasicDescription asbd = *fmt.streamDescription;
+    OSStatus st = AudioQueueNewInput(&asbd, CCAQCallback, (__bridge void *)self,
+                                     NULL, NULL, CC_AQ_TAP_FLAG, &queue);
+    if (st != noErr) {
+        CCLogf(@"%@: AudioQueueNewInput failed %d", self.tag, (int)st);
+        queue = NULL;
+        return NO;
+    }
+
+    st = AudioQueueSetProperty(queue, CC_AQ_PROP_TAP, (__bridge void *)tap, sizeof(void *));
+    if (st != noErr) {
+        CCLogf(@"%@: set TapOutputBypass failed %d", self.tag, (int)st);
+        AudioQueueDispose(queue, true);
+        queue = NULL;
+        return NO;
+    }
+
+    UInt32 bufSize = (UInt32)(asbd.mSampleRate * asbd.mBytesPerFrame * 0.25);
+    if (bufSize < 0x4000) bufSize = 0x4000;
+    if (bufSize > 0x50000) bufSize = 0x50000;
+    for (int i = 0; i < 3; i++) {
+        AudioQueueBufferRef b = NULL;
+        if (AudioQueueAllocateBuffer(queue, bufSize, &b) == noErr && b)
+            AudioQueueEnqueueBuffer(queue, b, 0, NULL);
+    }
+
+    capturing = YES;
+    restartPending = NO;
+    frames = 0;
+    lastStatsAt = CFAbsoluteTimeGetCurrent();
+    [self recogStart];
+
+    st = AudioQueueStart(queue, NULL);
+    if (st != noErr) {
+        CCLogf(@"%@: AudioQueueStart failed %d", self.tag, (int)st);
+        [self stop];
+        return NO;
+    }
+    CCLogf(@"%@: capture started (pid=%d, %@)", self.tag, self.tapPID, self.locale);
+    if (!self.expectCJK) CCASendState(@"● 已开始收听对方语音");
+    return YES;
+}
+
+- (void)stop {
+    if (!capturing && !queue) return;
+    capturing = NO;
+    restartPending = NO;
     @try {
-        if (g_task) { [g_task cancel]; g_task = nil; }
-        if (g_req) { [g_req endAudio]; g_req = nil; }
-        if (g_queue) { AudioQueueStop(g_queue, true); AudioQueueDispose(g_queue, true); g_queue = NULL; }
-        g_tap = nil;
-        CCLogf(@"tap: capture stopped");
+        if (task) { [task cancel]; task = nil; }
+        if (req) { [req endAudio]; req = nil; }
+        if (queue) {
+            AudioQueueStop(queue, true);
+            AudioQueueDispose(queue, true);
+            queue = NULL;
+        }
+        tap = nil;
+        CCLogf(@"%@: capture stopped", self.tag);
     } @catch (NSException *e) { }
 }
 
-static void StartCapture(void) {
-    if (g_capturing) return;
+- (void)recogStart {
+    if (!capturing) return;
     @try {
-        SFSpeechRecognizerAuthorizationStatus auth = [SFSpeechRecognizer authorizationStatus];
-        if (auth != SFSpeechRecognizerAuthorizationStatusAuthorized) {
-            CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-            if (now - g_lastAuthLog > 4) {
-                g_lastAuthLog = now;
-                CCLogf(@"tap: speech NOT authorized (status=%ld)", (long)auth);
-                CCASendState(@"● 语音识别未授权（service.log 查看详情）");
+        if (!recog) {
+            recog = [[SFSpeechRecognizer alloc] initWithLocale:
+                     [NSLocale localeWithLocaleIdentifier:self.locale ?: @"en-US"]];
+        }
+        if (!recog) { CCLogf(@"%@: recognizer init failed", self.tag); return; }
+        if (!recog.isAvailable) {
+            CCLogf(@"%@: recognizer not available", self.tag);
+            [self recogRestart:2.0];
+            return;
+        }
+        if (task) { [task cancel]; task = nil; }
+        if (req) { [req endAudio]; req = nil; }
+
+        SFSpeechAudioBufferRecognitionRequest *r =
+            [[SFSpeechAudioBufferRecognitionRequest alloc] init];
+        r.shouldReportPartialResults = YES;
+        if (@available(iOS 13.0, *)) {
+            r.taskHint = SFSpeechRecognitionTaskHintDictation;
+            if (recog.supportsOnDeviceRecognition && onDevice)
+                r.requiresOnDeviceRecognition = YES;
+        }
+        req = r;
+        lastPartialAt = 0;
+
+        __weak CCChannel *weakSelf = self;
+        SFSpeechRecognitionTask *t = [recog recognitionTaskWithRequest:r
+            resultHandler:^(SFSpeechRecognitionResult *result, NSError *error) {
+                CCChannel *ch = weakSelf;
+                if (!ch) return;
+                [ch handleResult:result error:error];
+            }];
+        task = t;
+
+        // 连续说话时每 8 秒强制收一段，避免迟迟等不到 final
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)8 * NSEC_PER_SEC),
+                       g_stateQ, ^{
+            CCChannel *ch = weakSelf;
+            if (ch && ch->capturing && ch->task == t) {
+                CCLogf(@"%@: force finalize (8s chunk)", ch.tag);
+                [t finish];
             }
-            return;
-        }
-
-        Class descCls = NSClassFromString(@"ATAudioTapDescription");
-        Class tapCls = NSClassFromString(@"ATAudioTap");
-        if (!descCls || !tapCls) {
-            CCLogf(@"tap: ATAudioTap classes not found");
-            CCASendState(@"● 系统不支持音频 Tap");
-            return;
-        }
-
-        g_fmt = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32
-                                                 sampleRate:44100.0
-                                                   channels:2
-                                                interleaved:YES];
-        g_monoFmt = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32
-                                                     sampleRate:44100.0
-                                                       channels:1
-                                                    interleaved:NO];
-        if (!g_fmt || !g_monoFmt) { CCLogf(@"tap: format init failed"); return; }
-
-        id desc = nil;
-        if ([descCls instancesRespondToSelector:@selector(initTapInternalWithFormat:PIDs:)]) {
-            desc = [[descCls alloc] initTapInternalWithFormat:g_fmt
-                                                         PIDs:@[ @(CC_TAP_PID_SPEAKER) ]];
-        } else if ([descCls instancesRespondToSelector:@selector(initProcessTapInternalWithFormat:PID:)]) {
-            desc = [[descCls alloc] initProcessTapInternalWithFormat:g_fmt
-                                                                 PID:CC_TAP_PID_SPEAKER];
-        }
-        if (!desc) { CCLogf(@"tap: description init failed"); return; }
-
-        g_tap = [[tapCls alloc] initWithTapDescription:desc];
-        if (!g_tap) { CCLogf(@"tap: tap init failed"); return; }
-
-        AudioStreamBasicDescription asbd = *g_fmt.streamDescription;
-        OSStatus st = AudioQueueNewInput(&asbd, CCAQCallback, NULL, NULL, NULL,
-                                         CC_AQ_TAP_FLAG, &g_queue);
-        if (st != noErr) {
-            CCLogf(@"tap: AudioQueueNewInput failed %d", (int)st);
-            CCASendState(@"● 音频队列创建失败");
-            g_queue = NULL;
-            return;
-        }
-
-        st = AudioQueueSetProperty(g_queue, CC_AQ_PROP_TAP, (__bridge void *)g_tap, sizeof(void *));
-        if (st != noErr) {
-            CCLogf(@"tap: set TapOutputBypass failed %d", (int)st);
-            CCASendState(@"● Tap 挂载失败（权限不足？）");
-            AudioQueueDispose(g_queue, true);
-            g_queue = NULL;
-            return;
-        }
-
-        UInt32 bufSize = (UInt32)(asbd.mSampleRate * asbd.mBytesPerFrame * 0.25);
-        if (bufSize < 0x4000) bufSize = 0x4000;
-        if (bufSize > 0x50000) bufSize = 0x50000;
-        for (int i = 0; i < 3; i++) {
-            AudioQueueBufferRef b = NULL;
-            if (AudioQueueAllocateBuffer(g_queue, bufSize, &b) == noErr && b)
-                AudioQueueEnqueueBuffer(g_queue, b, 0, NULL);
-        }
-
-        g_capturing = YES;
-        g_restartPending = NO;
-        g_frames = 0;
-        g_lastStatsLog = CFAbsoluteTimeGetCurrent();
-        CCRecogStart();
-
-        st = AudioQueueStart(g_queue, NULL);
-        if (st != noErr) {
-            CCLogf(@"tap: AudioQueueStart failed %d", (int)st);
-            CCASendState(@"● 音频启动失败");
-            StopCapture();
-            return;
-        }
-        CCLogf(@"tap: capture started (pid=%d %.0fHz %uch)", CC_TAP_PID_SPEAKER,
-               asbd.mSampleRate, asbd.mChannelsPerFrame);
-        CCASendState(@"● 已开始收听对方语音");
+        });
     } @catch (NSException *e) {
-        CCLogf(@"tap: start exc %@", e.reason);
+        CCLogf(@"%@: recog exc %@", self.tag, e.reason);
+        [self recogRestart:2.0];
     }
 }
+
+- (void)recogRestart:(double)delay {
+    if (restartPending) return;
+    restartPending = YES;
+    __weak CCChannel *weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
+                   g_stateQ, ^{
+        CCChannel *ch = weakSelf;
+        if (!ch) return;
+        ch->restartPending = NO;
+        if (ch->capturing) [ch recogStart];
+    });
+}
+
+- (void)handleResult:(SFSpeechRecognitionResult *)result error:(NSError *)error {
+    @try {
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        BOOL muted = (now < g_muteUntil);
+
+        if (result) {
+            NSString *txt = CCTrim(result.bestTranscription.formattedString);
+            if (result.isFinal) {
+                if (!muted) [self deliverFinal:txt];
+                if (capturing) [self recogRestart:0.25];
+                return;
+            }
+            if (!muted && txt.length > 1 && now - lastPartialAt > 0.7) {
+                lastPartialAt = now;
+                BOOL cjk = CCContainsCJK(txt);
+                BOOL ok = self.expectCJK ? cjk : !cjk;
+                if (ok) {
+                    NSString *prefix = self.expectCJK ? @"LI|" : @"I|";
+                    CCTransportSendLine([prefix stringByAppendingString:txt]);
+                }
+            }
+        }
+
+        if (error) {
+            NSInteger code = error.code;
+            BOOL benign = (code == 216 /* cancelled */ || code == 1110 /* no speech */);
+            if (!benign) {
+                CCLogf(@"%@ recog err: %@ (code=%ld onDevice=%d)",
+                       self.tag, error.localizedDescription, (long)code, onDevice);
+                if (onDevice) {
+                    onDevice = NO;
+                    CCLogf(@"%@: fallback to server recognition", self.tag);
+                }
+            }
+            if (capturing) [self recogRestart:benign ? 0.5 : 1.5];
+        }
+    } @catch (NSException *e) { }
+}
+
+- (void)deliverFinal:(NSString *)text {
+    NSString *t = CCTrim(text);
+    if (t.length < 2) return;
+    BOOL cjk = CCContainsCJK(t);
+    if (self.expectCJK && !cjk) return;      // 我方通道只收中文（滤掉英文回声）
+    if (!self.expectCJK && cjk) return;      // 对方通道只收非中文（滤掉中文播报回声）
+
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (lastText && [lastText isEqualToString:t] && (now - lastTextAt) < 3.0) return;
+    lastText = t;
+    lastTextAt = now;
+
+    CCPrefsReload();
+    CCLogf(@"%@ recog: %@", self.tag, t);
+    NSString *ip = self.expectCJK ? @"LI|" : @"I|";
+    CCTransportSendLine([ip stringByAppendingString:t]);
+
+    if (self.expectCJK && !CCPrefBool(CC_K_LOCAL_ENABLED, NO)) return;
+    if (!self.expectCJK && !CCPrefBool(CC_K_REMOTE_ENABLED, YES)) return;
+
+    __weak CCChannel *weakSelf = self;
+    CCTranslate(t, self.srcLang, self.dstLang, ^(NSString *out) {
+        CCChannel *ch = weakSelf;
+        if (!ch) return;
+        if (out.length == 0) {
+            CCLogf(@"%@ trans FAILED", ch.tag);
+            return;
+        }
+        CCLogf(@"%@ trans: %@", ch.tag, out);
+        NSString *rp = ch.expectCJK ? @"LR|" : @"R|";
+        CCTransportSendLine([rp stringByAppendingString:out]);
+        if (ch.expectCJK) CCSpeakEnglish(out);   // 我方译文：英文外放给对方
+    });
+}
+
+@end
 
 // ---------- armed 文件监视 ----------
 
 static void CheckArm(void) {
     @try {
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (now - g_lastPrefsLoad > 2.0) {
+            g_lastPrefsLoad = now;
+            CCPrefsReload();
+        }
+
         BOOL armed = [[NSFileManager defaultManager] fileExistsAtPath:CC_ARM_PATH];
         if (!armed) {
-            if (g_capturing) StopCapture();
+            [g_remote stop];
+            [g_local stop];
             return;
         }
-        if (g_capturing) {
-            CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-            if (now - g_lastStatsLog >= 5.0) {
-                g_lastStatsLog = now;
-                CCLogf(@"tap: alive, PCM frames=%llu", (unsigned long long)g_frames);
+
+        // 对方通道
+        NSString *oldRemoteLocale = g_remote.locale;
+        [g_remote configure];
+        if (g_remote->capturing && oldRemoteLocale &&
+            ![oldRemoteLocale isEqualToString:g_remote.locale]) {
+            CCLogf(@"remote: locale changed %@ -> %@, restart", oldRemoteLocale, g_remote.locale);
+            [g_remote stop];
+        }
+        if (!g_remote->capturing && now - g_remote->lastAttempt > 3.0) {
+            g_remote->lastAttempt = now;
+            [g_remote start];
+        }
+
+        // 我方通道（双向模式）
+        BOOL localOn = CCPrefBool(CC_K_LOCAL_ENABLED, NO);
+        if (localOn) {
+            NSString *oldLocalLocale = g_local.locale;
+            [g_local configure];
+            if (g_local->capturing && oldLocalLocale &&
+                ![oldLocalLocale isEqualToString:g_local.locale]) {
+                CCLogf(@"local: locale changed %@ -> %@, restart", oldLocalLocale, g_local.locale);
+                [g_local stop];
             }
-            return;
+            if (!g_local->capturing && now - g_local->lastAttempt > 3.0) {
+                g_local->lastAttempt = now;
+                [g_local start];
+            }
+        } else if (g_local->capturing) {
+            [g_local stop];
         }
-        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-        if (now - g_lastAttempt < 3.0) return;
-        g_lastAttempt = now;
-        StartCapture();
+
+        if (g_remote->capturing && now - g_remote->lastStatsAt >= 5.0) {
+            g_remote->lastStatsAt = now;
+            CCLogf(@"remote: alive, frames=%llu", (unsigned long long)g_remote->frames);
+        }
+        if (g_local->capturing && now - g_local->lastStatsAt >= 5.0) {
+            g_local->lastStatsAt = now;
+            CCLogf(@"local: alive, frames=%llu", (unsigned long long)g_local->frames);
+        }
     } @catch (NSException *e) { }
 }
 
@@ -408,9 +485,19 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.10.3)");
+        CCLogLine(@"audioservice started (v0.11.0)");
 
         g_stateQ = dispatch_queue_create("net.user.callcaption.audio", DISPATCH_QUEUE_SERIAL);
+
+        g_remote = [[CCChannel alloc] init];
+        g_remote.tapPID = CC_TAP_PID_SPEAKER;
+        g_remote.tag = @"remote";
+        [g_remote configure];
+
+        g_local = [[CCChannel alloc] init];
+        g_local.tapPID = CC_TAP_PID_MIC;
+        g_local.tag = @"local";
+        [g_local configure];
 
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
                                         NULL, &CCDaemonNotifCB, NULL, NULL,

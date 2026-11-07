@@ -192,9 +192,13 @@ static void EnsureButtonUI(void) {
             initWithTarget:[CCUIHelper class] action:@selector(handlePan:)];
         [btn addGestureRecognizer:pan];
 
-        [win addSubview:btn];
+        // v0.9.1 修复：rootViewController 的视图会覆盖 window 直属子视图并吞掉触摸——
+        // 必须把按钮加到 vc.view 上（此前按钮看得见点不着就是这个 bug）
         UIViewController *vc = [[UIViewController alloc] init];
+        vc.view.backgroundColor = [UIColor clearColor];
+        vc.view.frame = win.bounds;
         win.rootViewController = vc;
+        [vc.view addSubview:btn];
         // v0.8.3: windowScene 关联（否则 iOS 13+ 窗口不显示）
         if (@available(iOS 13.0, *)) {
             for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {

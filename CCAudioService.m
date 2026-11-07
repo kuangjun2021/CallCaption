@@ -28,6 +28,7 @@ static dispatch_queue_t g_stateQ;
 static CFAbsoluteTime g_muteUntil;         // 英文 TTS 播放期间静音，防回声自激
 static CFAbsoluteTime g_ttsUntil;          // SB 中文播报窗口（从 tts_until 文件读取）
 static CFAbsoluteTime g_lastPrefsLoad;
+static CFAbsoluteTime g_lastTransWarn;     // 翻译失败提示节流
 static AVSpeechSynthesizer *g_enTTS;
 
 static BOOL CCContainsCJK(NSString *s) {
@@ -72,7 +73,9 @@ static void CCSpeakEnglish(NSString *text) {
         @try {
             if (!g_enTTS) g_enTTS = [[AVSpeechSynthesizer alloc] init];
             AVSpeechUtterance *u = [[AVSpeechUtterance alloc] initWithString:text];
-            u.voice = [AVSpeechSynthesisVoice voiceWithLanguage:@"en-US"];
+            NSString *vid = CCPrefStr(CC_K_LOCAL_VOICE, @"");
+            AVSpeechSynthesisVoice *v = vid.length ? [AVSpeechSynthesisVoice voiceWithIdentifier:vid] : nil;
+            u.voice = v ?: [AVSpeechSynthesisVoice voiceWithLanguage:@"en-US"];
             [g_enTTS speakUtterance:u];
             CCLogf(@"local tts en: %@", text);
         } @catch (NSException *e) { CCLogf(@"local tts exc: %@", e.reason); }
@@ -95,6 +98,8 @@ static void CCSpeakEnglish(NSString *text) {
     BOOL onDevice;
     BOOL ttsPaused;              // 因 TTS 正在外放而暂停识别
     uint64_t frames;
+    uint64_t lastFrameSeen;      // 帧停滞看门狗
+    CFAbsoluteTime lastFrameChangeAt;
     CFAbsoluteTime lastAttempt;
     CFAbsoluteTime lastPartialAt;
     CFAbsoluteTime lastStatsAt;
@@ -249,6 +254,8 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
     restartPending = NO;
     onDevice = YES;
     frames = 0;
+    lastFrameSeen = 0;
+    lastFrameChangeAt = CFAbsoluteTimeGetCurrent();
     lastStatsAt = CFAbsoluteTimeGetCurrent();
     [self recogStart];
 
@@ -430,6 +437,11 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
         if (!ch) return;
         if (out.length == 0) {
             CCLogf(@"%@ trans FAILED", ch.tag);
+            CFAbsoluteTime n2 = CFAbsoluteTimeGetCurrent();
+            if (n2 - g_lastTransWarn > 30.0) {
+                g_lastTransWarn = n2;
+                CCASendState(@"● 翻译服务暂不可用，正在自动重试");
+            }
             return;
         }
         CCLogf(@"%@ trans: %@", ch.tag, out);
@@ -511,6 +523,21 @@ static void CheckArm(void) {
             }
         }
 
+        // 帧停滞看门狗：换通话/音频会话重建后 Tap 可能不再送音频，自动重挂
+        for (CCChannel *ch in chans) {
+            if (!ch->capturing) continue;
+            if (ch->frames != ch->lastFrameSeen) {
+                ch->lastFrameSeen = ch->frames;
+                ch->lastFrameChangeAt = now;
+            } else if (now - ch->lastFrameChangeAt > 15.0) {
+                CCLogf(@"%@: audio stalled (frames=%llu), restarting tap",
+                       ch.tag, (unsigned long long)ch->frames);
+                [ch stop];
+                ch->lastAttempt = 0;
+                ch->lastFrameChangeAt = now;
+            }
+        }
+
         if (g_remote->capturing && now - g_remote->lastStatsAt >= 5.0) {
             g_remote->lastStatsAt = now;
             CCLogf(@"remote: alive, frames=%llu", (unsigned long long)g_remote->frames);
@@ -549,7 +576,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.12.0)");
+        CCLogLine(@"audioservice started (v0.12.1)");
 
         g_stateQ = dispatch_queue_create("net.user.callcaption.audio", DISPATCH_QUEUE_SERIAL);
 

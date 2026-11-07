@@ -1,6 +1,7 @@
 // CallCaptionRootListController.m — v0.12 设置面板
 // 方案：PSListController 子类（宿主类型正确，不闪退）+ 代码动态创建 PSSpecifier（不依赖 plist 加载）
 #import <UIKit/UIKit.h>
+#import <AVFoundation/AVFoundation.h>
 
 #define CC_DOMAIN @"net.user.callcaption"
 #define CC_NOTIF  @"net.user.callcaption.prefschanged"
@@ -97,7 +98,7 @@ __attribute__((visibility("default")))
                                                         set:@selector(setPrefValue:specifier:)
                                                         get:@selector(getPrefValue:)
                                                      detail:nil
-                                                       cell:CCPSPSListItemsCell
+                                                       cell:CCPSLinkListCell
                                                        edit:nil];
     [sp setProperty:key forKey:@"key"];
     [sp setProperty:def forKey:@"default"];
@@ -106,6 +107,51 @@ __attribute__((visibility("default")))
     [sp setProperty:vals forKey:@"values"];
     [sp setProperty:titles forKey:@"titles"];
     return sp;
+}
+
+// 音色列表：值 = voice identifier，标题 = 系统给出的名字
+- (PSSpecifier *)voiceChoice:(NSString *)title key:(NSString *)key prefix:(NSString *)prefix {
+    NSMutableArray *vals = [NSMutableArray arrayWithObject:@""];
+    NSMutableArray *titles = [NSMutableArray arrayWithObject:@"系统默认"];
+    for (AVSpeechSynthesisVoice *v in [AVSpeechSynthesisVoice speechVoices]) {
+        if ([[v.language lowercaseString] hasPrefix:prefix]) {
+            [vals addObject:v.identifier];
+            NSString *q = (v.quality == AVSpeechSynthesisVoiceQualityEnhanced) ? @" · 增强" : @"";
+            [titles addObject:[NSString stringWithFormat:@"%@（%@%@）", v.name, v.language, q]];
+        }
+    }
+    return [self choice:title key:key def:@"" values:vals titles:titles];
+}
+
+- (PSSpecifier *)button:(NSString *)title action:(NSString *)action {
+    PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:title
+                                                     target:self set:nil get:nil detail:nil
+                                                       cell:CCPSPSButtonCell edit:nil];
+    [sp setProperty:action forKey:@"action"];
+    return sp;
+}
+
+- (void)openLog {
+    NSString *path = @"/var/mobile/Library/CallCaption/probe.log";
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"诊断日志"
+                                                                  message:path
+                                                           preferredStyle:UIAlertControllerStyleActionSheet];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"用 Filza 打开" style:UIAlertActionStyleDefault
+                                            handler:^(__unused UIAlertAction *a) {
+        NSURL *u = [NSURL URLWithString:@"filza://view/var/mobile/Library/CallCaption/probe.log"];
+        [[UIApplication sharedApplication] openURL:u options:@{} completionHandler:nil];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"复制路径" style:UIAlertActionStyleDefault
+                                            handler:^(__unused UIAlertAction *a) {
+        [UIPasteboard generalPasteboard].string = path;
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    if (sheet.popoverPresentationController) {
+        sheet.popoverPresentationController.sourceView = self.view;
+        sheet.popoverPresentationController.sourceRect =
+            CGRectMake(self.view.bounds.size.width / 2, self.view.bounds.size.height / 2, 1, 1);
+    }
+    [self presentViewController:sheet animated:YES completion:nil];
 }
 
 - (NSArray *)buildSpecifiers {
@@ -120,6 +166,7 @@ __attribute__((visibility("default")))
     [a addObject:[self toggle:@"显示译文" key:@"ShowTranslated" def:YES]];
     [a addObject:[self toggle:@"中文字幕语音播报" key:@"TTSEnabled" def:YES]];
     [a addObject:[self toggle:@"大字幕" key:@"LargeCaptions" def:NO]];
+    [a addObject:[self toggle:@"面板常驻显示（非通话也显示）" key:@"AlwaysShowPanel" def:NO]];
 
     [a addObject:[self group:@"语言"
                       footer:@"识别语言代码（BCP-47）：对方英文填 en-US，日文 ja-JP，韩文 ko-KR；我的语言通常 zh-CN。"]];
@@ -129,8 +176,9 @@ __attribute__((visibility("default")))
     [a addObject:[self group:@"翻译引擎"
                       footer:@"自动 = 已填 Key 优先，失败自动切换；Google 不填 Key 用免费接口，填了用 Cloud Translation。"]];
     [a addObject:[self choice:@"引擎" key:@"Engine" def:@"auto"
-                        values:@[@"auto", @"deepl", @"google", @"ai"]
-                        titles:@[@"自动（推荐）", @"DeepL", @"Google", @"AI 自定义"]]];
+                        values:@[@"auto", @"deepl", @"bing", @"google", @"ai"]
+                        titles:@[@"自动（推荐）", @"DeepL", @"Bing（免费·国内推荐）",
+                                 @"Google（免费 / Key）", @"AI 自定义"]]];
     [a addObject:[self text:@"DeepL API Key" key:@"DeepLKey" def:nil secure:YES]];
     [a addObject:[self text:@"Google API Key" key:@"GoogleKey" def:nil secure:YES]];
 
@@ -141,10 +189,16 @@ __attribute__((visibility("default")))
     [a addObject:[self text:@"AI API Key" key:@"AIKey" def:nil secure:YES]];
     [a addObject:[self text:@"AI 模型名" key:@"AIModel" def:@"deepseek-chat" secure:NO]];
 
+    [a addObject:[self group:@"播报音色"
+                      footer:@"中文播报用于对方字幕，英文播报用于我方翻译（双向模式）。列表由系统已安装语音生成。"]];
+    [a addObject:[self voiceChoice:@"中文播报音色" key:@"TTSVoice" prefix:@"zh"]];
+    [a addObject:[self voiceChoice:@"英文播报音色" key:@"LocalVoice" prefix:@"en"]];
+
     [a addObject:[self group:@"识别与诊断"
                       footer:@"日志：/var/mobile/Library/CallCaption/probe.log"]];
     [a addObject:[self toggle:@"云端语音识别（更准，需联网）" key:@"CloudASR" def:YES]];
     [a addObject:[self toggle:@"诊断日志" key:@"Diagnostics" def:YES]];
+    [a addObject:[self button:@"打开诊断日志" action:@"openLog"]];
 
     return a;
 }

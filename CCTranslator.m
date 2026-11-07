@@ -263,6 +263,98 @@ static void TranslateGoogle(NSString *text, NSString *from, NSString *to,
     }
 }
 
+// ---------- Bing（Edge 免费接口：国内可用、无需 Key） ----------
+static NSString *g_bingToken = nil;
+static CFAbsoluteTime g_bingTokenAt = 0;
+
+static NSString *BingLang(NSString *code) {
+    NSString *c = [code lowercaseString];
+    if (c.length == 0 || [c isEqualToString:@"auto"]) return @"";
+    if ([c isEqualToString:@"zh"] || [c hasPrefix:@"zh-cn"] || [c hasPrefix:@"zh-hans"])
+        return @"zh-Hans";
+    if ([c hasPrefix:@"zh-tw"] || [c hasPrefix:@"zh-hant"]) return @"zh-Hant";
+    return c;
+}
+
+static void TranslateBing(NSString *text, NSString *from, NSString *to,
+                          void (^done)(NSString *, NSError *)) {
+    void (^doTranslate)(NSString *) = ^(NSString *token) {
+        NSString *fl = BingLang(from);
+        NSString *tl = BingLang(to);
+        NSString *urlStr = [NSString stringWithFormat:
+            @"https://api-edge.cognitive.microsofttranslator.com/translate?api-version=3.0&to=%@%@",
+            CCEscape(tl), fl.length ? [NSString stringWithFormat:@"&from=%@", CCEscape(fl)] : @""];
+        NSURL *url = [NSURL URLWithString:urlStr];
+        if (!url) {
+            done(nil, [NSError errorWithDomain:CC_DOMAIN code:41
+                                       userInfo:@{NSLocalizedDescriptionKey: @"bad bing url"}]);
+            return;
+        }
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+        req.HTTPMethod = @"POST";
+        [req setValue:[NSString stringWithFormat:@"Bearer %@", token]
+   forHTTPHeaderField:@"Authorization"];
+        [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+        req.HTTPBody = [NSJSONSerialization dataWithJSONObject:@[@{@"Text": text}]
+                                                       options:0 error:nil];
+        req.timeoutInterval = 15;
+
+        [[[NSURLSession sharedSession] dataTaskWithRequest:req
+            completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+                @try {
+                    if (err || !data) {
+                        done(nil, err ?: [NSError errorWithDomain:CC_DOMAIN code:42 userInfo:nil]);
+                        return;
+                    }
+                    id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                    NSString *out = nil;
+                    if ([json isKindOfClass:[NSArray class]] && [(NSArray *)json count] > 0) {
+                        id first = [(NSArray *)json objectAtIndex:0];
+                        if ([first isKindOfClass:[NSDictionary class]]) {
+                            id tr = first[@"translations"];
+                            if ([tr isKindOfClass:[NSArray class]] && [tr count] > 0) {
+                                id t0 = tr[0];
+                                if ([t0 isKindOfClass:[NSDictionary class]]) out = t0[@"text"];
+                            }
+                        }
+                    }
+                    if ([out isKindOfClass:[NSString class]] && out.length)
+                        done(out, nil);
+                    else done(nil, [NSError errorWithDomain:CC_DOMAIN code:43
+                                                   userInfo:@{NSLocalizedDescriptionKey: @"bad bing response"}]);
+                } @catch (NSException *e) { done(nil, nil); }
+            }] resume];
+    };
+
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (g_bingToken.length && now - g_bingTokenAt < 480) {
+        doTranslate(g_bingToken);
+        return;
+    }
+    NSMutableURLRequest *treq = [NSMutableURLRequest requestWithURL:
+        [NSURL URLWithString:@"https://edge.microsoft.com/translate/auth"]];
+    treq.timeoutInterval = 10;
+    [[[NSURLSession sharedSession] dataTaskWithRequest:treq
+        completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+            @try {
+                NSString *token = nil;
+                if (data) {
+                    token = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]
+                             stringByTrimmingCharactersInSet:
+                             [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                }
+                if (token.length) {
+                    g_bingToken = token;
+                    g_bingTokenAt = CFAbsoluteTimeGetCurrent();
+                    doTranslate(token);
+                } else {
+                    done(nil, err ?: [NSError errorWithDomain:CC_DOMAIN code:44
+                                                     userInfo:@{NSLocalizedDescriptionKey: @"bing auth failed"}]);
+                }
+            } @catch (NSException *e) { done(nil, nil); }
+        }] resume];
+}
+
 // ---------- 对外入口（会话缓存 + 多引擎降级链） ----------
 
 static void CCTranslateTry(NSArray<NSString *> *order, NSUInteger idx,
@@ -284,6 +376,7 @@ static void CCTranslateTry(NSArray<NSString *> *order, NSUInteger idx,
     };
     if ([eng isEqualToString:@"deepl"]) TranslateDeepL(text, fromLang, toLang, cb);
     else if ([eng isEqualToString:@"ai"]) TranslateAI(text, fromLang, toLang, cb);
+    else if ([eng isEqualToString:@"bing"]) TranslateBing(text, fromLang, toLang, cb);
     else TranslateGoogle(text, fromLang, toLang, cb);
 }
 
@@ -301,23 +394,32 @@ void CCTranslate(NSString *text, NSString *fromLang, NSString *toLang,
         BOOL aiReady = CCPrefStr(CC_K_AI_URL, @"").length > 0 &&
                        CCPrefStr(CC_K_AI_KEY, @"").length > 0;
 
-        // 引擎优先级：选中的排第一，其余按可用性降级，Google 永远兜底
+        // 引擎优先级：选中的排第一，其余按可用性降级；Bing 免费接口国内可用，排 Google 前
         NSMutableArray<NSString *> *order = [NSMutableArray array];
         if ([engine isEqualToString:@"deepl"]) {
             if (dk.length) [order addObject:@"deepl"];
             if (aiReady) [order addObject:@"ai"];
+            [order addObject:@"bing"];
             [order addObject:@"google"];
         } else if ([engine isEqualToString:@"ai"]) {
             if (aiReady) [order addObject:@"ai"];
             if (dk.length) [order addObject:@"deepl"];
+            [order addObject:@"bing"];
             [order addObject:@"google"];
+        } else if ([engine isEqualToString:@"bing"]) {
+            [order addObject:@"bing"];
+            [order addObject:@"google"];
+            if (dk.length) [order addObject:@"deepl"];
+            if (aiReady) [order addObject:@"ai"];
         } else if ([engine isEqualToString:@"google"]) {
             [order addObject:@"google"];
+            [order addObject:@"bing"];
             if (dk.length) [order addObject:@"deepl"];
             if (aiReady) [order addObject:@"ai"];
         } else { // auto
             if (dk.length) [order addObject:@"deepl"];
             if (aiReady) [order addObject:@"ai"];
+            [order addObject:@"bing"];
             [order addObject:@"google"];
         }
 

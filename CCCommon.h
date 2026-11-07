@@ -19,6 +19,9 @@
 #define CC_K_CLOUD_ASR       @"CloudASR"         // 云端语音识别（更准，需联网）
 #define CC_K_SHOW_RECOGNIZED @"ShowRecognized"    // 显示识别原文
 #define CC_K_SHOW_TRANSLATED @"ShowTranslated"    // 显示译文
+#define CC_K_TTS_VOICE       @"TTSVoice"          // 中文播报音色 identifier
+#define CC_K_LOCAL_VOICE     @"LocalVoice"        // 英文播报音色 identifier
+#define CC_K_ALWAYS_PANEL    @"AlwaysShowPanel"   // 面板常驻（默认关：仅通话时显示）
 #define CC_K_ENGINE           @"Engine"           // auto / deepl / ai
 #define CC_K_DEEPL_KEY        @"DeepLKey"
 #define CC_K_GOOGLE_KEY       @"GoogleKey"        // 可选：Google Cloud Translation API Key（不填走免费接口）

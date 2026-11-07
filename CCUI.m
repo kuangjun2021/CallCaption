@@ -1,11 +1,17 @@
-// CCUI.m — v0.12 通话中 UI：控制面板（5 圆钮）+ 分区字幕卡
+// CCUI.m — v0.12.1 通话中 UI：控制面板（5 圆钮）+ 分区字幕卡 + 通话自动唤起/收起
 #import "CCCommon.h"
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
+#import <CallKit/CallKit.h>
 
 static UIWindow *g_panelWin;
 static UIView *g_panelCard;
 static UIButton *g_btns[5];
+
+static UIWindow *g_miniWin;
+static CXCallObserver *g_callObs;
+static id g_callWatcher;
+static BOOL g_callActive;
 
 static UIWindow *g_capWin;
 static UIView *g_capCard;
@@ -79,6 +85,24 @@ static void AttachScene(UIWindow *win) {
 + (void)panelButtonTapped:(UIButton *)b;
 + (void)handlePanelPan:(UIPanGestureRecognizer *)p;
 + (void)handleCaptionPan:(UIPanGestureRecognizer *)p;
++ (void)collapsePanel;
++ (void)expandPanel;
++ (void)handleMiniPan:(UIPanGestureRecognizer *)p;
+@end
+
+static void CCUIHandleCallActive(BOOL active);
+
+@interface CCUICallWatcher : NSObject <CXCallObserverDelegate>
+@end
+
+@implementation CCUICallWatcher
+- (void)callObserver:(CXCallObserver *)observer callChanged:(CXCall *)call {
+    BOOL active = NO;
+    for (CXCall *c in observer.calls) {
+        if (!c.hasEnded) { active = YES; break; }
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{ CCUIHandleCallActive(active); });
+}
 @end
 
 static void RelayoutCaption(void);
@@ -148,6 +172,11 @@ static void EnsurePanelUI(void) {
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
             initWithTarget:[CCUIHelper class] action:@selector(handlePanelPan:)];
         [blur addGestureRecognizer:pan];
+
+        // 长按地球：手动开/关翻译；点按地球：收起面板
+        UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
+            initWithTarget:[CCUIHelper class] action:@selector(toggleSession)];
+        [g_btns[0] addGestureRecognizer:lp];
 
         AttachScene(win);
         win.hidden = YES;
@@ -221,6 +250,59 @@ static void EnsureCaptionUI(void) {
         g_capCard = blur;
         g_captionBuilt = YES;
     } @catch (NSException *e) { }
+}
+
+// ---------- 迷你地球（收起态） ----------
+
+static void EnsureMiniUI(void) {
+    if (g_miniWin) return;
+    @try {
+        CGFloat s = 64.0;
+        UIWindow *win = [[UIWindow alloc] initWithFrame:
+            CGRectMake(ScreenW() - s - 16, ScreenH() * 0.52, s, s)];
+        win.windowLevel = UIWindowLevelStatusBar + 103;
+        win.backgroundColor = [UIColor clearColor];
+
+        UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
+        b.frame = CGRectMake(0, 0, s, s);
+        b.layer.cornerRadius = s / 2.0;
+        b.layer.masksToBounds = YES;
+        b.backgroundColor = [UIColor colorWithWhite:1 alpha:0.95];
+        UIImage *img = [UIImage systemImageNamed:@"globe"
+                           withConfiguration:[UIImageSymbolConfiguration
+                               configurationWithPointSize:26 weight:UIFontWeightMedium]];
+        [b setImage:img forState:UIControlStateNormal];
+        b.tintColor = [UIColor colorWithWhite:0.12 alpha:1];
+        [b addTarget:[CCUIHelper class] action:@selector(expandPanel)
+            forControlEvents:UIControlEventTouchUpInside];
+
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
+            initWithTarget:[CCUIHelper class] action:@selector(handleMiniPan:)];
+        [b addGestureRecognizer:pan];
+
+        [win addSubview:b];
+        AttachScene(win);
+        win.hidden = YES;
+        g_miniWin = win;
+    } @catch (NSException *e) { }
+}
+
+// 仅在通话中显示（或设置里开启常驻）
+static void ShowPanelForState(void) {
+    if (!CCPrefBool(CC_K_ENABLED, YES)) {
+        if (g_panelWin) g_panelWin.hidden = YES;
+        if (g_miniWin) g_miniWin.hidden = YES;
+        return;
+    }
+    if (g_callActive || CCPrefBool(CC_K_ALWAYS_PANEL, NO)) {
+        EnsurePanelUI();
+        g_panelWin.hidden = NO;
+        g_panelWin.alpha = 1.0;
+        [[CCUIHelper class] refreshPanel];
+    } else {
+        if (g_panelWin) g_panelWin.hidden = YES;
+        if (g_miniWin) g_miniWin.hidden = YES;
+    }
 }
 
 static void RelayoutCaption(void) {
@@ -406,10 +488,44 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
     });
 }
 
++ (void)collapsePanel {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            if (!g_panelWin) return;
+            EnsureMiniUI();
+            g_miniWin.center = g_panelWin.center;
+            g_miniWin.hidden = NO;
+            g_panelWin.hidden = YES;
+        } @catch (NSException *e) { }
+    });
+}
+
++ (void)expandPanel {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            if (g_miniWin) g_miniWin.hidden = YES;
+            EnsurePanelUI();
+            g_panelWin.hidden = NO;
+            [self refreshPanel];
+        } @catch (NSException *e) { }
+    });
+}
+
++ (void)handleMiniPan:(UIPanGestureRecognizer *)p {
+    CGPoint t = [p translationInView:nil];
+    CGRect f = g_miniWin.frame;
+    f.origin.x += t.x;
+    f.origin.y += t.y;
+    if (f.origin.y < 60) f.origin.y = 60;
+    if (f.origin.y > ScreenH() - 80) f.origin.y = ScreenH() - 80;
+    g_miniWin.frame = f;
+    [p setTranslation:CGPointZero inView:nil];
+}
+
 + (void)panelButtonTapped:(UIButton *)b {
     switch (b.tag) {
         case 0:
-            [self toggleSession];
+            [self collapsePanel];
             return;
         case 1:
             CCSetPrefBool(CC_K_LOCAL_ENABLED, !CCPrefBool(CC_K_LOCAL_ENABLED, NO));
@@ -458,6 +574,31 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
 
 @end
 
+// ---------- 通话自动唤起 ----------
+
+static void CCUIHandleCallActive(BOOL active) {
+    if (g_callActive == active) return;
+    g_callActive = active;
+    CCLogf(@"call state: %@", active ? @"ACTIVE" : @"NONE");
+    if (active) {
+        if (!g_sessionActive && CCPrefBool(CC_K_ENABLED, YES)) {
+            g_sessionActive = YES;
+            CCSetArmed(YES);
+            g_stateText = @"● 已开启，等待语音";
+        }
+        ShowPanelForState();
+    } else {
+        if (g_sessionActive) {
+            g_sessionActive = NO;
+            CCSetArmed(NO);
+        }
+        g_stateText = nil;
+        if (g_panelWin) g_panelWin.hidden = YES;
+        if (g_miniWin) g_miniWin.hidden = YES;
+        [CCUIHelper hideCaption];
+    }
+}
+
 // ---------- TTS ----------
 
 static AVSpeechSynthesizer *g_tts;
@@ -477,7 +618,9 @@ void CCUISpeakText(NSString *text) {
             if (!g_tts) g_tts = [[AVSpeechSynthesizer alloc] init];
             [g_tts stopSpeakingAtBoundary:AVSpeechBoundaryImmediate];
             AVSpeechUtterance *u = [[AVSpeechUtterance alloc] initWithString:text];
-            u.voice = [AVSpeechSynthesisVoice voiceWithLanguage:@"zh-CN"];
+            NSString *vid = CCPrefStr(CC_K_TTS_VOICE, @"");
+            AVSpeechSynthesisVoice *v = vid.length ? [AVSpeechSynthesisVoice voiceWithIdentifier:vid] : nil;
+            u.voice = v ?: [AVSpeechSynthesisVoice voiceWithLanguage:@"zh-CN"];
             [g_tts speakUtterance:u];
         } @catch (NSException *e) { }
     });
@@ -489,13 +632,7 @@ void CCUICallStateChanged(NSString *state) {
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
             if ([state isEqualToString:@"CALL ENDED"]) {
-                if (g_sessionActive) {
-                    g_sessionActive = NO;
-                    CCSetArmed(NO);
-                    [CCUIHelper refreshPanel];
-                }
-                g_stateText = nil;
-                [CCUIHelper hideCaption];
+                CCUIHandleCallActive(NO);
             }
         } @catch (NSException *e) { }
     });
@@ -517,13 +654,23 @@ void CCUIBoot(void) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)3 * NSEC_PER_SEC),
                        dispatch_get_main_queue(), ^{
             @try {
-                if (CCPrefBool(CC_K_ENABLED, YES)) {
-                    EnsurePanelUI();
-                    EnsureCaptionUI();
-                    [CCUIHelper refreshPanel];
-                    g_panelWin.hidden = NO;
-                    g_panelWin.alpha = 1.0;
+                if (!g_callObs) {
+                    g_callWatcher = [CCUICallWatcher new];
+                    g_callObs = [[CXCallObserver alloc] init];
+                    [g_callObs setDelegate:g_callWatcher queue:dispatch_get_main_queue()];
                 }
+                BOOL active = NO;
+                for (CXCall *c in g_callObs.calls) {
+                    if (!c.hasEnded) { active = YES; break; }
+                }
+                g_callActive = active;
+                EnsureCaptionUI();
+                if (active && CCPrefBool(CC_K_ENABLED, YES) && !g_sessionActive) {
+                    g_sessionActive = YES;
+                    CCSetArmed(YES);
+                    g_stateText = @"● 已开启，等待语音";
+                }
+                ShowPanelForState();
             } @catch (NSException *e) { }
         });
         CCLogLine(@"CallCaption UI booted (panel + cards)");

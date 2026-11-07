@@ -62,12 +62,16 @@ void CCTransportHandleChunk(NSString *suffix); // SB 侧：分片兜底重组
 void CCTranslate(NSString *text, NSString *fromLang, NSString *toLang,
                  void (^done)(NSString *translated));
 
-// ---------- 音频抓取 / 识别 / TTS（mediaserverd 侧） ----------
+// ---------- 音频抓取 / 识别 / TTS（mediaserverd 侧，旧架构） ----------
 void CCEngineBoot(void);                       // 预分配环缓冲、创建识别器/TTS
 void CCAudioTapObserve(AudioUnit unit, UInt32 bus, UInt32 frames, AudioBufferList *ioData);
 void CCTTSInitIfNeeded(void);
 void CCTTSSpeak(NSString *text, NSString *lang); // lang: "zh-CN"/"en-US"
 void CCTTSStopAll(void);
+
+// ---------- v0.9.0 新架构：SpringBoard 进程内麦克风采集（无任何函数钩子） ----------
+void CCMicStart(void);
+void CCMicStop(void);
 
 // ---------- UI（SpringBoard 侧） ----------
 void CCUIBoot(void);

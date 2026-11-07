@@ -320,6 +320,7 @@ void CCUIDeliverCaption(NSString *translated) {
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
             g_sessionActive = !g_sessionActive;
+            if (g_sessionActive) CCMicStart(); else CCMicStop();
             [self refreshButton];
             CCPostNotif(g_sessionActive ? @"arm" : @"disarm");
             CCLogf(@"session %@", g_sessionActive ? @"ARMED" : @"DISARMED");

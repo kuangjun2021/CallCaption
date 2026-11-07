@@ -1,0 +1,15 @@
+#!/bin/sh
+# CallCaption v0.10.1 — 修复守护进程/LaunchDaemon 所有权（云端构建机产出 owner=501，launchd 会拒绝加载）
+JB=/var/jb
+
+chown 0:0 "$JB/usr/local/bin/CallCaptionAudioService" 2>/dev/null || true
+chmod 0755 "$JB/usr/local/bin/CallCaptionAudioService" 2>/dev/null || true
+chown 0:0 "$JB/Library/LaunchDaemons/net.user.callcaption.audioservice.plist" 2>/dev/null || true
+chmod 0644 "$JB/Library/LaunchDaemons/net.user.callcaption.audioservice.plist" 2>/dev/null || true
+
+# 立即加载（部分环境不支持 bootstrap，则等用户空间重启自动加载）
+launchctl bootstrap system "$JB/Library/LaunchDaemons/net.user.callcaption.audioservice.plist" >/dev/null 2>&1 \
+  || launchctl load "$JB/Library/LaunchDaemons/net.user.callcaption.audioservice.plist" >/dev/null 2>&1 \
+  || true
+
+exit 0

@@ -15,7 +15,7 @@ jobs:
       - name: Install Theos + iOS 16.5 SDK
         run: |
           git clone --recursive https://github.com/theos/theos.git $HOME/theos
-          curl -L -sS -o /tmp/sdks.zip https://github.com/theos/sdks/archive/refs/heads/main.zip
+          curl -L -sS -o /tmp/sdks.zip https://github.com/theos/sdks/archive/refs/heads/master.zip
           unzip -q /tmp/sdks.zip -d /tmp/sdks
           mkdir -p $HOME/theos/sdks
           cp -R /tmp/sdks/sdks-master/iPhoneOS16.5.sdk $HOME/theos/sdks/

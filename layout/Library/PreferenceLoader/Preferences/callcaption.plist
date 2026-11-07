@@ -12,6 +12,8 @@
 		<string>CallCaptionRootListController</string>
 		<key>isController</key>
 		<true/>
+		<key>icon</key>
+		<string>icon.png</string>
 		<key>label</key>
 		<string>CallCaption 通话翻译</string>
 	</dict>

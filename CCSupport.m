@@ -166,6 +166,16 @@ void CCSetArmed(BOOL armed) {
     } @catch (NSException *e) { }
 }
 
+void CCSetPrefBool(NSString *key, BOOL value) {
+    @try {
+        CFPreferencesSetAppValue((__bridge CFStringRef)key,
+                                 (__bridge CFPropertyListRef)@(value),
+                                 (__bridge CFStringRef)CC_DOMAIN);
+        CFPreferencesAppSynchronize((__bridge CFStringRef)CC_DOMAIN);
+        CCPostNotif(@"prefschanged");
+    } @catch (NSException *e) { }
+}
+
 // ============ 传输：MS → SB 的结果行 ============
 // 主路径：spool 文件追加（SB 以 mobile 身份预创建 0666 文件，MS 追加写入）
 // 兜底：Darwin 通知名分片 msg.<seq>.<i>/<n>.<payload>
@@ -252,15 +262,15 @@ static void SBDeliverLine(NSString *line) {
     // 行格式： R|<译文>  /  I|<原文>  /  S|<状态>
     //          LR|<我方英文译文>  /  LI|<我方原文>（双向模式，不再重复 TTS）
     if ([line hasPrefix:@"LR|"]) {
-        CCUIDeliverCaption([@"【我方】" stringByAppendingString:[line substringFromIndex:3]]);
+        CCUIDeliverLocalTranslated([line substringFromIndex:3]);
     } else if ([line hasPrefix:@"LI|"]) {
-        CCUIDeliverOriginal([@"我：" stringByAppendingString:[line substringFromIndex:3]]);
+        CCUIDeliverLocalOriginal([line substringFromIndex:3]);
     } else if ([line hasPrefix:@"R|"]) {
         NSString *t = [line substringFromIndex:2];
-        CCUIDeliverCaption(t);
+        CCUIDeliverRemoteTranslated(t);
         if (CCPrefBool(CC_K_TTS_ENABLED, YES)) CCUISpeakText(t);
     } else if ([line hasPrefix:@"I|"]) {
-        CCUIDeliverOriginal([line substringFromIndex:2]);
+        CCUIDeliverRemoteOriginal([line substringFromIndex:2]);
     } else if ([line hasPrefix:@"S|"]) {
         CCUIDeliverState([line substringFromIndex:2]);
     }

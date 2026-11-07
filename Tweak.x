@@ -34,6 +34,7 @@ static void SBDarwinCB(CFNotificationCenterRef center, void *observer,
             // 心跳（忽略内容）
         } else if ([suffix isEqualToString:@"prefschanged"]) {
             CCPrefsReload();
+            CCUIRefreshPanel();
         }
     } @catch (NSException *e) { }
 }

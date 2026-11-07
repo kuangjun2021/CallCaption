@@ -1,53 +1,289 @@
-// CCUI.m — SpringBoard 侧：悬浮字幕 + 快捷按钮（可拖动、毛玻璃、弹簧动画）
+// CCUI.m — v0.12 通话中 UI：控制面板（5 圆钮）+ 分区字幕卡
 #import "CCCommon.h"
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
-#import <CoreTelephony/CTCallCenter.h>
-#import <CoreTelephony/CTCall.h>
+
+static UIWindow *g_panelWin;
+static UIView *g_panelCard;
+static UIButton *g_btns[5];
 
 static UIWindow *g_capWin;
-static UIView *g_card;
-static UIVisualEffectView *g_blur;
-static UILabel *g_origLabel;
-static UILabel *g_capLabel;
+static UIView *g_capCard;
+static UILabel *g_rowTitle[4];
+static UILabel *g_rowText[4];
 static UILabel *g_stateLabel;
 static NSTimer *g_hideTimer;
-static BOOL g_collapsed;
-
-static UIWindow *g_btnWin;
-static UIButton *g_btn;
 static BOOL g_sessionActive;
 static BOOL g_uiReady;
-
-static CTCallCenter *g_cc;
-
-#define CAP_WIDTH  MIN(330.0, [UIScreen mainScreen].bounds.size.width * 0.72)
-
-// ---------- 工具 ----------
+static BOOL g_captionBuilt;
+static NSString *g_texts[4];       // 0 对方原文 / 1 对方译文 / 2 我方原文 / 3 我方译文
+static NSString *g_stateText;
 
 static CGFloat ScreenW(void) { return [UIScreen mainScreen].bounds.size.width; }
 static CGFloat ScreenH(void) { return [UIScreen mainScreen].bounds.size.height; }
+static CGFloat CardWidth(void) { return MIN(ScreenW() * 0.92, 430.0); }
+
+// 与设计稿保持一致的配色
+static UIColor *BlueTitle(void)  { return [UIColor colorWithRed:0.46 green:0.68 blue:1.00 alpha:1]; }
+static UIColor *GreenTitle(void) { return [UIColor colorWithRed:0.48 green:0.90 blue:0.58 alpha:1]; }
 
 static void SaveCaptionPos(CGPoint center) {
     CFPreferencesSetAppValue((__bridge CFStringRef)CC_K_CAPTION_X,
-                             (__bridge CFPropertyListRef)[[NSNumber alloc] initWithFloat:center.x],
+                             (__bridge CFPropertyListRef)@(center.x),
                              (__bridge CFStringRef)CC_DOMAIN);
     CFPreferencesSetAppValue((__bridge CFStringRef)CC_K_CAPTION_Y,
-                             (__bridge CFPropertyListRef)[[NSNumber alloc] initWithFloat:center.y],
+                             (__bridge CFPropertyListRef)@(center.y),
                              (__bridge CFStringRef)CC_DOMAIN);
     CFPreferencesAppSynchronize((__bridge CFStringRef)CC_DOMAIN);
 }
 
-// ---------- 字幕窗 ----------
+static CGFloat TextHeight(NSString *s, UIFont *f, CGFloat w) {
+    if (s.length == 0) return 0;
+    CGRect r = [s boundingRectWithSize:CGSizeMake(w, CGFLOAT_MAX)
+                              options:NSStringDrawingUsesLineFragmentOrigin
+                           attributes:@{NSFontAttributeName: f} context:nil];
+    return ceil(r.size.height);
+}
+
+static UIFont *RowFont(int i, BOOL large) {
+    CGFloat base = (i == 1) ? 18.0 : ((i == 3) ? 16.0 : 15.0);
+    if (large) base += 3.0;
+    UIFontWeight w = (i == 1 || i == 3) ? UIFontWeightSemibold : UIFontWeightRegular;
+    return [UIFont systemFontOfSize:base weight:w];
+}
+
+static NSString *RowTitle(int i) {
+    switch (i) {
+        case 0: return @"Recognized Remote";
+        case 1: return @"Translated";
+        case 2: return @"Recognized Local";
+        default: return @"Did speak";
+    }
+}
+
+static void AttachScene(UIWindow *win) {
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
+            if ([sc isKindOfClass:[UIWindowScene class]]) {
+                win.windowScene = (UIWindowScene *)sc;
+                break;
+            }
+        }
+    }
+}
 
 @interface CCUIHelper : NSObject
 + (void)hideCaption;
 + (void)toggleSession;
-+ (void)refreshButton;
-+ (void)handlePan:(UIPanGestureRecognizer *)pan;
-+ (void)handleDoubleTap;
-+ (void)handleLongPress:(UILongPressGestureRecognizer *)lp;
++ (void)refreshPanel;
++ (void)panelButtonTapped:(UIButton *)b;
++ (void)handlePanelPan:(UIPanGestureRecognizer *)p;
++ (void)handleCaptionPan:(UIPanGestureRecognizer *)p;
 @end
+
+static void RelayoutCaption(void);
+
+// ---------- 控制面板 ----------
+
+static void EnsurePanelUI(void) {
+    if (g_panelWin) return;
+    @try {
+        CGFloat w = CardWidth();
+        CGFloat h = 150;
+        UIWindow *win = [[UIWindow alloc] initWithFrame:CGRectMake((ScreenW() - w) / 2.0,
+                                                                   ScreenH() - h - 150, w, h)];
+        win.windowLevel = UIWindowLevelStatusBar + 102;
+        win.backgroundColor = [UIColor clearColor];
+
+        UIVisualEffectView *blur = [[UIVisualEffectView alloc]
+            initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark]];
+        blur.frame = win.bounds;
+        blur.layer.cornerRadius = 22;
+        blur.layer.masksToBounds = YES;
+        [win addSubview:blur];
+
+        UIView *ov = [[UIView alloc] initWithFrame:blur.bounds];
+        ov.backgroundColor = [UIColor colorWithWhite:0 alpha:0.28];
+        ov.userInteractionEnabled = NO;
+        [blur.contentView addSubview:ov];
+
+        UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(0, 10, w, 18)];
+        title.text = @"CallCaption";
+        title.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+        title.textColor = [UIColor colorWithWhite:1 alpha:0.85];
+        title.textAlignment = NSTextAlignmentCenter;
+        [blur.contentView addSubview:title];
+
+        NSArray *symbols = @[@"globe", @"mic.fill", @"speaker.wave.2.fill",
+                             @"eye.fill", @"character.bubble.fill"];
+        NSArray *names = @[@"激活", @"我方", @"对方", @"原文", @"译文"];
+        CGFloat bw = 56.0;
+        CGFloat gap = (w - 5 * bw) / 6.0;
+        for (int i = 0; i < 5; i++) {
+            CGFloat x = gap + i * (bw + gap);
+            UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
+            b.frame = CGRectMake(x, 36, bw, bw);
+            b.tag = i;
+            b.layer.cornerRadius = bw / 2.0;
+            b.layer.masksToBounds = YES;
+            b.backgroundColor = [UIColor colorWithWhite:1 alpha:0.10];
+            UIImage *img = [UIImage systemImageNamed:symbols[i]
+                               withConfiguration:[UIImageSymbolConfiguration
+                                   configurationWithPointSize:22 weight:UIFontWeightMedium]];
+            [b setImage:img forState:UIControlStateNormal];
+            b.tintColor = [UIColor whiteColor];
+            [b addTarget:[CCUIHelper class] action:@selector(panelButtonTapped:)
+                forControlEvents:UIControlEventTouchUpInside];
+            [blur.contentView addSubview:b];
+            g_btns[i] = b;
+
+            UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(x - 10, 96, bw + 20, 14)];
+            l.text = names[i];
+            l.font = [UIFont systemFontOfSize:11];
+            l.textColor = [UIColor colorWithWhite:1 alpha:0.65];
+            l.textAlignment = NSTextAlignmentCenter;
+            [blur.contentView addSubview:l];
+        }
+
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
+            initWithTarget:[CCUIHelper class] action:@selector(handlePanelPan:)];
+        [blur addGestureRecognizer:pan];
+
+        AttachScene(win);
+        win.hidden = YES;
+        g_panelWin = win;
+        g_panelCard = blur;
+    } @catch (NSException *e) { }
+}
+
+// ---------- 字幕卡 ----------
+
+static void EnsureCaptionUI(void) {
+    if (g_captionBuilt) return;
+    @try {
+        CGFloat w = CardWidth();
+        UIWindow *win = [[UIWindow alloc] initWithFrame:CGRectMake((ScreenW() - w) / 2.0,
+                                                                   ScreenH() - 420, w, 10)];
+        win.windowLevel = UIWindowLevelStatusBar + 101;
+        win.backgroundColor = [UIColor clearColor];
+
+        UIVisualEffectView *blur = [[UIVisualEffectView alloc]
+            initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialDark]];
+        blur.frame = win.bounds;
+        blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        blur.layer.cornerRadius = 18;
+        blur.layer.masksToBounds = YES;
+        [win addSubview:blur];
+
+        UIView *ov = [[UIView alloc] initWithFrame:blur.bounds];
+        ov.backgroundColor = [UIColor colorWithWhite:0 alpha:0.30];
+        ov.userInteractionEnabled = NO;
+        ov.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [blur.contentView addSubview:ov];
+
+        for (int i = 0; i < 4; i++) {
+            UILabel *t = [[UILabel alloc] initWithFrame:CGRectZero];
+            t.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
+            t.textColor = (i % 2 == 0) ? BlueTitle() : GreenTitle();
+            t.text = RowTitle(i);
+            [blur.contentView addSubview:t];
+            g_rowTitle[i] = t;
+
+            UILabel *x = [[UILabel alloc] initWithFrame:CGRectZero];
+            x.font = RowFont(i, NO);
+            x.textColor = [UIColor colorWithWhite:1 alpha:0.95];
+            x.numberOfLines = 0;
+            [blur.contentView addSubview:x];
+            g_rowText[i] = x;
+        }
+
+        UILabel *st = [[UILabel alloc] initWithFrame:CGRectZero];
+        st.font = [UIFont systemFontOfSize:11];
+        st.textColor = [UIColor colorWithWhite:1 alpha:0.5];
+        st.numberOfLines = 0;
+        [blur.contentView addSubview:st];
+        g_stateLabel = st;
+
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
+            initWithTarget:[CCUIHelper class] action:@selector(handleCaptionPan:)];
+        [blur addGestureRecognizer:pan];
+
+        NSNumber *px = CCPref(CC_K_CAPTION_X), *py = CCPref(CC_K_CAPTION_Y);
+        if ([px isKindOfClass:[NSNumber class]] && [py isKindOfClass:[NSNumber class]]) {
+            win.center = CGPointMake([px floatValue], [py floatValue]);
+        } else {
+            win.center = CGPointMake(ScreenW() / 2.0, ScreenH() - 360);
+        }
+
+        AttachScene(win);
+        win.hidden = YES;
+        g_capWin = win;
+        g_capCard = blur;
+        g_captionBuilt = YES;
+    } @catch (NSException *e) { }
+}
+
+static void RelayoutCaption(void) {
+    if (!g_capWin) return;
+    CGFloat w = g_capWin.bounds.size.width;
+    CGFloat pad = 16.0;
+    CGFloat contentW = w - pad * 2.0;
+    BOOL showR = CCPrefBool(CC_K_SHOW_RECOGNIZED, YES);
+    BOOL showT = CCPrefBool(CC_K_SHOW_TRANSLATED, YES);
+    BOOL localOn = CCPrefBool(CC_K_LOCAL_ENABLED, NO);
+    BOOL large = CCPrefBool(CC_K_LARGE_CAPTIONS, NO);
+
+    CGFloat y = 14.0;
+    BOOL any = NO;
+
+    for (int i = 0; i < 4; i++) {
+        BOOL vis = NO;
+        if (i == 0) vis = showR && g_texts[0].length > 0;
+        if (i == 1) vis = showT && g_texts[1].length > 0;
+        if (i == 2) vis = localOn && showR && g_texts[2].length > 0;
+        if (i == 3) vis = localOn && showT && g_texts[3].length > 0;
+
+        UILabel *t = g_rowTitle[i];
+        UILabel *x = g_rowText[i];
+        if (!vis) { t.hidden = YES; x.hidden = YES; continue; }
+
+        any = YES;
+        t.hidden = NO;
+        x.hidden = NO;
+        t.frame = CGRectMake(pad, y, contentW, 14);
+        y += 16.0;
+
+        x.font = RowFont(i, large);
+        CGFloat h = TextHeight(g_texts[i], x.font, contentW);
+        x.frame = CGRectMake(pad, y, contentW, h);
+        y += h + 10.0;
+    }
+
+    if (g_stateText.length > 0) {
+        any = YES;
+        g_stateLabel.hidden = NO;
+        g_stateLabel.font = [UIFont systemFontOfSize:11];
+        CGFloat h = TextHeight(g_stateText, g_stateLabel.font, contentW);
+        g_stateLabel.frame = CGRectMake(pad, y, contentW, h);
+        y += h + 8.0;
+    } else {
+        g_stateLabel.hidden = YES;
+    }
+
+    CGFloat newH = any ? (y + 6.0) : 10.0;
+    CGRect f = g_capWin.frame;
+    CGPoint c = g_capWin.center;
+    f.size.height = newH;
+    g_capWin.frame = f;
+    g_capWin.center = c;
+    g_capCard.frame = g_capWin.bounds;
+}
+
+static void ShowCaptionNow(void) {
+    if (!g_capWin) return;
+    g_capWin.hidden = NO;
+    g_capWin.alpha = 1.0;
+}
 
 static void ResetHideTimer(void) {
     [g_hideTimer invalidate];
@@ -57,213 +293,55 @@ static void ResetHideTimer(void) {
     [[NSRunLoop mainRunLoop] addTimer:g_hideTimer forMode:NSRunLoopCommonModes];
 }
 
-static void UpdateCardLayout(void) {
-    if (!g_capWin) return;
-    CGFloat fontSize = CCPrefBool(CC_K_LARGE_CAPTIONS, NO) ? 22.0 : 17.0;
-    g_capLabel.font = [UIFont systemFontOfSize:fontSize weight:UIFontWeightSemibold];
-    g_origLabel.font = [UIFont systemFontOfSize:fontSize - 5.0];
-
-    CGFloat inner = 14.0;
-    CGFloat maxW = CAP_WIDTH - inner * 2;
-    CGRect capRect = [g_capLabel.text boundingRectWithSize:CGSizeMake(maxW, CGFLOAT_MAX)
-                                                   options:NSStringDrawingUsesLineFragmentOrigin
-                                                attributes:@{NSFontAttributeName: g_capLabel.font}
-                                                   context:nil];
-    CGRect origRect = g_origLabel.text.length
-        ? [g_origLabel.text boundingRectWithSize:CGSizeMake(maxW, CGFLOAT_MAX)
-                                         options:NSStringDrawingUsesLineFragmentOrigin
-                                      attributes:@{NSFontAttributeName: g_origLabel.font}
-                                         context:nil]
-        : CGRectZero;
-    CGFloat showState = g_stateLabel.hidden ? 0 : 20.0;
-    CGFloat h = inner * 2 + ceil(capRect.size.height) + ceil(origRect.size.height) + 4 + showState;
-    CGFloat w = MAX(CAP_WIDTH, ceil(MAX(capRect.size.width, origRect.size.width)) + inner * 2);
-    w = MIN(w, ScreenW() - 24);
-
-    CGPoint center = g_capWin.center;
-    CGRect f = CGRectMake(0, 0, w, h);
-    g_card.frame = CGRectMake(0, 0, w, h);
-    g_origLabel.frame = CGRectMake(inner, inner, w - inner * 2, ceil(origRect.size.height));
-    g_capLabel.frame = CGRectMake(inner, inner + ceil(origRect.size.height) + 4,
-                                  w - inner * 2, ceil(capRect.size.height));
-    g_stateLabel.frame = CGRectMake(inner, h - inner - 14, w - inner * 2, 14);
-    g_capWin.frame = f;
-    g_capWin.center = center;
+static void RefreshCaptionAndShow(void) {
+    RelayoutCaption();
+    BOOL any = NO;
+    for (int i = 0; i < 4; i++) {
+        if (!g_rowText[i].hidden) { any = YES; break; }
+    }
+    if (!any && g_stateText.length == 0) return;
+    ShowCaptionNow();
+    ResetHideTimer();
 }
 
-static void EnsureCaptionUI(void) {
-    if (g_capWin) return;
-    @try {
-        UIWindow *win = [[UIWindow alloc] initWithFrame:CGRectMake(0, 0, CAP_WIDTH, 90)];
-        win.windowLevel = UIWindowLevelStatusBar + 100;
-        win.backgroundColor = [UIColor clearColor];
+// ---------- 交付 ----------
 
-        UIView *card = [[UIView alloc] initWithFrame:win.bounds];
-        card.layer.cornerRadius = 16;
-        card.layer.masksToBounds = YES;
-        card.clipsToBounds = YES;
-
-        UIVisualEffectView *blur = [[UIVisualEffectView alloc]
-            initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark]];
-        blur.frame = card.bounds;
-        blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        [card addSubview:blur];
-
-        UILabel *orig = [[UILabel alloc] initWithFrame:CGRectMake(14, 12, CAP_WIDTH - 28, 16)];
-        orig.textColor = [UIColor colorWithWhite:1 alpha:0.55];
-        orig.font = [UIFont systemFontOfSize:12];
-        orig.numberOfLines = 2;
-        orig.textAlignment = NSTextAlignmentNatural;
-        [card addSubview:orig];
-
-        UILabel *cap = [[UILabel alloc] initWithFrame:CGRectMake(14, 30, CAP_WIDTH - 28, 24)];
-        cap.textColor = [UIColor whiteColor];
-        cap.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-        cap.numberOfLines = 0;
-        cap.textAlignment = NSTextAlignmentNatural;
-        [card addSubview:cap];
-
-        UILabel *state = [[UILabel alloc] initWithFrame:CGRectMake(14, card.bounds.size.height - 26,
-                                                                   CAP_WIDTH - 28, 14)];
-        state.textColor = [UIColor colorWithWhite:1 alpha:0.45];
-        state.font = [UIFont systemFontOfSize:11];
-        state.text = @"● CallCaption";
-        state.hidden = YES;
-        [card addSubview:state];
-
-        [win addSubview:card];
-
-        // 拖动
-        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
-            initWithTarget:[CCUIHelper class] action:@selector(handlePan:)];
-        [card addGestureRecognizer:pan];
-        UITapGestureRecognizer *dbl = [[UITapGestureRecognizer alloc]
-            initWithTarget:[CCUIHelper class] action:@selector(handleDoubleTap)];
-        dbl.numberOfTapsRequired = 2;
-        [card addGestureRecognizer:dbl];
-
-        g_origLabel = orig; g_capLabel = cap; g_stateLabel = state;
-        g_card = card; g_blur = blur; g_capWin = win; g_collapsed = NO;
-
-        // 恢复记忆位置
-        NSNumber *x = CCPref(CC_K_CAPTION_X), *y = CCPref(CC_K_CAPTION_Y);
-        if ([x isKindOfClass:[NSNumber class]] && [y isKindOfClass:[NSNumber class]]) {
-            win.center = CGPointMake([x floatValue], [y floatValue]);
-        } else {
-            win.center = CGPointMake(ScreenW() / 2.0, ScreenH() - 300);
-        }
-        // v0.8.3 修复：iOS 13+ 的 UIWindow 必须关联 windowScene 才会显示
-        if (@available(iOS 13.0, *)) {
-            for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
-                if ([sc isKindOfClass:[UIWindowScene class]]) { win.windowScene = (UIWindowScene *)sc; break; }
-            }
-        }
-        win.hidden = YES;
-    } @catch (NSException *e) { }
+void CCUIDeliverRemoteOriginal(NSString *text) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        g_texts[0] = text ?: @"";
+        RefreshCaptionAndShow();
+    });
 }
-
-static void EnsureButtonUI(void) {
-    if (g_btnWin) return;
-    @try {
-        CGFloat w = 64, h = 34;
-        UIWindow *win = [[UIWindow alloc] initWithFrame:CGRectMake(ScreenW() - w - 16,
-                                                                   ScreenH() - 220, w, h)];
-        win.windowLevel = UIWindowLevelStatusBar + 101;
-        win.backgroundColor = [UIColor clearColor];
-
-        UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-        btn.frame = win.bounds;
-        btn.layer.cornerRadius = h / 2.0;
-        btn.layer.masksToBounds = YES;
-        btn.backgroundColor = [UIColor colorWithRed:0.20 green:0.78 blue:0.45 alpha:0.92];
-        [btn setTitle:@"译" forState:UIControlStateNormal];
-        [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        btn.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightBold];
-        btn.layer.shadowColor = [UIColor colorWithRed:0.20 green:0.78 blue:0.45 alpha:1].CGColor;
-        btn.layer.shadowOpacity = 0.6;
-        btn.layer.shadowRadius = 6;
-        btn.layer.shadowOffset = CGSizeZero;
-
-        [btn addTarget:[CCUIHelper class] action:@selector(toggleSession)
-              forControlEvents:UIControlEventTouchUpInside];
-        UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
-            initWithTarget:[CCUIHelper class] action:@selector(handleLongPress:)];
-        [btn addGestureRecognizer:lp];
-        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
-            initWithTarget:[CCUIHelper class] action:@selector(handlePan:)];
-        [btn addGestureRecognizer:pan];
-
-        // v0.9.1 修复：rootViewController 的视图会覆盖 window 直属子视图并吞掉触摸——
-        // 必须把按钮加到 vc.view 上（此前按钮看得见点不着就是这个 bug）
-        UIViewController *vc = [[UIViewController alloc] init];
-        vc.view.backgroundColor = [UIColor clearColor];
-        vc.view.frame = win.bounds;
-        win.rootViewController = vc;
-        [vc.view addSubview:btn];
-        // v0.8.3: windowScene 关联（否则 iOS 13+ 窗口不显示）
-        if (@available(iOS 13.0, *)) {
-            for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
-                if ([sc isKindOfClass:[UIWindowScene class]]) { win.windowScene = (UIWindowScene *)sc; break; }
-            }
-        }
-        g_btn = btn; g_btnWin = win;
-        win.hidden = YES;
-    } @catch (NSException *e) { }
+void CCUIDeliverRemoteTranslated(NSString *text) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        g_texts[1] = text ?: @"";
+        RefreshCaptionAndShow();
+    });
 }
-
-// ---------- 对外交付 ----------
-
+void CCUIDeliverLocalOriginal(NSString *text) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        g_texts[2] = text ?: @"";
+        RefreshCaptionAndShow();
+    });
+}
+void CCUIDeliverLocalTranslated(NSString *text) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        g_texts[3] = text ?: @"";
+        RefreshCaptionAndShow();
+    });
+}
 void CCUIDeliverState(NSString *state) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        @try {
-            if (!g_capWin) return;
-            g_stateLabel.hidden = NO;
-            g_stateLabel.text = state;
-            UpdateCardLayout();
-            // v0.10.2: 状态也要让窗口可见（此前窗口默认隐藏，用户什么都看不到）
-            g_capWin.hidden = NO;
-            g_capWin.alpha = 1.0;
-        } @catch (NSException *e) { }
+        g_stateText = state ?: @"";
+        RefreshCaptionAndShow();
     });
 }
 
-void CCUIDeliverOriginal(NSString *original) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @try {
-            if (!g_capWin || !g_sessionActive) return;
-            g_origLabel.text = original;
-            UpdateCardLayout();
-            // v0.10.2: 原文先行显示（即使翻译未就绪）
-            g_capWin.hidden = NO;
-            g_capWin.alpha = 1.0;
-            ResetHideTimer();
-        } @catch (NSException *e) { }
-    });
-}
+// 兼容旧接口（CCMicCapture 遗留）
+void CCUIDeliverCaption(NSString *translated) { CCUIDeliverRemoteTranslated(translated); }
+void CCUIDeliverOriginal(NSString *original) { CCUIDeliverRemoteOriginal(original); }
 
-void CCUIDeliverCaption(NSString *translated) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @try {
-            if (!g_capWin || !g_sessionActive) return;
-            g_capLabel.text = translated;
-            g_stateLabel.hidden = YES;
-            g_collapsed = NO;
-            UpdateCardLayout();
-            g_capWin.hidden = NO;
-            g_capWin.alpha = 1.0;
-            [UIView animateWithDuration:0.25
-                                  delay:0
-                 usingSpringWithDamping:0.85
-                  initialSpringVelocity:0.5
-                                options:UIViewAnimationOptionCurveEaseOut
-                             animations:^{
-                                 g_capWin.alpha = 1.0;
-                             }
-                             completion:nil];
-            ResetHideTimer();
-        } @catch (NSException *e) { }
-    });
-}
+void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
 
 // ---------- 交互 ----------
 
@@ -282,182 +360,110 @@ void CCUIDeliverCaption(NSString *translated) {
     });
 }
 
-+ (void)handlePan:(UIPanGestureRecognizer *)pan {
-    @try {
-        UIWindow *win = nil;
-        UIView *v = pan.view;
-        // 找到按钮所在的窗或字幕窗
-        if (v == g_btn) win = g_btnWin; else win = g_capWin;
-        if (!win) return;
-        CGPoint t = [pan translationInView:win];
-        if (pan.state == UIGestureRecognizerStateBegan || pan.state == UIGestureRecognizerStateChanged) {
-            CGPoint c = win.center;
-            c.x += t.x; c.y += t.y;
-            c.x = MAX(30, MIN(ScreenW() - 30, c.x));
-            c.y = MAX(30, MIN(ScreenH() - 30, c.y));
-            win.center = c;
-            [pan setTranslation:CGPointZero inView:win];
-            if (win == g_capWin) ResetHideTimer();
-        } else if (pan.state == UIGestureRecognizerStateEnded) {
-            if (win == g_capWin) SaveCaptionPos(win.center);
-        }
-    } @catch (NSException *e) { }
-}
-
-+ (void)handleDoubleTap {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @try {
-            if (!g_capWin) return;
-            g_collapsed = !g_collapsed;
-            if (g_collapsed) {
-                g_origLabel.hidden = YES; g_capLabel.hidden = YES;
-                g_stateLabel.hidden = NO;
-                g_stateLabel.text = @"CallCaption";
-                CGRect f = CGRectMake(0, 0, 110, 24);
-                CGPoint c = g_capWin.center;
-                g_card.frame = f;
-                g_stateLabel.frame = CGRectMake(10, 5, 90, 14);
-                g_capWin.frame = f;
-                g_capWin.center = c;
-            } else {
-                g_origLabel.hidden = NO; g_capLabel.hidden = NO;
-                UpdateCardLayout();
-            }
-        } @catch (NSException *e) { }
-    });
-}
-
 + (void)toggleSession {
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
             g_sessionActive = !g_sessionActive;
-            CCSetArmed(g_sessionActive);   // v0.10: 交给音频守护进程（系统级 Tap）
-            [self refreshButton];
+            CCSetArmed(g_sessionActive);
+            [self refreshPanel];
             CCLogf(@"session %@", g_sessionActive ? @"ARMED" : @"DISARMED");
-            if (!g_sessionActive) [self hideCaption];
-        } @catch (NSException *e) { }
-    });
-}
-
-+ (void)refreshButton {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @try {
-            if (!g_btn) return;
-            if (g_sessionActive) {
-                g_btn.backgroundColor = [UIColor colorWithRed:0.20 green:0.78 blue:0.45 alpha:0.92];
-                [g_btn setTitle:@"译" forState:UIControlStateNormal];
+            if (!g_sessionActive) {
+                g_stateText = nil;
+                [self hideCaption];
             } else {
-                g_btn.backgroundColor = [UIColor colorWithWhite:0.25 alpha:0.85];
-                [g_btn setTitle:@"✕" forState:UIControlStateNormal];
+                g_stateText = @"● 已开启，等待语音";
+                RelayoutCaption();
+                ShowCaptionNow();
+                ResetHideTimer();
             }
         } @catch (NSException *e) { }
     });
 }
 
-+ (void)handleLongPress:(UILongPressGestureRecognizer *)lp {
-    if (lp.state != UIGestureRecognizerStateBegan) return;
++ (void)refreshPanel {
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
-            if (!g_btnWin || !g_btnWin.rootViewController) return;
-            UIAlertController *alert =
-                [UIAlertController alertControllerWithTitle:@"CallCaption 通话翻译"
-                                                    message:nil
-                                             preferredStyle:UIAlertControllerStyleActionSheet];
-            BOOL tts = CCPrefBool(CC_K_TTS_ENABLED, YES);
-            [alert addAction:[UIAlertAction actionWithTitle:[NSString stringWithFormat:@"语音播报：%@", tts ? @"开（点击关闭）" : @"关（点击开启）"]
-                                                      style:UIAlertActionStyleDefault
-                                                    handler:^(__unused UIAlertAction *a) {
-                CFPreferencesSetAppValue((__bridge CFStringRef)CC_K_TTS_ENABLED,
-                                         (__bridge CFPropertyListRef)[[NSNumber alloc] initWithBool:!tts],
-                                         (__bridge CFStringRef)CC_DOMAIN);
-                CFPreferencesAppSynchronize((__bridge CFStringRef)CC_DOMAIN);
-                CCPostNotif(@"prefschanged");
-            }]];
-            BOOL large = CCPrefBool(CC_K_LARGE_CAPTIONS, NO);
-            [alert addAction:[UIAlertAction actionWithTitle:[NSString stringWithFormat:@"大字幕：%@", large ? @"开（点击关闭）" : @"关（点击开启）"]
-                                                      style:UIAlertActionStyleDefault
-                                                    handler:^(__unused UIAlertAction *a) {
-                CFPreferencesSetAppValue((__bridge CFStringRef)CC_K_LARGE_CAPTIONS,
-                                         (__bridge CFPropertyListRef)[[NSNumber alloc] initWithBool:!large],
-                                         (__bridge CFStringRef)CC_DOMAIN);
-                CFPreferencesAppSynchronize((__bridge CFStringRef)CC_DOMAIN);
-                CCPostNotif(@"prefschanged");
-            }]];
-            [alert addAction:[UIAlertAction actionWithTitle:g_sessionActive ? @"暂停翻译" : @"恢复翻译"
-                                                      style:UIAlertActionStyleDefault
-                                                    handler:^(__unused UIAlertAction *a) {
-                [self toggleSession];
-            }]];
-            [alert addAction:[UIAlertAction actionWithTitle:@"取消"
-                                                      style:UIAlertActionStyleCancel
-                                                    handler:nil]];
-            [g_btnWin.rootViewController presentViewController:alert animated:YES completion:nil];
+            if (!g_panelWin) return;
+            BOOL st[5] = {
+                g_sessionActive,
+                CCPrefBool(CC_K_LOCAL_ENABLED, NO),
+                CCPrefBool(CC_K_REMOTE_ENABLED, YES),
+                CCPrefBool(CC_K_SHOW_RECOGNIZED, YES),
+                CCPrefBool(CC_K_SHOW_TRANSLATED, YES),
+            };
+            for (int i = 0; i < 5; i++) {
+                UIButton *b = g_btns[i];
+                if (!b) continue;
+                if (st[i]) {
+                    b.backgroundColor = [UIColor colorWithWhite:1 alpha:0.95];
+                    b.tintColor = [UIColor colorWithWhite:0.12 alpha:1];
+                } else {
+                    b.backgroundColor = [UIColor colorWithWhite:1 alpha:0.10];
+                    b.tintColor = [UIColor colorWithWhite:1 alpha:0.55];
+                }
+            }
         } @catch (NSException *e) { }
     });
+}
+
++ (void)panelButtonTapped:(UIButton *)b {
+    switch (b.tag) {
+        case 0:
+            [self toggleSession];
+            return;
+        case 1:
+            CCSetPrefBool(CC_K_LOCAL_ENABLED, !CCPrefBool(CC_K_LOCAL_ENABLED, NO));
+            break;
+        case 2:
+            CCSetPrefBool(CC_K_REMOTE_ENABLED, !CCPrefBool(CC_K_REMOTE_ENABLED, YES));
+            break;
+        case 3:
+            CCSetPrefBool(CC_K_SHOW_RECOGNIZED, !CCPrefBool(CC_K_SHOW_RECOGNIZED, YES));
+            break;
+        case 4:
+            CCSetPrefBool(CC_K_SHOW_TRANSLATED, !CCPrefBool(CC_K_SHOW_TRANSLATED, YES));
+            break;
+    }
+    [self refreshPanel];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        RefreshCaptionAndShow();
+    });
+}
+
++ (void)handlePanelPan:(UIPanGestureRecognizer *)p {
+    CGPoint t = [p translationInView:nil];
+    CGRect f = g_panelWin.frame;
+    f.origin.x += t.x;
+    f.origin.y += t.y;
+    if (f.origin.y < 60) f.origin.y = 60;
+    if (f.origin.y > ScreenH() - 120) f.origin.y = ScreenH() - 120;
+    if (f.origin.x < -f.size.width * 0.4) f.origin.x = -f.size.width * 0.4;
+    if (f.origin.x > ScreenW() - f.size.width * 0.6)
+        f.origin.x = ScreenW() - f.size.width * 0.6;
+    g_panelWin.frame = f;
+    [p setTranslation:CGPointZero inView:nil];
+}
+
++ (void)handleCaptionPan:(UIPanGestureRecognizer *)p {
+    CGPoint t = [p translationInView:nil];
+    CGPoint c = g_capWin.center;
+    c.x += t.x;
+    c.y += t.y;
+    if (c.y < 80) c.y = 80;
+    if (c.y > ScreenH() - 60) c.y = ScreenH() - 60;
+    g_capWin.center = c;
+    [p setTranslation:CGPointZero inView:nil];
+    if (p.state == UIGestureRecognizerStateEnded) SaveCaptionPos(c);
 }
 
 @end
 
-// ---------- 通话状态 ----------
-
-void CCUICallStateChanged(NSString *state) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @try {
-            if ([state isEqualToString:@"CALL ENDED"]) {
-                // 蜂窝通话结束：自动解除（WhatsApp 手动模式由用户自己解除或 5 分钟静默自动解除）
-                if (g_sessionActive) {
-                    g_sessionActive = NO;
-                    CCSetArmed(NO);
-                    [CCUIHelper refreshButton];
-                }
-                [CCUIHelper hideCaption];
-            }
-        } @catch (NSException *e) { }
-    });
-}
-
-void CCUIBoot(void) {
-    @try {
-        if (!CCIsSpringBoard() || g_uiReady) return;
-        CCMark(@"ui 5.1 boot enter");
-        g_uiReady = YES;
-        CCTransportBoot();
-        CCMark(@"ui 5.2 transport ready");
-        // v0.10: 清理上次残留的采集开关（避免守护进程开机即采集）
-        @try { [[NSFileManager defaultManager] removeItemAtPath:CC_ARM_PATH error:nil]; }
-        @catch (NSException *e) { }
-        // v0.10: 清理上次残留的采集开关（避免守护进程开机即采集）
-        @try { [[NSFileManager defaultManager] removeItemAtPath:CC_ARM_PATH error:nil]; }
-        @catch (NSException *e) { }
-        // v0.8.2: 移除 SpringBoard 内的 CTCallCenter（通话监听在 SB 进程内是已知风险点）
-        CCMark(@"ui 5.3 (ctcallcenter removed)");
-        // v0.7 手动模式：按钮常驻（Enabled 开启时），用户在通话中自行点按启用
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)3 * NSEC_PER_SEC),
-                       dispatch_get_main_queue(), ^{
-            @try {
-                if (CCPrefBool(CC_K_ENABLED, YES)) {
-                    EnsureButtonUI();
-                    EnsureCaptionUI();
-                    g_sessionActive = NO;
-                    [CCUIHelper refreshButton];
-                    g_btnWin.hidden = NO;
-                    [UIView animateWithDuration:0.3 animations:^{ g_btnWin.alpha = 1.0; }];
-                }
-            } @catch (NSException *e) { }
-        });
-        CCLogLine(@"CallCaption UI booted (manual mode)");
-    } @catch (NSException *e) {
-        CCMark(@"ui BOOT EXCEPTION!");
-    }
-}
-
-// ---------- v0.10：中文 TTS 播报（守护进程结果行触发） ----------
+// ---------- TTS ----------
 
 static AVSpeechSynthesizer *g_tts;
 
 void CCUISpeakText(NSString *text) {
     if (text.length == 0) return;
-    // v0.11.2: 写入播报窗口，守护进程据此暂停识别，避免把播报声再识别成英文
     @try {
         double dur = 0.9 + 0.075 * (double)text.length;
         if (dur > 20.0) dur = 20.0;
@@ -475,4 +481,53 @@ void CCUISpeakText(NSString *text) {
             [g_tts speakUtterance:u];
         } @catch (NSException *e) { }
     });
+}
+
+// ---------- 通话状态 ----------
+
+void CCUICallStateChanged(NSString *state) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            if ([state isEqualToString:@"CALL ENDED"]) {
+                if (g_sessionActive) {
+                    g_sessionActive = NO;
+                    CCSetArmed(NO);
+                    [CCUIHelper refreshPanel];
+                }
+                g_stateText = nil;
+                [CCUIHelper hideCaption];
+            }
+        } @catch (NSException *e) { }
+    });
+}
+
+// ---------- 启动 ----------
+
+void CCUIBoot(void) {
+    @try {
+        if (!CCIsSpringBoard() || g_uiReady) return;
+        g_uiReady = YES;
+        CCMark(@"ui 6.1 boot enter");
+        CCTransportBoot();
+        CCMark(@"ui 6.2 transport ready");
+        // 清理上次残留的采集开关
+        @try { [[NSFileManager defaultManager] removeItemAtPath:CC_ARM_PATH error:nil]; }
+        @catch (NSException *e) { }
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)3 * NSEC_PER_SEC),
+                       dispatch_get_main_queue(), ^{
+            @try {
+                if (CCPrefBool(CC_K_ENABLED, YES)) {
+                    EnsurePanelUI();
+                    EnsureCaptionUI();
+                    [CCUIHelper refreshPanel];
+                    g_panelWin.hidden = NO;
+                    g_panelWin.alpha = 1.0;
+                }
+            } @catch (NSException *e) { }
+        });
+        CCLogLine(@"CallCaption UI booted (panel + cards)");
+    } @catch (NSException *e) {
+        CCMark(@"ui BOOT EXCEPTION!");
+    }
 }

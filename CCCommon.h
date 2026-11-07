@@ -17,6 +17,8 @@
 #define CC_K_LOCAL_ENABLED    @"LocalEnabled"     // 我的语音→英文(扬声器中继,实验)
 #define CC_K_TTS_ENABLED      @"TTSEnabled"       // 中文播报
 #define CC_K_CLOUD_ASR       @"CloudASR"         // 云端语音识别（更准，需联网）
+#define CC_K_SHOW_RECOGNIZED @"ShowRecognized"    // 显示识别原文
+#define CC_K_SHOW_TRANSLATED @"ShowTranslated"    // 显示译文
 #define CC_K_ENGINE           @"Engine"           // auto / deepl / ai
 #define CC_K_DEEPL_KEY        @"DeepLKey"
 #define CC_K_GOOGLE_KEY       @"GoogleKey"        // 可选：Google Cloud Translation API Key（不填走免费接口）
@@ -40,9 +42,14 @@ BOOL CCIsAudioService(void);
 NSString *CCEscape(NSString *s);
 
 // ---------- UI 交付（CCUI.m 实现，供传输层调用） ----------
+void CCUIDeliverRemoteOriginal(NSString *text);    // 对方：识别原文
+void CCUIDeliverRemoteTranslated(NSString *text);  // 对方：译文
+void CCUIDeliverLocalOriginal(NSString *text);     // 我方：识别原文
+void CCUIDeliverLocalTranslated(NSString *text);   // 我方：译文
+void CCUIDeliverState(NSString *state);
+// 兼容旧接口
 void CCUIDeliverCaption(NSString *translated);
 void CCUIDeliverOriginal(NSString *original);
-void CCUIDeliverState(NSString *state);
 
 // ---------- 日志（诊断） ----------
 void CCLogLine(NSString *msg);                 // 诊断日志（SB 落盘 / MS 发通知）
@@ -57,6 +64,7 @@ void CCPrefsReload(void);
 id    CCPref(NSString *key);
 BOOL  CCPrefBool(NSString *key, BOOL def);
 NSString *CCPrefStr(NSString *key, NSString *def);
+void  CCSetPrefBool(NSString *key, BOOL value);   // SB 侧写设置并广播
 
 // ---------- 传输（MS→SB 结果行） ----------
 void CCTransportBoot(void);                    // SB 侧：建目录/文件、订阅通知
@@ -86,3 +94,4 @@ void CCUISpeakText(NSString *text);   // SB 侧：中文 TTS 播报
 // ---------- UI（SpringBoard 侧） ----------
 void CCUIBoot(void);
 void CCUICallStateChanged(NSString *state);    // CALL CONNECTED / ENDED / ...
+void CCUIRefreshPanel(void);                   // 设置变化后刷新按钮状态

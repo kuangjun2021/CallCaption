@@ -1,358 +1,174 @@
-// CallCaptionRootListController.m — v0.11.1 自绘设置面板（不依赖 PSListController specifiers）
-// 原因：本环境下 PSListController 的 specifier 加载路径不可靠（面板空白），
-// 改为自定义 UIViewController + UITableView，全部控件自建，读写 CFPreferences 域。
+// CallCaptionRootListController.m — v0.12 设置面板
+// 方案：PSListController 子类（宿主类型正确，不闪退）+ 代码动态创建 PSSpecifier（不依赖 plist 加载）
 #import <UIKit/UIKit.h>
 
-#define CC_DOMAIN   @"net.user.callcaption"
-#define CC_NOTIF    @"net.user.callcaption.prefschanged"
+#define CC_DOMAIN @"net.user.callcaption"
+#define CC_NOTIF  @"net.user.callcaption.prefschanged"
 
-typedef NS_ENUM(NSInteger, CCRowKind) {
-    CCRowKindSwitch = 0,
-    CCRowKindText,
-    CCRowKindChoice,
+// PSCellType 数值（Preferences.framework 私有枚举）
+enum {
+    CCPSGroupCell          = 0,
+    CCPSLinkListCell       = 2,
+    CCPSPSTitleValueCell   = 4,
+    CCPSPSSwitchCell       = 6,
+    CCPSPSEditTextCell     = 8,
+    CCPSPSSecureEditCell   = 12,
+    CCPSPSButtonCell       = 13,
+    CCPSPSListItemsCell    = 14,
 };
 
-@interface CCRow : NSObject
-@property (nonatomic) CCRowKind kind;
-@property (nonatomic, copy) NSString *key;
-@property (nonatomic, copy) NSString *title;
-@property (nonatomic, copy) NSString *placeholder;
-@property (nonatomic) BOOL defBool;
-@property (nonatomic, copy) NSString *defString;
-@property (nonatomic) BOOL secure;
-@property (nonatomic, copy) NSArray<NSString *> *choiceValues;
-@property (nonatomic, copy) NSArray<NSString *> *choiceTitles;
-@end
-@implementation CCRow @end
-
-@interface CCSwitch : UISwitch
-@property (nonatomic, copy) NSString *prefKey;
-@end
-@implementation CCSwitch @end
-
-@interface CCRowCell : UITableViewCell
-@property (nonatomic, strong) UILabel *nameLabel;
-@property (nonatomic, strong) UITextField *field;
+@interface PSListController : UIViewController
+@property (nonatomic, copy) NSArray *specifiers;
+- (void)setSpecifiers:(NSArray *)specifiers;
 @end
 
-@implementation CCRowCell
-- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
-    self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
-    if (self) {
-        _nameLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-        _nameLabel.font = [UIFont systemFontOfSize:16];
-        _nameLabel.textColor = [UIColor labelColor];
-        _nameLabel.adjustsFontSizeToFitWidth = YES;
-        _nameLabel.minimumScaleFactor = 0.75;
-        [self.contentView addSubview:_nameLabel];
-        _field = [[UITextField alloc] initWithFrame:CGRectZero];
-        _field.font = [UIFont systemFontOfSize:15];
-        _field.textAlignment = NSTextAlignmentRight;
-        _field.textColor = [UIColor secondaryLabelColor];
-        _field.clearButtonMode = UITextFieldViewModeWhileEditing;
-        _field.autocorrectionType = UITextAutocorrectionTypeNo;
-        _field.autocapitalizationType = UITextAutocapitalizationTypeNone;
-        _field.keyboardType = UIKeyboardTypeURL;
-        [self.contentView addSubview:_field];
-    }
-    return self;
-}
-- (void)layoutSubviews {
-    [super layoutSubviews];
-    CGFloat w = self.contentView.bounds.size.width;
-    CGFloat h = self.contentView.bounds.size.height;
-    CGFloat nameW = MIN(180.0, w * 0.46);
-    _nameLabel.frame = CGRectMake(16, 0, nameW, h);
-    CGFloat fx = 16 + nameW + 12;
-    _field.frame = CGRectMake(fx, 0, w - fx - 16, h);
-}
+@interface PSSpecifier : NSObject
++ (instancetype)preferenceSpecifierNamed:(NSString *)name
+                                  target:(id)target
+                                     set:(SEL)set
+                                     get:(SEL)get
+                                  detail:(Class)detail
+                                    cell:(long)cell
+                                    edit:(Class)edit;
+- (void)setProperty:(id)value forKey:(NSString *)key;
+- (id)propertyForKey:(NSString *)key;
 @end
 
 __attribute__((visibility("default")))
-@interface CallCaptionRootListController : UIViewController
-    <UITableViewDataSource, UITableViewDelegate, UITextFieldDelegate>
-@property (nonatomic, strong) UITableView *table;
-@property (nonatomic, strong) NSArray<NSArray<CCRow *> *> *sections;
-@property (nonatomic, strong) NSArray<NSString *> *sectionTitles;
-@property (nonatomic, strong) NSArray<NSString *> *sectionFooters;
-@property (nonatomic, strong) NSMutableDictionary<NSString *, id> *values;
-@property (nonatomic, strong) NSArray<CCRow *> *textRows;
+@interface CallCaptionRootListController : PSListController
+@property (nonatomic, strong) NSArray *mySpecs;
 @end
 
 @implementation CallCaptionRootListController
 
-- (instancetype)init {
-    return [self initWithNibName:nil bundle:nil];
-}
-- (instancetype)initWithNibName:(NSString *)n bundle:(NSBundle *)b {
-    self = [super initWithNibName:n bundle:b];
-    if (self) self.title = @"CallCaption 通话翻译";
-    return self;
-}
-- (instancetype)initWithBundle:(NSBundle *)bundle { return [self initWithNibName:nil bundle:nil]; }
-- (instancetype)initForContentSize:(CGSize)size { return [self initWithNibName:nil bundle:nil]; }
-
-// ---------- 数据模型 ----------
-
-static CCRow *MkSwitch(NSString *key, NSString *title, BOOL def) {
-    CCRow *r = [CCRow new];
-    r.kind = CCRowKindSwitch; r.key = key; r.title = title; r.defBool = def;
-    return r;
-}
-static CCRow *MkText(NSString *key, NSString *title, NSString *def, BOOL secure, NSString *ph) {
-    CCRow *r = [CCRow new];
-    r.kind = CCRowKindText; r.key = key; r.title = title; r.defString = def;
-    r.secure = secure; r.placeholder = ph;
-    return r;
-}
-static CCRow *MkChoice(NSString *key, NSString *title, NSString *def,
-                       NSArray<NSString *> *vals, NSArray<NSString *> *titles) {
-    CCRow *r = [CCRow new];
-    r.kind = CCRowKindChoice; r.key = key; r.title = title; r.defString = def;
-    r.choiceValues = vals; r.choiceTitles = titles;
-    return r;
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"CallCaption";
+    if (!self.mySpecs) self.mySpecs = [self buildSpecifiers];
+    [self setSpecifiers:self.mySpecs];
 }
 
-- (void)buildModel {
-    NSArray *func = @[
-        MkSwitch(@"Enabled", @"启用 CallCaption", YES),
-        MkSwitch(@"RemoteEnabled", @"对方语音 → 中文字幕", YES),
-        MkSwitch(@"LocalEnabled", @"双向模式：我的话 → 英文播报", NO),
-        MkSwitch(@"TTSEnabled", @"中文字幕语音播报", YES),
-        MkSwitch(@"CloudASR", @"云端语音识别（更准，需联网）", YES),
-        MkSwitch(@"LargeCaptions", @"大字幕", NO),
-    ];
-    NSArray *lang = @[
-        MkText(@"RemoteLocale", @"对方语言", @"en-US", NO, @"en-US"),
-        MkText(@"LocalLocale", @"我的语言", @"zh-CN", NO, @"zh-CN"),
-    ];
-    NSArray *engine = @[
-        MkChoice(@"Engine", @"翻译引擎", @"auto",
-                 @[@"auto", @"deepl", @"google", @"ai"],
-                 @[@"自动（推荐）", @"DeepL", @"Google", @"AI 自定义"]),
-        MkText(@"DeepLKey", @"DeepL API Key", @"", YES, @"不填则跳过 DeepL"),
-        MkText(@"GoogleKey", @"Google API Key", @"", YES, @"不填则用免费接口"),
-    ];
-    NSArray *ai = @[
-        MkText(@"AIURL", @"AI 接口地址", @"https://api.deepseek.com/v1/chat/completions", NO,
-               @"https://.../chat/completions"),
-        MkText(@"AIKey", @"AI API Key", @"", YES, @"sk-..."),
-        MkText(@"AIModel", @"AI 模型名", @"deepseek-chat", NO, @"deepseek-chat"),
-    ];
-    NSArray *diag = @[
-        MkSwitch(@"Diagnostics", @"诊断日志", YES),
-    ];
-
-    self.sections = @[func, lang, engine, ai, diag];
-    self.sectionTitles = @[@"功能开关", @"语言", @"翻译引擎", @"AI 自定义接口（OpenAI 兼容）", @"诊断"];
-    self.sectionFooters = @[
-        @"通话接通后右上角出现“译”按钮，点按开/关翻译。字幕可拖动，双击折叠。",
-        @"识别语言代码（BCP-47）：对方英文填 en-US，日文填 ja-JP；我的语言通常 zh-CN。",
-        @"自动 = 已填 Key 优先，失败自动切下一个；Google 填了 Key 走 Cloud Translation，不填走免费接口兜底。",
-        @"填写 chat/completions 完整地址、Key 与模型名。示例：DeepSeek 地址 + deepseek-chat。",
-        @"日志位于 /var/mobile/Library/CallCaption/probe.log",
-    ];
-
-    NSMutableArray *tr = [NSMutableArray array];
-    for (NSArray *sec in self.sections)
-        for (CCRow *r in sec)
-            if (r.kind == CCRowKindText) [tr addObject:r];
-    self.textRows = tr;
+- (NSArray *)specifiers {
+    if (!self.mySpecs) self.mySpecs = [self buildSpecifiers];
+    return self.mySpecs;
 }
 
-// ---------- 读写设置 ----------
+// ---------- 构建 ----------
 
-- (void)loadValues {
-    self.values = [NSMutableDictionary dictionary];
-    for (NSArray *sec in self.sections) {
-        for (CCRow *r in sec) {
-            id v = (__bridge_transfer id)CFPreferencesCopyAppValue(
-                       (__bridge CFStringRef)r.key, (__bridge CFStringRef)CC_DOMAIN);
-            if (!v) {
-                v = (r.kind == CCRowKindSwitch) ? @(r.defBool) : (r.defString ?: @"");
-            }
-            self.values[r.key] = v;
-        }
-    }
+- (PSSpecifier *)group:(NSString *)title footer:(NSString *)footer {
+    PSSpecifier *g = [PSSpecifier preferenceSpecifierNamed:title
+                                                    target:nil set:nil get:nil detail:nil
+                                                      cell:CCPSGroupCell edit:nil];
+    if (footer) [g setProperty:footer forKey:@"footerText"];
+    return g;
 }
 
-- (NSString *)stringFor:(CCRow *)r {
-    id v = self.values[r.key];
-    if ([v isKindOfClass:[NSString class]]) return v;
-    if ([v isKindOfClass:[NSNumber class]]) return [v stringValue];
-    return r.defString ?: @"";
+- (PSSpecifier *)toggle:(NSString *)title key:(NSString *)key def:(BOOL)def {
+    PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:title
+                                                     target:self
+                                                        set:@selector(setPrefValue:specifier:)
+                                                        get:@selector(getPrefValue:)
+                                                     detail:nil
+                                                       cell:CCPSPSSwitchCell
+                                                       edit:nil];
+    [sp setProperty:key forKey:@"key"];
+    [sp setProperty:@(def) forKey:@"default"];
+    return sp;
 }
 
-- (BOOL)boolFor:(CCRow *)r {
-    id v = self.values[r.key];
-    if ([v isKindOfClass:[NSNumber class]]) return [v boolValue];
-    if ([v isKindOfClass:[NSString class]]) return [v boolValue] || [v isEqualToString:@"YES"] || [v isEqualToString:@"1"];
-    return r.defBool;
+- (PSSpecifier *)text:(NSString *)title key:(NSString *)key def:(NSString *)def secure:(BOOL)secure {
+    PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:title
+                                                     target:self
+                                                        set:@selector(setPrefValue:specifier:)
+                                                        get:@selector(getPrefValue:)
+                                                     detail:nil
+                                                       cell:(secure ? CCPSPSSecureEditCell : CCPSPSEditTextCell)
+                                                       edit:nil];
+    [sp setProperty:key forKey:@"key"];
+    if (def) [sp setProperty:def forKey:@"default"];
+    if (secure) [sp setProperty:@YES forKey:@"isSecure"];
+    return sp;
 }
 
-- (void)setPrefValue:(id)value forKey:(NSString *)key {
+- (PSSpecifier *)choice:(NSString *)title key:(NSString *)key def:(NSString *)def
+                 values:(NSArray *)vals titles:(NSArray *)titles {
+    PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:title
+                                                     target:self
+                                                        set:@selector(setPrefValue:specifier:)
+                                                        get:@selector(getPrefValue:)
+                                                     detail:nil
+                                                       cell:CCPSPSListItemsCell
+                                                       edit:nil];
+    [sp setProperty:key forKey:@"key"];
+    [sp setProperty:def forKey:@"default"];
+    [sp setProperty:vals forKey:@"validValues"];
+    [sp setProperty:titles forKey:@"validTitles"];
+    [sp setProperty:vals forKey:@"values"];
+    [sp setProperty:titles forKey:@"titles"];
+    return sp;
+}
+
+- (NSArray *)buildSpecifiers {
+    NSMutableArray *a = [NSMutableArray array];
+
+    [a addObject:[self group:@"功能开关"
+                      footer:@"通话接通后屏幕出现 CallCaption 控制面板：🌐 总开关、我方、对方、原文、译文。"]];
+    [a addObject:[self toggle:@"启用 CallCaption" key:@"Enabled" def:YES]];
+    [a addObject:[self toggle:@"对方语音 → 中文字幕" key:@"RemoteEnabled" def:YES]];
+    [a addObject:[self toggle:@"双向模式：我的话 → 英文播报" key:@"LocalEnabled" def:NO]];
+    [a addObject:[self toggle:@"显示识别原文" key:@"ShowRecognized" def:YES]];
+    [a addObject:[self toggle:@"显示译文" key:@"ShowTranslated" def:YES]];
+    [a addObject:[self toggle:@"中文字幕语音播报" key:@"TTSEnabled" def:YES]];
+    [a addObject:[self toggle:@"大字幕" key:@"LargeCaptions" def:NO]];
+
+    [a addObject:[self group:@"语言"
+                      footer:@"识别语言代码（BCP-47）：对方英文填 en-US，日文 ja-JP，韩文 ko-KR；我的语言通常 zh-CN。"]];
+    [a addObject:[self text:@"对方语言" key:@"RemoteLocale" def:@"en-US" secure:NO]];
+    [a addObject:[self text:@"我的语言" key:@"LocalLocale" def:@"zh-CN" secure:NO]];
+
+    [a addObject:[self group:@"翻译引擎"
+                      footer:@"自动 = 已填 Key 优先，失败自动切换；Google 不填 Key 用免费接口，填了用 Cloud Translation。"]];
+    [a addObject:[self choice:@"引擎" key:@"Engine" def:@"auto"
+                        values:@[@"auto", @"deepl", @"google", @"ai"]
+                        titles:@[@"自动（推荐）", @"DeepL", @"Google", @"AI 自定义"]]];
+    [a addObject:[self text:@"DeepL API Key" key:@"DeepLKey" def:nil secure:YES]];
+    [a addObject:[self text:@"Google API Key" key:@"GoogleKey" def:nil secure:YES]];
+
+    [a addObject:[self group:@"AI 自定义接口（OpenAI 兼容）"
+                      footer:@"填写 chat/completions 完整地址、Key 与模型名，例如 DeepSeek。"]];
+    [a addObject:[self text:@"AI 接口地址" key:@"AIURL"
+                        def:@"https://api.deepseek.com/v1/chat/completions" secure:NO]];
+    [a addObject:[self text:@"AI API Key" key:@"AIKey" def:nil secure:YES]];
+    [a addObject:[self text:@"AI 模型名" key:@"AIModel" def:@"deepseek-chat" secure:NO]];
+
+    [a addObject:[self group:@"识别与诊断"
+                      footer:@"日志：/var/mobile/Library/CallCaption/probe.log"]];
+    [a addObject:[self toggle:@"云端语音识别（更准，需联网）" key:@"CloudASR" def:YES]];
+    [a addObject:[self toggle:@"诊断日志" key:@"Diagnostics" def:YES]];
+
+    return a;
+}
+
+// ---------- 读写 ----------
+
+- (id)getPrefValue:(PSSpecifier *)spec {
+    NSString *key = [spec propertyForKey:@"key"];
+    if (!key) return nil;
+    id v = (__bridge_transfer id)CFPreferencesCopyAppValue(
+               (__bridge CFStringRef)key, (__bridge CFStringRef)CC_DOMAIN);
+    if (v) return v;
+    return [spec propertyForKey:@"default"];
+}
+
+- (void)setPrefValue:(id)value specifier:(PSSpecifier *)spec {
+    NSString *key = [spec propertyForKey:@"key"];
     if (!key) return;
-    self.values[key] = value ?: @"";
     CFPreferencesSetAppValue((__bridge CFStringRef)key,
-                             (__bridge CFPropertyListRef)(value ?: @""),
+                             (__bridge CFPropertyListRef)value,
                              (__bridge CFStringRef)CC_DOMAIN);
     CFPreferencesAppSynchronize((__bridge CFStringRef)CC_DOMAIN);
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
         (__bridge CFStringRef)CC_NOTIF, NULL, NULL, YES);
-}
-
-// ---------- 生命周期 ----------
-
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
-    [self buildModel];
-    [self loadValues];
-
-    self.table = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleInsetGrouped];
-    self.table.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    self.table.dataSource = self;
-    self.table.delegate = self;
-    self.table.keyboardDismissMode = UIScrollViewKeyboardDismissModeInteractive;
-    [self.view addSubview:self.table];
-
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(kbChange:)
-        name:UIKeyboardWillChangeFrameNotification object:nil];
-}
-
-- (void)dealloc {
-    [[NSNotificationCenter defaultCenter] removeObserver:self];
-}
-
-- (void)kbChange:(NSNotification *)n {
-    CGRect end = [n.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
-    CGRect local = [self.view convertRect:end fromView:nil];
-    CGFloat overlap = MAX(0, self.view.bounds.size.height - local.origin.y);
-    UIEdgeInsets insets = UIEdgeInsetsMake(0, 0, overlap, 0);
-    self.table.contentInset = insets;
-    self.table.scrollIndicatorInsets = insets;
-}
-
-// ---------- Table ----------
-
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return self.sections.count; }
-- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
-    return self.sections[(NSUInteger)s].count;
-}
-- (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)s {
-    return self.sectionTitles[(NSUInteger)s];
-}
-- (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)s {
-    return self.sectionFooters[(NSUInteger)s];
-}
-
-- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
-    CCRow *row = self.sections[(NSUInteger)ip.section][(NSUInteger)ip.row];
-
-    if (row.kind == CCRowKindSwitch) {
-        static NSString *cid = @"sw";
-        UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:cid];
-        if (!cell) {
-            cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:cid];
-            cell.selectionStyle = UITableViewCellSelectionStyleNone;
-            CCSwitch *sw = [[CCSwitch alloc] initWithFrame:CGRectMake(0, 0, 51, 31)];
-            [sw addTarget:self action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];
-            cell.accessoryView = sw;
-        }
-        cell.textLabel.text = row.title;
-        cell.textLabel.font = [UIFont systemFontOfSize:16];
-        CCSwitch *sw = (CCSwitch *)cell.accessoryView;
-        sw.prefKey = row.key;
-        sw.on = [self boolFor:row];
-        return cell;
-    }
-
-    if (row.kind == CCRowKindText) {
-        static NSString *cid = @"txt";
-        CCRowCell *cell = [tv dequeueReusableCellWithIdentifier:cid];
-        if (!cell) cell = [[CCRowCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:cid];
-        cell.nameLabel.text = row.title;
-        cell.field.placeholder = row.placeholder;
-        cell.field.secureTextEntry = row.secure;
-        cell.field.text = [self stringFor:row];
-        cell.field.delegate = self;
-        cell.field.tag = (NSInteger)[self.textRows indexOfObject:row];
-        cell.selectionStyle = UITableViewCellSelectionStyleNone;
-        return cell;
-    }
-
-    // Choice
-    static NSString *cid = @"choice";
-    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:cid];
-    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:cid];
-    cell.textLabel.text = row.title;
-    cell.textLabel.font = [UIFont systemFontOfSize:16];
-    cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
-    cell.detailTextLabel.text = [self titleForChoice:row value:[self stringFor:row]];
-    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-    return cell;
-}
-
-- (NSString *)titleForChoice:(CCRow *)row value:(NSString *)val {
-    NSUInteger i = [row.choiceValues indexOfObject:val];
-    if (i != NSNotFound && i < row.choiceTitles.count) return row.choiceTitles[i];
-    return row.choiceTitles.firstObject ?: val;
-}
-
-- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
-    [tv deselectRowAtIndexPath:ip animated:YES];
-    CCRow *row = self.sections[(NSUInteger)ip.section][(NSUInteger)ip.row];
-    if (row.kind == CCRowKindText) {
-        UITableViewCell *cell = [tv cellForRowAtIndexPath:ip];
-        if ([cell isKindOfClass:[CCRowCell class]])
-            [[(CCRowCell *)cell field] becomeFirstResponder];
-        return;
-    }
-    if (row.kind == CCRowKindChoice) {
-        [self presentChoices:row cell:[tv cellForRowAtIndexPath:ip]];
-    }
-}
-
-// ---------- 交互 ----------
-
-- (void)switchChanged:(CCSwitch *)sw {
-    [self setPrefValue:@(sw.on) forKey:sw.prefKey];
-}
-
-- (void)textFieldDidEndEditing:(UITextField *)tf {
-    if (tf.tag >= 0 && (NSUInteger)tf.tag < self.textRows.count) {
-        CCRow *r = self.textRows[(NSUInteger)tf.tag];
-        [self setPrefValue:(tf.text ?: @"") forKey:r.key];
-    }
-}
-
-- (BOOL)textFieldShouldReturn:(UITextField *)tf {
-    [tf resignFirstResponder];
-    return YES;
-}
-
-- (void)presentChoices:(CCRow *)row cell:(UITableViewCell *)cell {
-    NSString *cur = [self stringFor:row];
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:row.title
-                                                                  message:nil
-                                                           preferredStyle:UIAlertControllerStyleActionSheet];
-    for (NSUInteger i = 0; i < row.choiceValues.count; i++) {
-        NSString *val = row.choiceValues[i];
-        NSString *title = i < row.choiceTitles.count ? row.choiceTitles[i] : val;
-        NSString *mark = [val isEqualToString:cur] ? @"✓ " : @"";
-        [sheet addAction:[UIAlertAction actionWithTitle:[mark stringByAppendingString:title]
-                                                  style:UIAlertActionStyleDefault
-                                                handler:^(__unused UIAlertAction *a) {
-            [self setPrefValue:val forKey:row.key];
-            [self.table reloadData];
-        }]];
-    }
-    [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    if (sheet.popoverPresentationController) {
-        sheet.popoverPresentationController.sourceView = cell ?: self.view;
-        sheet.popoverPresentationController.sourceRect = cell ? cell.bounds : self.view.bounds;
-    }
-    [self presentViewController:sheet animated:YES completion:nil];
 }
 
 @end

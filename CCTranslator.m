@@ -155,7 +155,8 @@ void CCTranslate(NSString *text, NSString *fromLang, NSString *toLang,
 
         NSString *engine = CCPrefStr(CC_K_ENGINE, @"auto").lowercaseString;
         NSString *dk = CCPrefStr(CC_K_DEEPL_KEY, @"");
-        BOOL aiReady = CCPrefStr(CC_K_AI_URL, @"").length > 0;
+        BOOL aiReady = CCPrefStr(CC_K_AI_URL, @"").length > 0 &&
+                       CCPrefStr(CC_K_AI_KEY, @"").length > 0;
 
         void (^handle)(NSString *res, NSString *primary, NSError *perr) =
             ^(NSString *res, NSString *primary, NSError *perr) {
@@ -164,14 +165,17 @@ void CCTranslate(NSString *text, NSString *fromLang, NSString *toLang,
                 dispatch_async(dispatch_get_main_queue(), ^{ done(res); });
                 return;
             }
+            if (perr) CCLogf(@"translate[%@] failed: %@", primary, perr.localizedDescription);
             // 降级：primary 失败，试另一个
             if ([primary isEqualToString:@"deepl"] && aiReady) {
                 TranslateAI(text, fromLang, toLang, ^(NSString *r2, NSError *e2) {
+                    if (!r2.length && e2) CCLogf(@"translate[ai] failed: %@", e2.localizedDescription);
                     if (r2.length) CachePut(text, r2);
                     dispatch_async(dispatch_get_main_queue(), ^{ done(r2); });
                 });
             } else if ([primary isEqualToString:@"ai"] && dk.length) {
                 TranslateDeepL(text, fromLang, toLang, ^(NSString *r2, NSError *e2) {
+                    if (!r2.length && e2) CCLogf(@"translate[deepl] failed: %@", e2.localizedDescription);
                     if (r2.length) CachePut(text, r2);
                     dispatch_async(dispatch_get_main_queue(), ^{ done(r2); });
                 });

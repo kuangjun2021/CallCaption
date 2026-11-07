@@ -347,6 +347,7 @@ static AVAudioPCMBuffer *BuildPCM(CCRing *r, uint8_t *bytes, unsigned long len) 
             }
         }
         double rms16 = frames16 ? sqrt(acc16 / frames16) : 0;
+        BOOL sane16 = frames16 >= 32 && nz16 > frames16 / 8 && rms16 > 0.0003 && rms16 < 0.95;
         // 候选 B：按 float32 交错立体声解析
         unsigned long frames32 = len / 8;
         double acc32 = 0; size_t nz32 = 0; BOOL floatSane = YES;
@@ -359,10 +360,11 @@ static AVAudioPCMBuffer *BuildPCM(CCRing *r, uint8_t *bytes, unsigned long len) 
             }
         }
         double rms32 = frames32 ? sqrt(acc32 / frames32) : 0;
+        BOOL sane32 = floatSane && frames32 >= 32 && nz32 > frames32 / 8 && rms32 > 0.0003 && rms32 < 0.95;
 
         int use = 0;
-        if (rms16 > 0.0003 && rms16 < 0.95) use = 1;
-        else if (floatSane && rms32 > 0.0003 && rms32 < 0.95) use = 2;
+        if (sane16) use = 1;
+        else if (sane32) use = 2;
         if (!use) return nil;
 
         AVAudioFrameCount frames = (use == 1) ? (AVAudioFrameCount)frames16

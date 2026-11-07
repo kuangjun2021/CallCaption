@@ -229,8 +229,7 @@ static void EnsureMiniUI(void) {
 
 // ---------- 双字幕框 ----------
 
-static UIWindow *MakeBox(NSString *titleText, UIColor *titleColor,
-                         UILabel **outTitle, UILabel **outText) {
+static UIWindow *MakeBox(NSString *titleText, UIColor *titleColor) {
     CGFloat w = CardWidth();
     UIWindow *win = [[UIWindow alloc] initWithFrame:
         CGRectMake((ScreenW() - w) / 2.0, ScreenH() - 420, w, 10)];
@@ -252,18 +251,18 @@ static UIWindow *MakeBox(NSString *titleText, UIColor *titleColor,
     [blur.contentView addSubview:ov];
 
     UILabel *t = [[UILabel alloc] initWithFrame:CGRectZero];
+    t.tag = 1001;
     t.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
     t.textColor = titleColor;
     t.text = titleText;
     [blur.contentView addSubview:t];
-    *outTitle = t;
 
     UILabel *x = [[UILabel alloc] initWithFrame:CGRectZero];
+    x.tag = 1002;
     x.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
     x.textColor = [UIColor colorWithWhite:1 alpha:0.95];
     x.numberOfLines = 0;
     [blur.contentView addSubview:x];
-    *outText = x;
 
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
         initWithTarget:[CCUIHelper class] action:@selector(handleBoxPan:)];
@@ -276,7 +275,9 @@ static UIWindow *MakeBox(NSString *titleText, UIColor *titleColor,
 static void EnsureCaptionUI(void) {
     if (g_captionBuilt) return;
     @try {
-        g_origWin = MakeBox(@"Recognized", BlueTitle(), &g_origTitle, &g_origText);
+        g_origWin = MakeBox(@"Recognized", BlueTitle());
+        g_origTitle = (UILabel *)[g_origWin viewWithTag:1001];
+        g_origText = (UILabel *)[g_origWin viewWithTag:1002];
         NSNumber *ox = CCPref(@"OrigX"), *oy = CCPref(@"OrigY");
         if ([ox isKindOfClass:[NSNumber class]] && [oy isKindOfClass:[NSNumber class]]) {
             g_origWin.center = CGPointMake([ox floatValue], [oy floatValue]);
@@ -284,7 +285,9 @@ static void EnsureCaptionUI(void) {
             g_origWin.center = CGPointMake(ScreenW() / 2.0, ScreenH() - 470);
         }
 
-        g_transWin = MakeBox(@"Translated", GreenTitle(), &g_transTitle, &g_transText);
+        g_transWin = MakeBox(@"Translated", GreenTitle());
+        g_transTitle = (UILabel *)[g_transWin viewWithTag:1001];
+        g_transText = (UILabel *)[g_transWin viewWithTag:1002];
         NSNumber *tx = CCPref(CC_K_CAPTION_X), *ty = CCPref(CC_K_CAPTION_Y);
         if ([tx isKindOfClass:[NSNumber class]] && [ty isKindOfClass:[NSNumber class]]) {
             g_transWin.center = CGPointMake([tx floatValue], [ty floatValue]);

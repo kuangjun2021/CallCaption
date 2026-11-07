@@ -276,8 +276,9 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
     restartPending = NO;
     ttsPaused = NO;
     @try {
-        if (task) { [task cancel]; task = nil; }
+        // 不调用 [task ：本环境会在 SFLocalSpeechRecognitionClient stopSpeech 触发 SIGBUS
         if (req) { [req endAudio]; req = nil; }
+        task = nil;
         if (queue) {
             AudioQueueStop(queue, true);
             AudioQueueDispose(queue, true);
@@ -291,8 +292,9 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
 // 暂停识别但保留音频队列（TTS 外放期间，避免把播报回声喂进识别器）
 - (void)pauseRecog {
     @try {
-        if (task) { [task cancel]; task = nil; }
+        // 不调用 [task ：本环境会在 SFLocalSpeechRecognitionClient stopSpeech 触发 SIGBUS
         if (req) { [req endAudio]; req = nil; }
+        task = nil;
     } @catch (NSException *e) { }
 }
 
@@ -309,8 +311,9 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
             [self recogRestart:2.0];
             return;
         }
-        if (task) { [task cancel]; task = nil; }
+        // 不调用 [task ：本环境会在 SFLocalSpeechRecognitionClient stopSpeech 触发 SIGBUS
         if (req) { [req endAudio]; req = nil; }
+        task = nil;
 
         SFSpeechAudioBufferRecognitionRequest *r =
             [[SFSpeechAudioBufferRecognitionRequest alloc] init];
@@ -363,6 +366,7 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
 
 - (void)handleResult:(SFSpeechRecognitionResult *)result error:(NSError *)error {
     @try {
+        if (!capturing) return;
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
         BOOL muted = (now < g_muteUntil) || (now < g_ttsUntil);
 
@@ -377,7 +381,7 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
                         CCLogf(@"%@: low confidence %.2f, skip: %@", self.tag, conf, txt);
                     }
                 }
-                if (capturing) [self recogRestart:0.25];
+                if (capturing && !ttsPaused) [self recogRestart:0.25];
                 return;
             }
             if (!muted && txt.length > 1 && now - lastPartialAt > 0.7) {
@@ -406,7 +410,7 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
                     CCLogf(@"%@: fallback to server recognition", self.tag);
                 }
             }
-            if (capturing) [self recogRestart:benign ? 0.5 : 1.5];
+            if (capturing && !ttsPaused) [self recogRestart:benign ? 0.5 : 1.5];
         }
     } @catch (NSException *e) { }
 }
@@ -576,7 +580,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.12.6)");
+        CCLogLine(@"audioservice started (v0.12.7)");
 
         g_stateQ = dispatch_queue_create("net.user.callcaption.audio", DISPATCH_QUEUE_SERIAL);
 

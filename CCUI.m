@@ -28,9 +28,8 @@ static BOOL g_captionBuilt;
 static NSString *g_texts[4];       // 0 对方原文 / 1 对方译文 / 2 我方原文 / 3 我方译文
 static NSString *g_stateText;
 
-static UITapGestureRecognizer *g_outsideTap;
-static id g_panelGuard;
 static UIView *g_panelCard;
+static UIWindow *g_settingsWin;
 
 static CGFloat ScreenW(void) { return [UIScreen mainScreen].bounds.size.width; }
 static CGFloat ScreenH(void) { return [UIScreen mainScreen].bounds.size.height; }
@@ -66,6 +65,24 @@ static void AttachScene(UIWindow *win) {
     }
 }
 
+// 在 SpringBoard 内直接弹出设置（不经过 Settings.app）
+static void CCOpenSettings(void) {
+    @try {
+        if (!g_settingsWin) {
+            Class cls = NSClassFromString(@"CCSettingsController");
+            if (!cls) { CCLogf(@"settings: class missing"); return; }
+            g_settingsWin = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+            g_settingsWin.windowLevel = UIWindowLevelAlert + 50;
+            UIViewController *vc = [[cls alloc] init];
+            UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+            g_settingsWin.rootViewController = nav;
+        }
+        AttachScene(g_settingsWin);
+        g_settingsWin.hidden = NO;
+        CCLogf(@"settings: opened in SpringBoard");
+    } @catch (NSException *e) { CCLogf(@"settings exc: %@", e.reason); }
+}
+
 @class CCUIHelper;
 @interface CCUIHelper : NSObject
 + (void)hideCaption;
@@ -77,7 +94,8 @@ static void AttachScene(UIWindow *win) {
 + (void)collapsePanel;
 + (void)expandPanel;
 + (void)handleMiniPan:(UIPanGestureRecognizer *)p;
-+ (void)outsideTapped:(UITapGestureRecognizer *)g;
++ (void)outsideTapped:(id)sender;
++ (void)openSettings:(id)sender;
 @end
 
 static void CCUIHandleCallActive(BOOL active);
@@ -95,16 +113,7 @@ static void RefreshBoxes(void);
 }
 @end
 
-// 面板窗口是全屏透明窗：背景任意位置点按=收起；面板卡片本身不触发。
-@interface CCPanelTapGuard : NSObject <UIGestureRecognizerDelegate>
-@property (nonatomic, weak) UIView *card;
-@end
-@implementation CCPanelTapGuard
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)g shouldReceiveTouch:(UITouch *)touch {
-    if (self.card && [touch.view isDescendantOfView:self.card]) return NO;
-    return YES;
-}
-@end
+
 
 // ---------- 控制面板 ----------
 
@@ -120,6 +129,13 @@ static void EnsurePanelUI(void) {
         UIView *bg = [[UIView alloc] initWithFrame:win.bounds];
         bg.backgroundColor = [UIColor clearColor];
         [win addSubview:bg];
+
+        UIButton *catcher = [UIButton buttonWithType:UIButtonTypeCustom];
+        catcher.frame = bg.bounds;
+        catcher.backgroundColor = [UIColor clearColor];
+        [catcher addTarget:[CCUIHelper class] action:@selector(outsideTapped:)
+          forControlEvents:UIControlEventTouchUpInside];
+        [bg addSubview:catcher];
 
         UIVisualEffectView *blur = [[UIVisualEffectView alloc]
             initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark]];
@@ -175,14 +191,9 @@ static void EnsurePanelUI(void) {
             initWithTarget:[CCUIHelper class] action:@selector(handlePanelPan:)];
         [blur addGestureRecognizer:pan];
 
-        CCPanelTapGuard *guard = [CCPanelTapGuard new];
-        guard.card = blur;
-        g_panelGuard = guard;
-        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
-            initWithTarget:[CCUIHelper class] action:@selector(outsideTapped:)];
-        tap.delegate = guard;
-        [bg addGestureRecognizer:tap];
-        g_outsideTap = tap;
+        UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
+            initWithTarget:[CCUIHelper class] action:@selector(openSettings:)];
+        [blur addGestureRecognizer:lp];
 
         AttachScene(win);
         win.hidden = YES;
@@ -216,6 +227,9 @@ static void EnsureMiniUI(void) {
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
             initWithTarget:[CCUIHelper class] action:@selector(handleMiniPan:)];
         [b addGestureRecognizer:pan];
+        UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
+            initWithTarget:[CCUIHelper class] action:@selector(openSettings:)];
+        [b addGestureRecognizer:lp];
 
         [win addSubview:b];
         AttachScene(win);
@@ -483,8 +497,13 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
     });
 }
 
-+ (void)outsideTapped:(UITapGestureRecognizer *)g {
++ (void)outsideTapped:(id)sender {
+    CCLogf(@"panel: outside tap");
     if (g_panelExpanded) [self collapsePanel];
+}
+
++ (void)openSettings:(id)sender {
+    CCOpenSettings();
 }
 
 + (void)handlePanelPan:(UIPanGestureRecognizer *)p {

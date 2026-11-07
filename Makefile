@@ -14,9 +14,9 @@ CallCaption_LDFLAGS = -Wl,-fixup_chains
 BUNDLE_NAME = CallCaptionPrefs
 CallCaptionPrefs_FILES = CallCaptionRootListController.m
 CallCaptionPrefs_FRAMEWORKS = Foundation UIKit
-CallCaptionPrefs_PRIVATE_FRAMEWORKS = Preferences
+
 CallCaptionPrefs_CFLAGS = -fobjc-arc -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
-CallCaptionPrefs_LDFLAGS = -Wl,-fixup_chains
+CallCaptionPrefs_LDFLAGS = -Wl,-fixup_chains -Wl,-undefined,dynamic_lookup
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 include $(THEOS_MAKE_PATH)/bundle.mk

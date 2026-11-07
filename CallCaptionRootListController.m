@@ -8,6 +8,8 @@
 #define CC_NOTIF  @"net.user.callcaption.prefschanged"
 
 @interface PSListController : UIViewController
+@property (nonatomic, copy) NSArray *specifiers;
+- (void)setSpecifiers:(NSArray *)specifiers;
 @end
 
 typedef NS_ENUM(NSInteger, CCRowKind) {
@@ -85,8 +87,14 @@ __attribute__((visibility("default")))
 
 @implementation CallCaptionRootListController
 
+// 关键：返回空 specifiers，阻止 PSListController 自动加载同名 plist（那会导致进页面闪退）
+- (NSArray *)specifiers {
+    return @[];
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
+    [self setSpecifiers:@[]];
     self.title = @"CallCaption";
     self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
 
@@ -95,8 +103,10 @@ __attribute__((visibility("default")))
         if ([v isKindOfClass:[UITableView class]]) v.hidden = YES;
     }
 
-    [self buildModel];
-    [self loadValues];
+    @try {
+        [self buildModel];
+        [self loadValues];
+    } @catch (NSException *e) { }
 
     self.ccTable = [[UITableView alloc] initWithFrame:self.view.bounds
                                                 style:UITableViewStyleInsetGrouped];

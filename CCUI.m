@@ -151,6 +151,12 @@ static void EnsureCaptionUI(void) {
         } else {
             win.center = CGPointMake(ScreenW() / 2.0, ScreenH() - 300);
         }
+        // v0.8.3 修复：iOS 13+ 的 UIWindow 必须关联 windowScene 才会显示
+        if (@available(iOS 13.0, *)) {
+            for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
+                if ([sc isKindOfClass:[UIWindowScene class]]) { win.windowScene = (UIWindowScene *)sc; break; }
+            }
+        }
         win.hidden = YES;
     } @catch (NSException *e) { }
 }
@@ -189,6 +195,12 @@ static void EnsureButtonUI(void) {
         [win addSubview:btn];
         UIViewController *vc = [[UIViewController alloc] init];
         win.rootViewController = vc;
+        // v0.8.3: windowScene 关联（否则 iOS 13+ 窗口不显示）
+        if (@available(iOS 13.0, *)) {
+            for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
+                if ([sc isKindOfClass:[UIWindowScene class]]) { win.windowScene = (UIWindowScene *)sc; break; }
+            }
+        }
         g_btn = btn; g_btnWin = win;
         win.hidden = YES;
     } @catch (NSException *e) { }

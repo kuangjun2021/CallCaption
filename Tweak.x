@@ -1,23 +1,10 @@
 // Tweak.x — CallCaption logos 入口：hook 音频渲染 + 进程分流启动
 #import "CCCommon.h"
 
-%hookf(OSStatus, AudioUnitRender,
-       AudioUnit unit, AudioUnitRenderActionFlags *ioActionFlags,
-       const AudioTimeStamp *inTimeStamp, UInt32 inBusNumber,
-       UInt32 inNumberFrames, AudioBufferList *ioData) {
-    OSStatus r = %orig;
-    if (r == noErr) CCAudioTapObserve(unit, inBusNumber, inNumberFrames, ioData);
-    return r;
-}
-
-%hookf(OSStatus, AudioUnitProcess,
-       AudioUnit inUnit, AudioUnitScope inScope, AudioUnitRenderActionFlags *ioActionFlags,
-       const AudioTimeStamp *inTimeStamp, UInt32 inBusNumber,
-       UInt32 inNumberFrames, AudioBufferList *ioData) {
-    OSStatus r = %orig;
-    if (r == noErr) CCAudioTapObserve(inUnit, inBusNumber, inNumberFrames, ioData);
-    return r;
-}
+// v0.8.3 诊断：彻底移除函数钩子（AudioUnitRender/AudioUnitProcess）。
+// 理论：此越狱环境的函数钩取（trampoline）在 arm64e 上有缺陷，
+// 会毒化 mediaserverd 的音频函数 → 通话音频会话建立失败。
+// 电话助手（正常工作的录音插件）只用 ObjC 方法钩取，不用函数钩取。
 
 %group MSGroup
 %end

@@ -1,0 +1,35 @@
+name: Build CallCaption
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Theos + iOS 16.5 SDK
+        run: |
+          git clone --recursive https://github.com/theos/theos.git $HOME/theos
+          curl -L -sS -o /tmp/sdks.zip https://github.com/theos/sdks/archive/refs/heads/main.zip
+          unzip -q /tmp/sdks.zip -d /tmp/sdks
+          mkdir -p $HOME/theos/sdks
+          cp -R /tmp/sdks/sdks-master/iPhoneOS16.5.sdk $HOME/theos/sdks/
+          ls $HOME/theos/sdks
+
+      - name: Build package
+        run: |
+          export THEOS=$HOME/theos
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          mkdir -p out
+          cp packages/*.deb out/
+
+      - name: Upload deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: CallCaption-deb
+          path: out/*.deb

@@ -2,6 +2,7 @@
 #import "CCCommon.h"
 #import <AVFoundation/AVFoundation.h>
 #import <Speech/Speech.h>
+#import <math.h>
 
 // ============================================================
 // 音频抓取：预分配环缓冲，音频线程只做 memcpy + 原子递增
@@ -160,6 +161,13 @@ static CCRecognizer *g_recog;
     [SFSpeechRecognizer requestAuthorization:^(SFSpeechRecognizerAuthorizationStatus status) {
         dispatch_async(dispatch_get_main_queue(), ^{
             CCLogf(@"speech auth: %ld", (long)status);
+            if (status != SFSpeechRecognizerAuthorizationStatusAuthorized) {
+                // 无授权 → 识别无法工作，自动解除，避免无意义的持续占用
+                CCLogf(@"auth denied, auto disarm");
+                SetUserArmed(NO);
+                CCPostNotif(@"disarm");
+                return;
+            }
             [self restartEN];
             if (CCPrefBool(CC_K_LOCAL_ENABLED, NO)) [self restartZH];
         });
@@ -303,72 +311,77 @@ void CCTTSStopAll(void) {
 
 static void MakeRingFormat(CCRing *r) {
     @try {
-        AudioStreamBasicDescription asbd;
-        UInt32 size = sizeof(asbd);
-        OSStatus st = AudioUnitGetProperty((AudioUnit)(uintptr_t)r->unit,
-                                           kAudioUnitProperty_StreamFormat,
-                                           kAudioUnitScope_Output, (AudioUnitElement)r->bus,
-                                           &asbd, &size);
-        if (st != noErr || asbd.mSampleRate < 8000) return;
-        r->asbd = asbd;
+        // v0.7.3: 不再调用 AudioUnitGetProperty（会触碰音频服务器内部锁；
+        // 通话中出现新音频流时触发 → 锁竞争/死锁 → 拨号端 WhatsApp 崩溃）。
+        // 格式改为 BuildPCM 数据驱动启发式探测（零锁交互）。
         r->fmtValid = 1;
-        // 统一转成标准单声道 float32 格式喂给识别器
-        g_ringFormat[(int)(r - g_rings)] =
-            [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32
-                                             sampleRate:asbd.mSampleRate
-                                               channels:1
-                                           interleaved:NO];
-        CCLogf(@"ring fmt u%p/b%u sr%.0f ch%u fmt%4x bits%u",
-               (void *)(uintptr_t)r->unit, r->bus, asbd.mSampleRate,
-               asbd.mChannelsPerFrame, (unsigned)(asbd.mFormatID & 0xffff), asbd.mBitsPerChannel);
     } @catch (NSException *e) { }
 }
 
-// 把原始字节转成标准单声道 float32 缓冲（支持 float32 与 int16，交错/非交错皆可）
+// v0.7.3: 数据驱动启发式——先按 16-bit 交错立体声解析算 RMS，合理性不足再按
+// float32 解析；全程零 AudioUnit 锁交互（修复通话中触发死锁的缺陷）。
+static AVAudioFormat *MonoFmt(void) {
+    static AVAudioFormat *f;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        f = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32
+                                             sampleRate:48000 channels:1 interleaved:NO];
+    });
+    return f;
+}
+
 static AVAudioPCMBuffer *BuildPCM(CCRing *r, uint8_t *bytes, unsigned long len) {
-    AVAudioFormat *fmt = g_ringFormat[(int)(r - g_rings)];
-    if (!fmt || len == 0) return nil;
-    AudioStreamBasicDescription a = r->asbd;
+    if (len < 128) return nil;
     @try {
-        BOOL isFloat = (a.mFormatFlags & kAudioFormatFlagIsFloat) != 0;
-        BOOL interleaved = (a.mFormatFlags & kAudioFormatFlagIsNonInterleaved) == 0;
-        UInt32 ch = a.mChannelsPerFrame ? a.mChannelsPerFrame : 1;
+        AVAudioFormat *fmt = MonoFmt();
+        if (!fmt) return nil;
 
-        unsigned long frameBytes = (a.mBitsPerChannel / 8) * (interleaved ? ch : 1);
-        AVAudioFrameCount frames = (AVAudioFrameCount)(len / frameBytes);
-        if (frames == 0) return nil;
+        // 候选 A：按 16-bit 交错立体声解析
+        unsigned long frames16 = len / 4;
+        double acc16 = 0; size_t nz16 = 0;
+        if (frames16 >= 32) {
+            const int16_t *s = (const int16_t *)bytes;
+            for (unsigned long i = 0; i < frames16; i++) {
+                int32_t m = (s[i*2] + s[i*2+1]) / 2;
+                double v = m / 32768.0; acc16 += v*v; if (m != 0) nz16++;
+            }
+        }
+        double rms16 = frames16 ? sqrt(acc16 / frames16) : 0;
+        // 候选 B：按 float32 交错立体声解析
+        unsigned long frames32 = len / 8;
+        double acc32 = 0; size_t nz32 = 0; BOOL floatSane = YES;
+        if (frames32 >= 32) {
+            const float *s = (const float *)bytes;
+            for (unsigned long i = 0; i < frames32; i++) {
+                float m = (s[i*2] + s[i*2+1]) / 2.0f;
+                if (!(m > -4.0f && m < 4.0f)) { floatSane = NO; break; }
+                acc32 += (double)m*m; if (m != 0.0f) nz32++;
+            }
+        }
+        double rms32 = frames32 ? sqrt(acc32 / frames32) : 0;
 
+        int use = 0;
+        if (rms16 > 0.0003 && rms16 < 0.95) use = 1;
+        else if (floatSane && rms32 > 0.0003 && rms32 < 0.95) use = 2;
+        if (!use) return nil;
+
+        AVAudioFrameCount frames = (use == 1) ? (AVAudioFrameCount)frames16
+                                              : (AVAudioFrameCount)frames32;
+        if (frames > (AVAudioFrameCount)96000) frames = (AVAudioFrameCount)96000;
         AVAudioPCMBuffer *pcm = [[AVAudioPCMBuffer alloc] initWithPCMFormat:fmt
                                                               frameCapacity:frames];
         if (!pcm) return nil;
         float *dst = pcm.floatChannelData[0];
-
-        if (isFloat && a.mBitsPerChannel == 32) {
-            const float *src = (const float *)bytes;
-            if (interleaved) {
-                for (AVAudioFrameCount f = 0; f < frames; f++) {
-                    float acc = 0;
-                    for (UInt32 c = 0; c < ch; c++) acc += src[f * ch + c];
-                    dst[f] = acc / (float)ch;
-                }
-            } else {
-                // 非交错时 tap 只存了第一个 AudioBuffer（第一声道平面）
-                for (AVAudioFrameCount f = 0; f < frames; f++) dst[f] = src[f];
-            }
-        } else if (a.mBitsPerChannel == 16) {
-            const int16_t *src = (const int16_t *)bytes;
-            if (interleaved) {
-                for (AVAudioFrameCount f = 0; f < frames; f++) {
-                    int32_t acc = 0;
-                    for (UInt32 c = 0; c < ch; c++) acc += src[f * ch + c];
-                    dst[f] = (float)(acc / (int32_t)ch) / 32768.0f;
-                }
-            } else {
-                for (AVAudioFrameCount f = 0; f < frames; f++)
-                    dst[f] = (float)src[f] / 32768.0f;
+        if (use == 1) {
+            const int16_t *s = (const int16_t *)bytes;
+            for (AVAudioFrameCount f = 0; f < frames; f++) {
+                int32_t m = (s[f*2] + s[f*2+1]) / 2;
+                dst[f] = (float)m / 32768.0f;
             }
         } else {
-            return nil; // 未知格式，跳过
+            const float *s = (const float *)bytes;
+            for (AVAudioFrameCount f = 0; f < frames; f++)
+                dst[f] = (s[f*2] + s[f*2+1]) / 2.0f;
         }
         pcm.frameLength = frames;
         return pcm;

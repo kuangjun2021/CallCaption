@@ -45,6 +45,19 @@ static CFAbsoluteTime g_lastStatsLog;
 static CFAbsoluteTime g_lastAuthLog;
 static NSString *g_lastText;
 static CFAbsoluteTime g_lastTextAt;
+static CFAbsoluteTime g_lastPartialAt;
+static CFAbsoluteTime g_lastEngineWarnAt;
+
+// 翻译引擎是否已就绪（只看有没有配 Key，不发送任何密钥内容）
+static BOOL CCTranslationReady(void) {
+    NSString *engine = CCPrefStr(CC_K_ENGINE, @"auto").lowercaseString;
+    BOOL dk = CCPrefStr(CC_K_DEEPL_KEY, @"").length > 0;
+    BOOL ai = CCPrefStr(CC_K_AI_URL, @"").length > 0 &&
+              CCPrefStr(CC_K_AI_KEY, @"").length > 0;
+    if ([engine isEqualToString:@"deepl"]) return dk;
+    if ([engine isEqualToString:@"ai"]) return ai;
+    return dk || ai;
+}
 
 // ---------- 工具 ----------
 
@@ -79,13 +92,27 @@ static void CCDeliverFinal(NSString *text) {
     g_lastTextAt = now;
 
     CCPrefsReload();   // root 进程：每次取 mobile 域最新设置
-    CCLogf(@"recog: %@", t);
+    BOOL ready = CCTranslationReady();
+    CCLogf(@"recog: %@ (translateReady=%d)", t, ready);
     CCTransportSendLine([@"I|" stringByAppendingString:t]);
     if (!CCPrefBool(CC_K_REMOTE_ENABLED, YES)) return;
 
+    if (!ready) {
+        CFAbsoluteTime now2 = CFAbsoluteTimeGetCurrent();
+        if (now2 - g_lastEngineWarnAt > 20.0) {
+            g_lastEngineWarnAt = now2;
+            CCLogf(@"trans: engine NOT configured (DeepLKey/AIKey empty)");
+            CCASendState(@"● 未配置翻译引擎：请到设置填写 DeepL Key 或 AI Key");
+        }
+        return;
+    }
+
     CCTranslate(t, @"en", @"zh", ^(NSString *out) {
         @try {
-            if (out.length == 0) return;
+            if (out.length == 0) {
+                CCLogf(@"trans: FAILED (network/key rejected)");
+                return;
+            }
             CCLogf(@"trans: %@", out);
             CCTransportSendLine([@"R|" stringByAppendingString:out]);
         } @catch (NSException *e) { }
@@ -115,21 +142,33 @@ static void CCRecogStart(void) {
 
         SFSpeechAudioBufferRecognitionRequest *req =
             [[SFSpeechAudioBufferRecognitionRequest alloc] init];
-        req.shouldReportPartialResults = NO;
+        req.shouldReportPartialResults = YES;   // v0.10.2: 边说边显示
         if (@available(iOS 13.0, *)) {
             req.taskHint = SFSpeechRecognitionTaskHintDictation;
             if (g_recog.supportsOnDeviceRecognition && g_onDevice)
                 req.requiresOnDeviceRecognition = YES;
         }
         g_req = req;
+        g_lastPartialAt = 0;
 
-        g_task = [g_recog recognitionTaskWithRequest:req
+        SFSpeechRecognitionTask *task = [g_recog recognitionTaskWithRequest:req
                                        resultHandler:^(SFSpeechRecognitionResult *result, NSError *error) {
             @try {
-                if (result.isFinal) {
-                    CCDeliverFinal(result.bestTranscription.formattedString);
-                    if (g_capturing) CCRecogRestart(0.25);
-                    return;
+                if (result) {
+                    NSString *txt = [result.bestTranscription.formattedString
+                        stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                    if (result.isFinal) {
+                        CCDeliverFinal(txt);
+                        if (g_capturing) CCRecogRestart(0.25);
+                        return;
+                    }
+                    // 实时原文（0.7s 节流），让用户先看到东西
+                    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+                    if (txt.length > 1 && now - g_lastPartialAt > 0.7 &&
+                        !CCContainsCJK(txt)) {
+                        g_lastPartialAt = now;
+                        CCTransportSendLine([@"I|" stringByAppendingString:txt]);
+                    }
                 }
                 if (error) {
                     NSInteger code = error.code;
@@ -146,6 +185,16 @@ static void CCRecogStart(void) {
                 }
             } @catch (NSException *e) { }
         }];
+        g_task = task;
+
+        // v0.10.2: 连续说话时也每 8 秒收一段，避免一直等不到 final
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)8 * NSEC_PER_SEC),
+                       g_stateQ, ^{
+            if (g_capturing && g_task == task) {
+                CCLogf(@"recog: force finalize (8s chunk)");
+                [task finish];
+            }
+        });
     } @catch (NSException *e) {
         CCLogf(@"recog exc: %@", e.reason);
         CCRecogRestart(2.0);
@@ -359,7 +408,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.10.0)");
+        CCLogLine(@"audioservice started (v0.10.2)");
 
         g_stateQ = dispatch_queue_create("net.user.callcaption.audio", DISPATCH_QUEUE_SERIAL);
 

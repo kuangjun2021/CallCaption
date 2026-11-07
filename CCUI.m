@@ -220,6 +220,9 @@ void CCUIDeliverState(NSString *state) {
             g_stateLabel.hidden = NO;
             g_stateLabel.text = state;
             UpdateCardLayout();
+            // v0.10.2: 状态也要让窗口可见（此前窗口默认隐藏，用户什么都看不到）
+            g_capWin.hidden = NO;
+            g_capWin.alpha = 1.0;
         } @catch (NSException *e) { }
     });
 }
@@ -230,6 +233,9 @@ void CCUIDeliverOriginal(NSString *original) {
             if (!g_capWin || !g_sessionActive) return;
             g_origLabel.text = original;
             UpdateCardLayout();
+            // v0.10.2: 原文先行显示（即使翻译未就绪）
+            g_capWin.hidden = NO;
+            g_capWin.alpha = 1.0;
             ResetHideTimer();
         } @catch (NSException *e) { }
     });

@@ -247,6 +247,8 @@ static void SBDeliverLine(NSString *line) {
     (void)line;   // 守护进程不消费结果行（只生产）
 #else
     CCPrefsReload();   // 设置面板改动后即时生效
+    NSString *dbg = line.length > 70 ? [line substringToIndex:70] : line;
+    CCLogf(@"ui line: %@", dbg);
     // 行格式： R|<译文>  /  I|<英文原文>  /  S|<状态>
     if ([line hasPrefix:@"R|"]) {
         NSString *t = [line substringFromIndex:2];

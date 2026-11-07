@@ -48,6 +48,17 @@ static void SBDarwinCB(CFNotificationCenterRef center, void *observer,
                 CFNotificationCenterGetDarwinNotifyCenter(),
                 NULL, &SBDarwinCB, NULL, NULL,
                 CFNotificationSuspensionBehaviorDeliverImmediately);
+            // v0.10.2: 显式再注册 "line"（NULL 通配注册在部分场景收不到命名通知）
+            CFNotificationCenterAddObserver(
+                CFNotificationCenterGetDarwinNotifyCenter(),
+                NULL, &SBDarwinCB,
+                (__bridge CFStringRef)[CC_NOTIF_PREFIX stringByAppendingString:@"line"],
+                NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+            CFNotificationCenterAddObserver(
+                CFNotificationCenterGetDarwinNotifyCenter(),
+                NULL, &SBDarwinCB,
+                (__bridge CFStringRef)[CC_NOTIF_PREFIX stringByAppendingString:@"prefschanged"],
+                NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
             %init(SBGroup);
         } else if (CCIsMediaServerd()) {
             %init(_ungrouped);   // 音频钩子只在 mediaserverd 安装

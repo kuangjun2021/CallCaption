@@ -58,34 +58,25 @@ static void SBDarwinCB(CFNotificationCenterRef center, void *observer,
 
 %ctor {
     @try {
-        CCMark(@"1 ctor enter");
         CCProcessInit();
-        CCMark(@"2 procinit done");
-        %init(_ungrouped);
-        CCMark(@"3 ungrouped hooks installed");
         if (CCIsSpringBoard()) {
-            CCMark(@"4 SB branch enter");
-            CCUIBoot();
-            CCMark(@"5 CCUIBoot done");
-            CFNotificationCenterAddObserver(
-                CFNotificationCenterGetDarwinNotifyCenter(),
-                NULL, &SBDarwinCB, NULL, NULL,
-                CFNotificationSuspensionBehaviorDeliverImmediately);
-            CCMark(@"6 observer added");
-            %init(SBGroup);
-            CCMark(@"7 SBGroup init done");
-        } else if (CCIsMediaServerd()) {
-            CCMark(@"4 MS branch enter");
+            // ===== 诊断版：SB 侧零操作（不装钩子、不建 UI、不监听通话）=====
+            CCMark(@"diag: sb minimal ctor enter");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)5 * NSEC_PER_SEC),
+                           dispatch_get_main_queue(), ^{
+                CCMark(@"diag: sb alive after 5s");
+            });
+            return;
+        }
+        %init(_ungrouped);
+        if (CCIsMediaServerd()) {
             CCEngineBoot();
-            CCMark(@"5 CCEngineBoot done");
             %init(MSGroup);
-            CCMark(@"6 MSGroup init done");
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)4 * NSEC_PER_SEC),
                            dispatch_get_main_queue(), ^{
                 CCPostNotif(@"ms up");
             });
         }
-        CCMark(@"8 ctor done");
     } @catch (NSException *e) {
         CCMark(@"ctor EXCEPTION!");
     }

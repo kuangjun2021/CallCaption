@@ -3,22 +3,32 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-static BOOL g_sb = NO, g_ms = NO;
+static BOOL g_sb = NO, g_ms = NO, g_as = NO;
 static NSDictionary *g_prefs = nil;
 
 BOOL CCIsSpringBoard(void) { return g_sb; }
 BOOL CCIsMediaServerd(void) { return g_ms; }
+BOOL CCIsAudioService(void) { return g_as; }
 
 void CCProcessInit(void) {
     NSString *pn = [[NSProcessInfo processInfo] processName];
     g_sb = [pn isEqualToString:@"SpringBoard"];
     g_ms = [pn isEqualToString:@"mediaserverd"];
+    g_as = [pn isEqualToString:@"CallCaptionAudioService"];
 }
 
 // ============ 设置 ============
 
 void CCPrefsReload(void) {
     @try {
+        // v0.10: 守护进程以 root 运行，CFPreferences 的 CurrentUser 会解析到 root 域；
+        // 用户设置实际在 mobile 域，直接读 plist 文件。
+        if (CCIsAudioService()) {
+            NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:
+                               @"/var/mobile/Library/Preferences/net.user.callcaption.plist"];
+            g_prefs = [d isKindOfClass:[NSDictionary class]] ? d : @{};
+            return;
+        }
         CFPreferencesAppSynchronize((__bridge CFStringRef)CC_DOMAIN);
         CFDictionaryRef dref = CFPreferencesCopyMultiple(NULL,
             (__bridge CFStringRef)CC_DOMAIN, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
@@ -62,11 +72,13 @@ static void SBWriteLog(NSString *line) {
         NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:CC_LOG_PATH];
         if (!fh) {
             [line writeToFile:CC_LOG_PATH atomically:YES encoding:NSUTF8StringEncoding error:nil];
-            return;
+        } else {
+            [fh seekToEndOfFile];
+            [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+            [fh closeFile];
         }
-        [fh seekToEndOfFile];
-        [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
-        [fh closeFile];
+        // 守护进程(root)与 SpringBoard(mobile) 互写：日志始终 0666
+        [fm setAttributes:@{NSFilePosixPermissions: @0666} ofItemAtPath:CC_LOG_PATH error:nil];
     } @catch (NSException *e) { }
 }
 
@@ -88,7 +100,7 @@ void CCLogLine(NSString *msg) {
             fmt.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
         });
         NSString *line = [NSString stringWithFormat:@"[%@] %@\n", [fmt stringFromDate:[NSDate date]], msg];
-        if (CCIsSpringBoard()) {
+        if (CCIsSpringBoard() || CCIsAudioService()) {
             SBWriteLog(line);
         } else if (CCIsMediaServerd()) {
             // MS 侧没有文件权限，日志经通知名带到 SB（内容截 80 字符）
@@ -104,7 +116,7 @@ void CCMark(NSString *tag) {
         NSString *line = [NSString stringWithFormat:@"[MARK %@] %@\n",
                           [NSDate date], tag];
         NSString *path = @"/var/mobile/Library/CallCaption/markers.log";
-        if (CCIsSpringBoard()) {
+        if (CCIsSpringBoard() || CCIsAudioService()) {
             NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
             if (!fh) {
                 NSFileManager *fm = [NSFileManager defaultManager];
@@ -130,6 +142,27 @@ void CCPostNotif(NSString *suffix) {
             CFNotificationCenterGetDarwinNotifyCenter(),
             (__bridge CFStringRef)[CC_NOTIF_PREFIX stringByAppendingString:suffix],
             NULL, NULL, TRUE);
+    } @catch (NSException *e) { }
+}
+
+// ============ v0.10 采集开关（SB 侧写文件，守护进程监视） ============
+
+void CCSetArmed(BOOL armed) {
+    @try {
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if (armed && ![fm fileExistsAtPath:CC_DIR]) {
+            [fm createDirectoryAtPath:CC_DIR withIntermediateDirectories:YES
+                            attributes:@{NSFilePosixPermissions: @0777} error:nil];
+        }
+        if (armed) {
+            [@"" writeToFile:CC_ARM_PATH atomically:YES
+                    encoding:NSUTF8StringEncoding error:nil];
+            [fm setAttributes:@{NSFilePosixPermissions: @0666}
+                   ofItemAtPath:CC_ARM_PATH error:nil];
+        } else {
+            [fm removeItemAtPath:CC_ARM_PATH error:nil];
+        }
+        CCPostNotif(armed ? @"arm" : @"disarm");
     } @catch (NSException *e) { }
 }
 
@@ -210,17 +243,21 @@ void CCTransportDrain(void) {
 }
 
 static void SBDeliverLine(NSString *line) {
+#ifdef CC_TOOL
+    (void)line;   // 守护进程不消费结果行（只生产）
+#else
+    CCPrefsReload();   // 设置面板改动后即时生效
     // 行格式： R|<译文>  /  I|<英文原文>  /  S|<状态>
     if ([line hasPrefix:@"R|"]) {
-        extern void CCUIDeliverCaption(NSString *translated);
-        CCUIDeliverCaption([line substringFromIndex:2]);
+        NSString *t = [line substringFromIndex:2];
+        CCUIDeliverCaption(t);
+        if (CCPrefBool(CC_K_TTS_ENABLED, YES)) CCUISpeakText(t);
     } else if ([line hasPrefix:@"I|"]) {
-        extern void CCUIDeliverOriginal(NSString *original);
         CCUIDeliverOriginal([line substringFromIndex:2]);
     } else if ([line hasPrefix:@"S|"]) {
-        extern void CCUIDeliverState(NSString *state);
         CCUIDeliverState([line substringFromIndex:2]);
     }
+#endif
 }
 
 void CCTransportHandleChunk(NSString *suffix) {
@@ -271,9 +308,14 @@ void CCTransportBoot(void) {
                           attributes:@{NSFilePosixPermissions: @0777} error:nil];
         if (![fm fileExistsAtPath:CC_SPOOL_PATH])
             [@"" writeToFile:CC_SPOOL_PATH atomically:YES encoding:NSUTF8StringEncoding error:nil];
-        // 确保权限放开（供 mediaserverd 追加）
+        // 确保权限放开（供守护进程追加），并清空上次遗留
         NSDictionary *attr = @{NSFilePosixPermissions: @0666};
         [fm setAttributes:attr ofItemAtPath:CC_SPOOL_PATH error:nil];
+        @try {
+            NSFileHandle *w = [NSFileHandle fileHandleForWritingAtPath:CC_SPOOL_PATH];
+            if (w) { [w truncateFileAtOffset:0]; [w closeFile]; }
+        } @catch (NSException *e) { }
+        g_spoolOffset = 0;
         [fm setAttributes:@{NSFilePosixPermissions: @0777} ofItemAtPath:CC_DIR error:nil];
     } @catch (NSException *e) { }
 }

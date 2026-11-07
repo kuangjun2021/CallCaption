@@ -32,6 +32,8 @@ static void SBDarwinCB(CFNotificationCenterRef center, void *observer,
             CCUICallStateChanged(@"CALL ENDED");
         } else if ([suffix isEqualToString:@"act"]) {
             // 心跳（忽略内容）
+        } else if ([suffix isEqualToString:@"prefschanged"]) {
+            CCPrefsReload();
         }
     } @catch (NSException *e) { }
 }

@@ -9,6 +9,7 @@
 #define CC_DIR            @"/var/mobile/Library/CallCaption"
 #define CC_LOG_PATH       @"/var/mobile/Library/CallCaption/probe.log"
 #define CC_SPOOL_PATH     @"/var/mobile/Library/CallCaption/spool.txt"
+#define CC_ARM_PATH       @"/var/mobile/Library/CallCaption/armed"   // v0.10: 采集开关（SB 创建/删除，守护进程监视）
 
 // ---------- 设置键（与 PreferenceLoader 面板一致） ----------
 #define CC_K_ENABLED          @"Enabled"          // 总开关
@@ -29,6 +30,7 @@
 void CCProcessInit(void);
 BOOL CCIsSpringBoard(void);
 BOOL CCIsMediaServerd(void);
+BOOL CCIsAudioService(void);
 
 // ---------- URL/字符串工具 ----------
 NSString *CCEscape(NSString *s);
@@ -69,9 +71,13 @@ void CCTTSInitIfNeeded(void);
 void CCTTSSpeak(NSString *text, NSString *lang); // lang: "zh-CN"/"en-US"
 void CCTTSStopAll(void);
 
-// ---------- v0.9.0 新架构：SpringBoard 进程内麦克风采集（无任何函数钩子） ----------
+// ---------- v0.9.0 旧架构：SpringBoard 进程内麦克风采集（已由 v0.10 守护进程取代） ----------
 void CCMicStart(void);
 void CCMicStop(void);
+
+// ---------- v0.10 新架构：独立音频守护进程（系统级 Tap） ----------
+void CCSetArmed(BOOL armed);          // SB 侧：写/删 armed 文件并广播通知
+void CCUISpeakText(NSString *text);   // SB 侧：中文 TTS 播报
 
 // ---------- UI（SpringBoard 侧） ----------
 void CCUIBoot(void);

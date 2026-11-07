@@ -18,5 +18,15 @@ CallCaptionPrefs_FRAMEWORKS = Foundation UIKit
 CallCaptionPrefs_CFLAGS = -fobjc-arc -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
 CallCaptionPrefs_LDFLAGS = -Wl,-fixup_chains -Wl,-undefined,dynamic_lookup
 
+# v0.10: 独立音频守护进程（系统级 Tap 抓取通话对方声音，无钩子/无 mediaserverd）
+TOOL_NAME = CallCaptionAudioService
+CallCaptionAudioService_FILES = CCAudioService.m CCSupport.m CCTranslator.m
+CallCaptionAudioService_FRAMEWORKS = Foundation AudioToolbox AVFAudio AVFoundation Speech CoreFoundation
+CallCaptionAudioService_CFLAGS = -fobjc-arc -DCC_TOOL -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function -fno-objc-msgsend-selector-stubs -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
+CallCaptionAudioService_LDFLAGS = -Wl,-fixup_chains
+CallCaptionAudioService_CODESIGN_FLAGS = -Sentitlements/CallCaptionAudioService.plist
+CallCaptionAudioService_INSTALL_PATH = /usr/local/bin
+
 include $(THEOS_MAKE_PATH)/tweak.mk
 include $(THEOS_MAKE_PATH)/bundle.mk
+include $(THEOS_MAKE_PATH)/tool.mk

@@ -1,6 +1,7 @@
 // CCUI.m — SpringBoard 侧：悬浮字幕 + 快捷按钮（可拖动、毛玻璃、弹簧动画）
 #import "CCCommon.h"
 #import <UIKit/UIKit.h>
+#import <AVFoundation/AVFoundation.h>
 #import <CoreTelephony/CTCallCenter.h>
 #import <CoreTelephony/CTCall.h>
 
@@ -324,9 +325,8 @@ void CCUIDeliverCaption(NSString *translated) {
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
             g_sessionActive = !g_sessionActive;
-            if (g_sessionActive) CCMicStart(); else CCMicStop();
+            CCSetArmed(g_sessionActive);   // v0.10: 交给音频守护进程（系统级 Tap）
             [self refreshButton];
-            CCPostNotif(g_sessionActive ? @"arm" : @"disarm");
             CCLogf(@"session %@", g_sessionActive ? @"ARMED" : @"DISARMED");
             if (!g_sessionActive) [self hideCaption];
         } @catch (NSException *e) { }
@@ -401,7 +401,7 @@ void CCUICallStateChanged(NSString *state) {
                 // 蜂窝通话结束：自动解除（WhatsApp 手动模式由用户自己解除或 5 分钟静默自动解除）
                 if (g_sessionActive) {
                     g_sessionActive = NO;
-                    CCPostNotif(@"disarm");
+                    CCSetArmed(NO);
                     [CCUIHelper refreshButton];
                 }
                 [CCUIHelper hideCaption];
@@ -417,6 +417,12 @@ void CCUIBoot(void) {
         g_uiReady = YES;
         CCTransportBoot();
         CCMark(@"ui 5.2 transport ready");
+        // v0.10: 清理上次残留的采集开关（避免守护进程开机即采集）
+        @try { [[NSFileManager defaultManager] removeItemAtPath:CC_ARM_PATH error:nil]; }
+        @catch (NSException *e) { }
+        // v0.10: 清理上次残留的采集开关（避免守护进程开机即采集）
+        @try { [[NSFileManager defaultManager] removeItemAtPath:CC_ARM_PATH error:nil]; }
+        @catch (NSException *e) { }
         // v0.8.2: 移除 SpringBoard 内的 CTCallCenter（通话监听在 SB 进程内是已知风险点）
         CCMark(@"ui 5.3 (ctcallcenter removed)");
         // v0.7 手动模式：按钮常驻（Enabled 开启时），用户在通话中自行点按启用
@@ -437,4 +443,21 @@ void CCUIBoot(void) {
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }
+}
+
+// ---------- v0.10：中文 TTS 播报（守护进程结果行触发） ----------
+
+static AVSpeechSynthesizer *g_tts;
+
+void CCUISpeakText(NSString *text) {
+    if (text.length == 0) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            if (!g_tts) g_tts = [[AVSpeechSynthesizer alloc] init];
+            [g_tts stopSpeakingAtBoundary:AVSpeechBoundaryImmediate];
+            AVSpeechUtterance *u = [[AVSpeechUtterance alloc] initWithString:text];
+            u.voice = [AVSpeechSynthesisVoice voiceWithLanguage:@"zh-CN"];
+            [g_tts speakUtterance:u];
+        } @catch (NSException *e) { }
+    });
 }

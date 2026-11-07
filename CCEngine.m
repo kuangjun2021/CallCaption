@@ -29,11 +29,12 @@ static AVAudioFormat *g_ringFormat[CC_RINGS];
 
 // 活动状态
 static atomic_int  g_callActive;
+static atomic_int  g_userArmed;      // v0.7 纯手动模式：用户点"译"按钮才开始抓取
 static atomic_long g_energySum;      // 累积能量（简易 VAD）
 static atomic_int  g_energyN;
 static atomic_int  g_remoteSpeaking; // 对方正在说话（能量门限）
 static atomic_long g_axspeechCalls;  // AXSpeech 回调计数
-static void SetCallActive(BOOL active);
+static void SetUserArmed(BOOL armed);
 static void CheckEnergy(void);
 
 // ---------- 环缓冲读写 ----------
@@ -79,6 +80,9 @@ void CCAudioTapObserve(AudioUnit unit, UInt32 bus, UInt32 frames, AudioBufferLis
     for (UInt32 b = 0; b < nb; b++) bytes += ioData->mBuffers[b].mDataByteSize;
     if (bytes == 0 || !ioData->mBuffers[0].mData) return;
 
+    // v0.7 纯手动模式：未手动启用时，音频线程直接返回（对系统零干扰）
+    if (!atomic_load(&g_userArmed)) return;
+
     // 能量采样（每 16 帧取一次，只在第一 buffer 上粗算，实时线程零分配）
     static atomic_int tick;
     int t = atomic_fetch_add(&tick, 1);
@@ -91,7 +95,7 @@ void CCAudioTapObserve(AudioUnit unit, UInt32 bus, UInt32 frames, AudioBufferLis
         atomic_fetch_add(&g_energyN, 1);
     }
 
-    // 始终写入环缓冲：工作线程负责通话状态判定（音频活动自动触发，覆盖 WhatsApp 等网络通话）
+    // 绑定或复用环（无锁查找，绑定时仅原子置位；首次绑定由工作线程补格式信息）
     CCRing *target = NULL;
     for (int i = 0; i < CC_RINGS; i++) {
         if (atomic_load(&g_rings[i].bound) &&
@@ -374,6 +378,12 @@ static AVAudioPCMBuffer *BuildPCM(CCRing *r, uint8_t *bytes, unsigned long len) 
 
 static void WorkTick(void) {
     @try {
+        // v0.7 纯手动模式：未启用时只做静默计数（不碰音频线程数据）
+        if (!atomic_load(&g_userArmed)) {
+            if (g_recog.started) [g_recog stopAll];
+            return;
+        }
+
         long totBytes = 0;
         for (int i = 0; i < CC_RINGS; i++) {
             CCRing *r = &g_rings[i];
@@ -391,32 +401,18 @@ static void WorkTick(void) {
             unsigned long got = RBRead(r, tmp, want);
             if (!got) continue;
             totBytes += got;
-            if (atomic_load(&g_callActive)) {
-                AVAudioPCMBuffer *pcm = BuildPCM(r, tmp, got);
-                if (pcm) [g_recog appendBuffer:pcm];
-            }
+            AVAudioPCMBuffer *pcm = BuildPCM(r, tmp, got);
+            if (pcm) [g_recog appendBuffer:pcm];
         }
 
-        // ===== 通话状态机：持续音频活动 = 通话中（蜂窝/WhatsApp/VoIP 通吃） =====
-        static int s_ticks = 0; // >0: 激活累计；<0: 静默冷却
-        if (totBytes > 24000) {
-            if (s_ticks >= 0) s_ticks++;
-            else s_ticks++;
-            if (!atomic_load(&g_callActive) && s_ticks >= 8) { // ~2 秒持续音频
-                SetCallActive(YES);
-                CCPostNotif(@"call");
-                s_ticks = 30;
-                [g_recog startIfNeeded];
-            }
-        } else {
-            if (s_ticks > 0) s_ticks -= 2;
-            else if (s_ticks < 0) s_ticks++;
-            if (atomic_load(&g_callActive) && s_ticks <= -180) { // ~45 秒无音频
-                SetCallActive(NO);
-                CCPostNotif(@"callend");
-                s_ticks = -240; // 冷却，防止立即重触发
-                [g_recog stopAll];
-            }
+        // 安全兜底：启用后连续 5 分钟无音频 → 自动解除
+        static int silenceTicks = 0;
+        if (totBytes > 24000) silenceTicks = 0;
+        else if (++silenceTicks >= 1200) { // 250ms × 1200 = 5 分钟
+            CCLogf(@"5min silence, auto disarm");
+            SetUserArmed(NO);
+            CCPostNotif(@"disarm");
+            silenceTicks = 0;
         }
 
         // 诊断心跳（每 20 tick = 5 秒）
@@ -425,21 +421,21 @@ static void WorkTick(void) {
             CheckEnergy();
             long ax = atomic_exchange(&g_axspeechCalls, 0);
             if (ax > 0) CCPostNotif([NSString stringWithFormat:@"ax %ld", ax]);
-            if (atomic_load(&g_callActive))
-                CCPostNotif([NSString stringWithFormat:@"act ticks %d", s_ticks]);
         }
     } @catch (NSException *e) { }
 }
 
 // ---------- 通话状态（由通知驱动） ----------
 
-static void SetCallActive(BOOL active) {
-    atomic_store(&g_callActive, active ? 1 : 0);
-    if (active) {
+static void SetUserArmed(BOOL armed) {
+    atomic_store(&g_userArmed, armed ? 1 : 0);
+    if (armed) {
         [g_recog startIfNeeded];
+        CCMark(@"user ARMED");
     } else {
         for (int i = 0; i < CC_RINGS; i++) atomic_store(&g_rings[i].bound, 0);
         [g_recog stopAll];
+        CCMark(@"user DISARMED");
     }
 }
 
@@ -459,8 +455,8 @@ static void CheckEnergy(void) {
 static void MSDarwinCB(CFNotificationCenterRef center, void *observer,
                        CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     NSString *n = (__bridge NSString *)name;
-    if ([n isEqualToString:CC_NOTIF_PREFIX @"call"]) SetCallActive(YES);
-    else if ([n isEqualToString:CC_NOTIF_PREFIX @"callend"]) SetCallActive(NO);
+    if ([n isEqualToString:CC_NOTIF_PREFIX @"arm"]) SetUserArmed(YES);
+    else if ([n isEqualToString:CC_NOTIF_PREFIX @"disarm"]) SetUserArmed(NO);
     else if ([n isEqualToString:CC_NOTIF_PREFS]) CCPrefsReload();
 }
 

@@ -309,7 +309,8 @@ void CCUIDeliverCaption(NSString *translated) {
         @try {
             g_sessionActive = !g_sessionActive;
             [self refreshButton];
-            CCLogf(@"session %@", g_sessionActive ? @"ON" : @"OFF");
+            CCPostNotif(g_sessionActive ? @"arm" : @"disarm");
+            CCLogf(@"session %@", g_sessionActive ? @"ARMED" : @"DISARMED");
             if (!g_sessionActive) [self hideCaption];
         } @catch (NSException *e) { }
     });
@@ -379,23 +380,14 @@ void CCUIDeliverCaption(NSString *translated) {
 void CCUICallStateChanged(NSString *state) {
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
-            if ([state isEqualToString:@"CALL CONNECTED"]) {
-                EnsureButtonUI();
-                EnsureCaptionUI();
-                g_sessionActive = CCPrefBool(CC_K_ENABLED, YES);
-                [CCUIHelper refreshButton];
-                g_btnWin.hidden = NO;
-                [UIView animateWithDuration:0.3 animations:^{ g_btnWin.alpha = 1.0; }];
-                CCUIDeliverState(@"● 正在聆听…");
-            } else if ([state isEqualToString:@"CALL ENDED"]) {
-                [CCUIHelper hideCaption];
-                if (g_btnWin) {
-                    [UIView animateWithDuration:0.3 animations:^{ g_btnWin.alpha = 0.0; }
-                     completion:^(BOOL fin) { if (fin) g_btnWin.hidden = YES; }];
+            if ([state isEqualToString:@"CALL ENDED"]) {
+                // 蜂窝通话结束：自动解除（WhatsApp 手动模式由用户自己解除或 5 分钟静默自动解除）
+                if (g_sessionActive) {
+                    g_sessionActive = NO;
+                    CCPostNotif(@"disarm");
+                    [CCUIHelper refreshButton];
                 }
-            } else if ([state isEqualToString:@"CALL INCOMING"] || [state isEqualToString:@"CALL DIALING"]) {
-                EnsureButtonUI();
-                EnsureCaptionUI();
+                [CCUIHelper hideCaption];
             }
         } @catch (NSException *e) { }
     });
@@ -423,7 +415,21 @@ void CCUIBoot(void) {
             } @catch (NSException *e) { }
         };
         CCMark(@"ui 5.4 CTCallCenter handler set");
-        CCLogLine(@"CallCaption UI booted");
+        // v0.7 手动模式：按钮常驻（Enabled 开启时），用户在通话中自行点按启用
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)3 * NSEC_PER_SEC),
+                       dispatch_get_main_queue(), ^{
+            @try {
+                if (CCPrefBool(CC_K_ENABLED, YES)) {
+                    EnsureButtonUI();
+                    EnsureCaptionUI();
+                    g_sessionActive = NO;
+                    [CCUIHelper refreshButton];
+                    g_btnWin.hidden = NO;
+                    [UIView animateWithDuration:0.3 animations:^{ g_btnWin.alpha = 1.0; }];
+                }
+            } @catch (NSException *e) { }
+        });
+        CCLogLine(@"CallCaption UI booted (manual mode)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

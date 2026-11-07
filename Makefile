@@ -15,7 +15,7 @@ BUNDLE_NAME = CallCaptionPrefs
 CallCaptionPrefs_FILES = CallCaptionRootListController.m
 CallCaptionPrefs_FRAMEWORKS = Foundation UIKit AVFoundation
 
-CallCaptionPrefs_CFLAGS = -fobjc-arc -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
+CallCaptionPrefs_CFLAGS = -fobjc-arc -Iinclude -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
 CallCaptionPrefs_LDFLAGS = -Wl,-fixup_chains -Wl,-undefined,dynamic_lookup
 
 # v0.10: 独立音频守护进程（系统级 Tap 抓取通话对方声音，无钩子/无 mediaserverd）

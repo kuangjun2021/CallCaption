@@ -457,6 +457,15 @@ static AVSpeechSynthesizer *g_tts;
 
 void CCUISpeakText(NSString *text) {
     if (text.length == 0) return;
+    // v0.11.2: 写入播报窗口，守护进程据此暂停识别，避免把播报声再识别成英文
+    @try {
+        double dur = 0.9 + 0.075 * (double)text.length;
+        if (dur > 20.0) dur = 20.0;
+        double until = [[NSDate date] timeIntervalSince1970] + dur;
+        NSString *s = [NSString stringWithFormat:@"%.3f", until];
+        [s writeToFile:@"/var/mobile/Library/CallCaption/tts_until"
+             atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    } @catch (NSException *e) { }
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
             if (!g_tts) g_tts = [[AVSpeechSynthesizer alloc] init];

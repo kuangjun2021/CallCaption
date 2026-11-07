@@ -16,6 +16,7 @@
 #define CC_K_REMOTE_ENABLED   @"RemoteEnabled"    // 对方语音→中文字幕
 #define CC_K_LOCAL_ENABLED    @"LocalEnabled"     // 我的语音→英文(扬声器中继,实验)
 #define CC_K_TTS_ENABLED      @"TTSEnabled"       // 中文播报
+#define CC_K_CLOUD_ASR       @"CloudASR"         // 云端语音识别（更准，需联网）
 #define CC_K_ENGINE           @"Engine"           // auto / deepl / ai
 #define CC_K_DEEPL_KEY        @"DeepLKey"
 #define CC_K_GOOGLE_KEY       @"GoogleKey"        // 可选：Google Cloud Translation API Key（不填走免费接口）

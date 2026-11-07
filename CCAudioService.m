@@ -25,7 +25,8 @@
 #define CC_AQ_PROP_TAP       0x71746F62    // 'qtob'
 
 static dispatch_queue_t g_stateQ;
-static CFAbsoluteTime g_muteUntil;         // 英文 TTS 播放期间两路识别都静音，防回声自激
+static CFAbsoluteTime g_muteUntil;         // 英文 TTS 播放期间静音，防回声自激
+static CFAbsoluteTime g_ttsUntil;          // SB 中文播报窗口（从 tts_until 文件读取）
 static CFAbsoluteTime g_lastPrefsLoad;
 static AVSpeechSynthesizer *g_enTTS;
 
@@ -40,6 +41,21 @@ static BOOL CCContainsCJK(NSString *s) {
 
 static NSString *CCTrim(NSString *s) {
     return [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+// 最终结果平均置信度；无法判断时返回 -1
+static double CCResultConfidence(SFSpeechRecognitionResult *r) {
+    NSArray<SFTranscriptionSegment *> *segs = r.bestTranscription.segments;
+    if (segs.count == 0) return -1;
+    double sum = 0;
+    float maxc = 0;
+    for (SFTranscriptionSegment *s in segs) {
+        float c = s.confidence;
+        if (c > maxc) maxc = c;
+        sum += c;
+    }
+    if (maxc <= 0.01f) return -1;
+    return sum / (double)segs.count;
 }
 
 static void CCASendState(NSString *s) {
@@ -77,12 +93,14 @@ static void CCSpeakEnglish(NSString *text) {
     BOOL capturing;
     BOOL restartPending;
     BOOL onDevice;
+    BOOL ttsPaused;              // 因 TTS 正在外放而暂停识别
     uint64_t frames;
     CFAbsoluteTime lastAttempt;
     CFAbsoluteTime lastPartialAt;
     CFAbsoluteTime lastStatsAt;
     CFAbsoluteTime lastAuthLog;
     NSString *lastText;
+    NSString *lastPartialText;
     CFAbsoluteTime lastTextAt;
 }
 @property (nonatomic, assign) int tapPID;
@@ -95,6 +113,7 @@ static void CCSpeakEnglish(NSString *text) {
 - (void)configure;
 - (BOOL)start;
 - (void)stop;
+- (void)pauseRecog;
 - (void)recogStart;
 - (void)recogRestart:(double)delay;
 - (void)handleResult:(SFSpeechRecognitionResult *)result error:(NSError *)error;
@@ -127,8 +146,9 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
                         float *dst = pcm.floatChannelData[0];
                         const float *src = (const float *)buf->mAudioData;
                         if (sa->mChannelsPerFrame >= 2) {
+                            // 只取左声道：通话音频常见左右反相，平均会互相抵消
                             for (AVAudioFrameCount i = 0; i < nf; i++)
-                                dst[i] = (src[2 * i] + src[2 * i + 1]) * 0.5f;
+                                dst[i] = src[2 * i];
                         } else {
                             memcpy(dst, src, nf * sizeof(float));
                         }
@@ -227,6 +247,7 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
 
     capturing = YES;
     restartPending = NO;
+    onDevice = YES;
     frames = 0;
     lastStatsAt = CFAbsoluteTimeGetCurrent();
     [self recogStart];
@@ -246,6 +267,7 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
     if (!capturing && !queue) return;
     capturing = NO;
     restartPending = NO;
+    ttsPaused = NO;
     @try {
         if (task) { [task cancel]; task = nil; }
         if (req) { [req endAudio]; req = nil; }
@@ -256,6 +278,14 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
         }
         tap = nil;
         CCLogf(@"%@: capture stopped", self.tag);
+    } @catch (NSException *e) { }
+}
+
+// 暂停识别但保留音频队列（TTS 外放期间，避免把播报回声喂进识别器）
+- (void)pauseRecog {
+    @try {
+        if (task) { [task cancel]; task = nil; }
+        if (req) { [req endAudio]; req = nil; }
     } @catch (NSException *e) { }
 }
 
@@ -278,9 +308,10 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
         SFSpeechAudioBufferRecognitionRequest *r =
             [[SFSpeechAudioBufferRecognitionRequest alloc] init];
         r.shouldReportPartialResults = YES;
+        BOOL preferCloud = CCPrefBool(CC_K_CLOUD_ASR, YES);
         if (@available(iOS 13.0, *)) {
             r.taskHint = SFSpeechRecognitionTaskHintDictation;
-            if (recog.supportsOnDeviceRecognition && onDevice)
+            if (!preferCloud && recog.supportsOnDeviceRecognition && onDevice)
                 r.requiresOnDeviceRecognition = YES;
         }
         req = r;
@@ -295,8 +326,8 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
             }];
         task = t;
 
-        // 连续说话时每 8 秒强制收一段，避免迟迟等不到 final
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)8 * NSEC_PER_SEC),
+        // 连续说话时每 12 秒强制收一段（8 秒太碎，切坏句子）
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)12 * NSEC_PER_SEC),
                        g_stateQ, ^{
             CCChannel *ch = weakSelf;
             if (ch && ch->capturing && ch->task == t) {
@@ -326,22 +357,33 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
 - (void)handleResult:(SFSpeechRecognitionResult *)result error:(NSError *)error {
     @try {
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-        BOOL muted = (now < g_muteUntil);
+        BOOL muted = (now < g_muteUntil) || (now < g_ttsUntil);
 
         if (result) {
             NSString *txt = CCTrim(result.bestTranscription.formattedString);
             if (result.isFinal) {
-                if (!muted) [self deliverFinal:txt];
+                if (!muted) {
+                    double conf = CCResultConfidence(result);
+                    if (conf < 0 || conf >= 0.45) {
+                        [self deliverFinal:txt];
+                    } else {
+                        CCLogf(@"%@: low confidence %.2f, skip: %@", self.tag, conf, txt);
+                    }
+                }
                 if (capturing) [self recogRestart:0.25];
                 return;
             }
             if (!muted && txt.length > 1 && now - lastPartialAt > 0.7) {
-                lastPartialAt = now;
-                BOOL cjk = CCContainsCJK(txt);
-                BOOL ok = self.expectCJK ? cjk : !cjk;
-                if (ok) {
-                    NSString *prefix = self.expectCJK ? @"LI|" : @"I|";
-                    CCTransportSendLine([prefix stringByAppendingString:txt]);
+                BOOL same = lastPartialText && [lastPartialText isEqualToString:txt];
+                if (!same) {
+                    lastPartialAt = now;
+                    lastPartialText = txt;
+                    BOOL cjk = CCContainsCJK(txt);
+                    BOOL ok = self.expectCJK ? cjk : !cjk;
+                    if (ok) {
+                        NSString *prefix = self.expectCJK ? @"LI|" : @"I|";
+                        CCTransportSendLine([prefix stringByAppendingString:txt]);
+                    }
                 }
             }
         }
@@ -409,6 +451,14 @@ static void CheckArm(void) {
             CCPrefsReload();
         }
 
+        // SB 中文播报窗口：tts_until 文件里是结束时刻（epoch 秒）
+        @try {
+            NSString *s = [NSString stringWithContentsOfFile:
+                           @"/var/mobile/Library/CallCaption/tts_until"
+                                              encoding:NSUTF8StringEncoding error:nil];
+            g_ttsUntil = s.length ? [s doubleValue] : 0;
+        } @catch (NSException *e) { }
+
         BOOL armed = [[NSFileManager defaultManager] fileExistsAtPath:CC_ARM_PATH];
         if (!armed) {
             [g_remote stop];
@@ -445,6 +495,20 @@ static void CheckArm(void) {
             }
         } else if (g_local->capturing) {
             [g_local stop];
+        }
+
+        // TTS 外放期间暂停两路识别，避免把播报回声当成人声
+        BOOL speaking = (now < g_ttsUntil) || (now < g_muteUntil);
+        NSArray<CCChannel *> *chans = @[g_remote, g_local];
+        for (CCChannel *ch in chans) {
+            if (!ch->capturing) continue;
+            if (speaking && ch->task) {
+                [ch pauseRecog];
+                ch->ttsPaused = YES;
+            } else if (!speaking && ch->ttsPaused) {
+                ch->ttsPaused = NO;
+                [ch recogStart];
+            }
         }
 
         if (g_remote->capturing && now - g_remote->lastStatsAt >= 5.0) {
@@ -485,7 +549,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.11.1)");
+        CCLogLine(@"audioservice started (v0.11.2)");
 
         g_stateQ = dispatch_queue_create("net.user.callcaption.audio", DISPATCH_QUEUE_SERIAL);
 

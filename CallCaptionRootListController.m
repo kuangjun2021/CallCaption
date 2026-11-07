@@ -119,6 +119,7 @@ static CCRow *MkChoice(NSString *key, NSString *title, NSString *def,
         MkSwitch(@"RemoteEnabled", @"对方语音 → 中文字幕", YES),
         MkSwitch(@"LocalEnabled", @"双向模式：我的话 → 英文播报", NO),
         MkSwitch(@"TTSEnabled", @"中文字幕语音播报", YES),
+        MkSwitch(@"CloudASR", @"云端语音识别（更准，需联网）", YES),
         MkSwitch(@"LargeCaptions", @"大字幕", NO),
     ];
     NSArray *lang = @[

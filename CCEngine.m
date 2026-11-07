@@ -445,8 +445,14 @@ static void WorkTick(void) {
 static void SetUserArmed(BOOL armed) {
     atomic_store(&g_userArmed, armed ? 1 : 0);
     if (armed) {
-        [g_recog startIfNeeded];
-        CCMark(@"user ARMED");
+        // v0.8.2: 按需创建识别器（不在启动时常驻）+ 延迟 2 秒启动（避开拨号敏感窗口）
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)2 * NSEC_PER_SEC),
+                       dispatch_get_main_queue(), ^{
+            if (!atomic_load(&g_userArmed)) return;
+            if (!g_recog) g_recog = [[CCRecognizer alloc] init];
+            [g_recog startIfNeeded];
+        });
+        CCMark(@"user ARMED (recognition in 2s)");
     } else {
         for (int i = 0; i < CC_RINGS; i++) atomic_store(&g_rings[i].bound, 0);
         [g_recog stopAll];
@@ -478,7 +484,8 @@ static void MSDarwinCB(CFNotificationCenterRef center, void *observer,
 void CCEngineBoot(void) {
     @try {
         CCMark(@"ms 5.1 engine boot enter");
-        g_recog = [[CCRecognizer alloc] init];
+        // v0.8.2: SFSpeechRecognizer / AVSpeechSynthesizer 不在启动时创建（按需 arm 时创建），
+        // 避免在 mediaserverd（音频会话管理进程）空闲状态下引入 Speech 框架的音频副作用
         g_workQ = dispatch_queue_create("net.user.callcaption.engine", DISPATCH_QUEUE_SERIAL);
         for (int i = 0; i < CC_RINGS; i++) {
             g_rings[i].buf = (uint8_t *)malloc(CC_RING_CAP);
@@ -487,8 +494,6 @@ void CCEngineBoot(void) {
             atomic_store(&g_rings[i].bound, 0);
         }
         CCMark(@"ms 5.2 rings allocated");
-        CCTTSInitIfNeeded();
-        CCMark(@"ms 5.3 tts created");
         g_workTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, g_workQ);
         dispatch_source_set_timer(g_workTimer, dispatch_walltime(NULL, 2 * NSEC_PER_SEC),
                                   250 * NSEC_PER_MSEC, 0); // 250ms

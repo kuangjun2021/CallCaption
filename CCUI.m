@@ -400,21 +400,8 @@ void CCUIBoot(void) {
         g_uiReady = YES;
         CCTransportBoot();
         CCMark(@"ui 5.2 transport ready");
-        g_cc = [[CTCallCenter alloc] init];
-        CCMark(@"ui 5.3 ctcallcenter created");
-        g_cc.callEventHandler = ^(CTCall *call) {
-            @try {
-                NSString *s = call.callState;
-                NSString *info = [s isEqualToString:CTCallStateDialing]     ? @"CALL DIALING"
-                               : [s isEqualToString:CTCallStateIncoming]    ? @"CALL INCOMING"
-                               : [s isEqualToString:CTCallStateConnected]   ? @"CALL CONNECTED"
-                               : [s isEqualToString:CTCallStateDisconnected]? @"CALL ENDED"
-                                                                            : s;
-                CCLogLine(info);
-                CCUICallStateChanged(info);
-            } @catch (NSException *e) { }
-        };
-        CCMark(@"ui 5.4 CTCallCenter handler set");
+        // v0.8.2: 移除 SpringBoard 内的 CTCallCenter（通话监听在 SB 进程内是已知风险点）
+        CCMark(@"ui 5.3 (ctcallcenter removed)");
         // v0.7 手动模式：按钮常驻（Enabled 开启时），用户在通话中自行点按启用
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)3 * NSEC_PER_SEC),
                        dispatch_get_main_queue(), ^{

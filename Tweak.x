@@ -19,13 +19,6 @@
     return r;
 }
 
-// 备用观察点（老插件近期使用的 AXSpeech 回调；此版本不改其行为）
-%hook AXSpeechManager
-- (void)_processAudioBufferCallback:(id)arg1 {
-    %orig;
-}
-%end
-
 %group MSGroup
 %end
 
@@ -59,9 +52,8 @@ static void SBDarwinCB(CFNotificationCenterRef center, void *observer,
 %ctor {
     @try {
         CCProcessInit();
-        %init(_ungrouped);
         if (CCIsSpringBoard()) {
-            // v0.8.1 功能版：完整 UI（常驻"译"按钮 + 字幕卡片）
+            // v0.8.2: SB 侧仅 UI + 通知观察——不安装任何音频钩子、不建 CTCallCenter
             CCUIBoot();
             CFNotificationCenterAddObserver(
                 CFNotificationCenterGetDarwinNotifyCenter(),
@@ -69,6 +61,7 @@ static void SBDarwinCB(CFNotificationCenterRef center, void *observer,
                 CFNotificationSuspensionBehaviorDeliverImmediately);
             %init(SBGroup);
         } else if (CCIsMediaServerd()) {
+            %init(_ungrouped);   // 音频钩子只在 mediaserverd 安装
             CCEngineBoot();
             %init(MSGroup);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)4 * NSEC_PER_SEC),

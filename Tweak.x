@@ -59,17 +59,16 @@ static void SBDarwinCB(CFNotificationCenterRef center, void *observer,
 %ctor {
     @try {
         CCProcessInit();
-        if (CCIsSpringBoard()) {
-            // ===== 诊断版：SB 侧零操作（不装钩子、不建 UI、不监听通话）=====
-            CCMark(@"diag: sb minimal ctor enter");
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)5 * NSEC_PER_SEC),
-                           dispatch_get_main_queue(), ^{
-                CCMark(@"diag: sb alive after 5s");
-            });
-            return;
-        }
         %init(_ungrouped);
-        if (CCIsMediaServerd()) {
+        if (CCIsSpringBoard()) {
+            // v0.8.1 功能版：完整 UI（常驻"译"按钮 + 字幕卡片）
+            CCUIBoot();
+            CFNotificationCenterAddObserver(
+                CFNotificationCenterGetDarwinNotifyCenter(),
+                NULL, &SBDarwinCB, NULL, NULL,
+                CFNotificationSuspensionBehaviorDeliverImmediately);
+            %init(SBGroup);
+        } else if (CCIsMediaServerd()) {
             CCEngineBoot();
             %init(MSGroup);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)4 * NSEC_PER_SEC),

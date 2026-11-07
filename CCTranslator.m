@@ -189,6 +189,28 @@ static void TranslateGoogle(NSString *text, NSString *from, NSString *to,
 
 // ---------- 对外入口（会话缓存 + 多引擎降级链） ----------
 
+static void CCTranslateTry(NSArray<NSString *> *order, NSUInteger idx,
+                           NSString *text, NSString *fromLang, NSString *toLang,
+                           void (^done)(NSString *translated)) {
+    if (idx >= order.count) {
+        dispatch_async(dispatch_get_main_queue(), ^{ done(nil); });
+        return;
+    }
+    NSString *eng = order[idx];
+    void (^cb)(NSString *, NSError *) = ^(NSString *r, NSError *e) {
+        if (r.length) {
+            CachePut(text, r);
+            dispatch_async(dispatch_get_main_queue(), ^{ done(r); });
+            return;
+        }
+        if (e) CCLogf(@"translate[%@] failed: %@", eng, e.localizedDescription);
+        CCTranslateTry(order, idx + 1, text, fromLang, toLang, done);
+    };
+    if ([eng isEqualToString:@"deepl"]) TranslateDeepL(text, fromLang, toLang, cb);
+    else if ([eng isEqualToString:@"ai"]) TranslateAI(text, fromLang, toLang, cb);
+    else TranslateGoogle(text, fromLang, toLang, cb);
+}
+
 void CCTranslate(NSString *text, NSString *fromLang, NSString *toLang,
                  void (^done)(NSString *translated)) {
     CacheInit();
@@ -223,27 +245,6 @@ void CCTranslate(NSString *text, NSString *fromLang, NSString *toLang,
             [order addObject:@"google"];
         }
 
-        __block NSUInteger idx = 0;
-        __block void (^next)(void) = nil;
-        next = ^{
-            if (idx >= order.count) {
-                dispatch_async(dispatch_get_main_queue(), ^{ done(nil); });
-                return;
-            }
-            NSString *eng = order[idx++];
-            void (^cb)(NSString *, NSError *) = ^(NSString *r, NSError *e) {
-                if (r.length) {
-                    CachePut(text, r);
-                    dispatch_async(dispatch_get_main_queue(), ^{ done(r); });
-                    return;
-                }
-                if (e) CCLogf(@"translate[%@] failed: %@", eng, e.localizedDescription);
-                next();
-            };
-            if ([eng isEqualToString:@"deepl"]) TranslateDeepL(text, fromLang, toLang, cb);
-            else if ([eng isEqualToString:@"ai"]) TranslateAI(text, fromLang, toLang, cb);
-            else TranslateGoogle(text, fromLang, toLang, cb);
-        };
-        next();
+        CCTranslateTry(order, 0, text, fromLang, toLang, done);
     });
 }

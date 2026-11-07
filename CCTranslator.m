@@ -142,9 +142,9 @@ static void TranslateAI(NSString *text, NSString *from, NSString *to,
     [task resume];
 }
 
-// ---------- Google（免费 web 接口，无需 Key） ----------
-static void TranslateGoogle(NSString *text, NSString *from, NSString *to,
-                            void (^done)(NSString *, NSError *)) {
+// ---------- Google 免费 web 接口（无需 Key，兜底） ----------
+static void TranslateGoogleFree(NSString *text, NSString *from, NSString *to,
+                                void (^done)(NSString *, NSError *)) {
     NSString *urlStr = [NSString stringWithFormat:
         @"https://translate.googleapis.com/translate_a/single?client=gtx&sl=%@&tl=%@&dt=t&q=%@",
         [from lowercaseString], [to lowercaseString], CCEscape(text)];
@@ -185,6 +185,82 @@ static void TranslateGoogle(NSString *text, NSString *from, NSString *to,
             } @catch (NSException *e) { done(nil, nil); }
         }];
     [task resume];
+}
+
+// ---------- Google Cloud Translation API（填了 Key 时优先） ----------
+static NSString *CCUnescapeHTML(NSString *s) {
+    NSMutableString *m = [s mutableCopy];
+    NSArray *pairs = @[@[@"&quot;", @"\""], @[@"&#39;", @"'"], @[@"&apos;", @"'"],
+                       @[@"&lt;", @"<"], @[@"&gt;", @">"], @[@"&amp;", @"&"]];
+    for (NSArray *p in pairs) {
+        [m replaceOccurrencesOfString:p[0] withString:p[1]
+                              options:0 range:NSMakeRange(0, m.length)];
+    }
+    return m;
+}
+
+static void TranslateGoogleCloud(NSString *text, NSString *from, NSString *to, NSString *key,
+                                 void (^done)(NSString *, NSError *)) {
+    NSString *urlStr = [NSString stringWithFormat:
+        @"https://translation.googleapis.com/language/translate/v2?key=%@", CCEscape(key)];
+    NSURL *url = [NSURL URLWithString:urlStr];
+    if (!url) {
+        done(nil, [NSError errorWithDomain:CC_DOMAIN code:31
+                                   userInfo:@{NSLocalizedDescriptionKey: @"bad google cloud url"}]);
+        return;
+    }
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+    req.HTTPMethod = @"POST";
+    [req setValue:@"application/x-www-form-urlencoded" forHTTPHeaderField:@"Content-Type"];
+    NSMutableString *body = [NSMutableString stringWithFormat:@"q=%@&target=%@&format=text",
+                             CCEscape(text), [to lowercaseString]];
+    if (![[from lowercaseString] isEqualToString:@"auto"])
+        [body appendFormat:@"&source=%@", [from lowercaseString]];
+    req.HTTPBody = [body dataUsingEncoding:NSUTF8StringEncoding];
+    req.timeoutInterval = 15;
+
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req
+        completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+            @try {
+                if (err || !data) {
+                    done(nil, err ?: [NSError errorWithDomain:CC_DOMAIN code:32 userInfo:nil]);
+                    return;
+                }
+                id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                NSString *out = nil;
+                if ([json isKindOfClass:[NSDictionary class]]) {
+                    id d = json[@"data"];
+                    if ([d isKindOfClass:[NSDictionary class]]) {
+                        id tr = d[@"translations"];
+                        if ([tr isKindOfClass:[NSArray class]] && [tr count] > 0) {
+                            id first = tr[0];
+                            if ([first isKindOfClass:[NSDictionary class]])
+                                out = first[@"translatedText"];
+                        }
+                    }
+                }
+                if ([out isKindOfClass:[NSString class]] && out.length)
+                    done(CCUnescapeHTML(out), nil);
+                else done(nil, [NSError errorWithDomain:CC_DOMAIN code:33
+                                               userInfo:@{NSLocalizedDescriptionKey: @"bad google cloud response"}]);
+            } @catch (NSException *e) { done(nil, nil); }
+        }];
+    [task resume];
+}
+
+// ---------- Google 统一入口：有 Key 走 Cloud，失败回退免费接口 ----------
+static void TranslateGoogle(NSString *text, NSString *from, NSString *to,
+                            void (^done)(NSString *, NSError *)) {
+    NSString *key = CCPrefStr(CC_K_GOOGLE_KEY, @"");
+    if (key.length > 0) {
+        TranslateGoogleCloud(text, from, to, key, ^(NSString *r, NSError *e) {
+            if (r.length) { done(r, nil); return; }
+            if (e) CCLogf(@"translate[google-cloud] failed: %@", e.localizedDescription);
+            TranslateGoogleFree(text, from, to, done);
+        });
+    } else {
+        TranslateGoogleFree(text, from, to, done);
+    }
 }
 
 // ---------- 对外入口（会话缓存 + 多引擎降级链） ----------

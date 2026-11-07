@@ -18,6 +18,7 @@
 #define CC_K_TTS_ENABLED      @"TTSEnabled"       // 中文播报
 #define CC_K_ENGINE           @"Engine"           // auto / deepl / ai
 #define CC_K_DEEPL_KEY        @"DeepLKey"
+#define CC_K_GOOGLE_KEY       @"GoogleKey"        // 可选：Google Cloud Translation API Key（不填走免费接口）
 #define CC_K_AI_URL           @"AIURL"
 #define CC_K_AI_KEY           @"AIKey"
 #define CC_K_AI_MODEL         @"AIModel"

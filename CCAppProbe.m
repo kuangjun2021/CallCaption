@@ -251,17 +251,46 @@ static void CCReport(void) {
 static dispatch_queue_t g_reportQ;
 static dispatch_source_t g_reportTimer;
 
-static void *CCFindMSHook(NSString **src) {
+// WhatsApp 的 App 包里自带了一个 libsubstrate.dylib（可能是某个插件塞进去的），
+// 它的 MSHookFunction 是个空壳：不报错，但 old 返回 0，钩子根本不生效。
+// 所以 RTLD_DEFAULT 找到的符号必须校验来源：只要路径在 .app/ 里就丢弃。
+static BOOL CCHookSymOK(void *sym, NSString **implPath) {
+    Dl_info info;
+    memset(&info, 0, sizeof(info));
+    if (!sym || !dladdr(sym, &info) || !info.dli_fname) return NO;
+    NSString *p = [NSString stringWithUTF8String:info.dli_fname] ?: @"";
+    if (implPath) *implPath = p;
+    if ([p containsString:@".app/"]) return NO;
+    if ([p containsString:@"/var/containers/"]) return NO;
+    return YES;
+}
+
+static void *CCFindMSHook(NSString **src, NSString **impl) {
     void *sym = dlsym(RTLD_DEFAULT, "MSHookFunction");
-    if (sym) {
+    NSString *p = nil;
+    if (sym && CCHookSymOK(sym, &p)) {
         if (src) *src = @"RTLD_DEFAULT";
+        if (impl) *impl = p;
         return sym;
     }
-    // App 进程里 ElleKit 的符号可能不是全局导出，优先用已经加载的 libellekit。
-    // 注意顺序：libsubstrate 可能只是兼容 stub，先试 libellekit。
+    if (sym) CCAppLog(@"RTLD_DEFAULT MSHookFunction rejected (%@)", p ?: @"?");
+
+    // 顺便把 /var/jb/usr/lib 里相关的库名打出来，方便确认 ElleKit 的真实路径
+    NSArray *ls = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:@"/var/jb/usr/lib" error:nil];
+    NSMutableArray *cands = [NSMutableArray array];
+    for (NSString *n in ls) {
+        NSString *l = n.lowercaseString;
+        if ([l containsString:@"ellekit"] || [l containsString:@"substrate"] ||
+            [l containsString:@"hooker"]) {
+            [cands addObject:n];
+        }
+    }
+    if (cands.count) CCAppLog(@"libs: %@", [cands componentsJoinedByString:@","]);
+
     const char *paths[] = {
         "/var/jb/usr/lib/libellekit.dylib",
         "/var/jb/usr/lib/libsubstrate.dylib",
+        "/var/jb/usr/lib/libhooker.dylib",
         "libellekit.dylib",
         "libsubstrate.dylib",
         NULL
@@ -271,8 +300,9 @@ static void *CCFindMSHook(NSString **src) {
         if (!h) h = dlopen(paths[i], RTLD_NOW);
         if (!h) continue;
         sym = dlsym(h, "MSHookFunction");
-        if (sym) {
+        if (sym && CCHookSymOK(sym, &p)) {
             if (src) *src = [NSString stringWithUTF8String:paths[i]];
+            if (impl) *impl = p;
             return sym;
         }
     }
@@ -302,15 +332,13 @@ static void CCAppProbeBoot(void) {
                     CCAppLog(@"appprobe disabled by appprobe.off");
                     return;
                 }
-                NSString *src = nil;
-                g_MSHook = (CCMSHookFunction)CCFindMSHook(&src);
-                if (!g_MSHook) { CCAppLog(@"MSHookFunction not found"); return; }
-
-                Dl_info mi;
-                memset(&mi, 0, sizeof(mi));
-                dladdr((void *)g_MSHook, &mi);
-                CCAppLog(@"mshook src=%@ impl=%s", src ?: @"?",
-                         mi.dli_fname ? mi.dli_fname : "?");
+                NSString *src = nil, *impl = nil;
+                g_MSHook = (CCMSHookFunction)CCFindMSHook(&src, &impl);
+                if (!g_MSHook) {
+                    CCAppLog(@"MSHookFunction not found (all rejected)");
+                    return;
+                }
+                CCAppLog(@"mshook src=%@ impl=%@", src ?: @"?", impl ?: @"?");
 
                 void *setProp = dlsym(RTLD_DEFAULT, "AudioUnitSetProperty");
                 if (setProp) {

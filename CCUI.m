@@ -1120,7 +1120,7 @@ void CCUIBoot(void) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.14.0-alpha9)");
+        CCLogLine(@"CallCaption UI booted (single window v0.14.0-alpha10)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

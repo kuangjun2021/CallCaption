@@ -10,6 +10,8 @@
 #import <objc/runtime.h>
 #import <sys/stat.h>
 
+static void CCLocalTeeWriteFloat(const float *src, UInt32 n);
+
 // ---------- 私有 AudioToolbox Tap API（iOS 16+） ----------
 @interface ATAudioTapDescription : NSObject
 - (instancetype)initTapInternalWithFormat:(AVAudioFormat *)format PIDs:(NSArray *)pids;
@@ -324,6 +326,8 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
                         ch->lastRMS = rms;
                         if (rms > 0.008f)
                             ch->lastLoudAt = CFAbsoluteTimeGetCurrent();
+                        if (ch.expectCJK)
+                            CCLocalTeeWriteFloat(dst, nf);
                         if (ch->chunkBuf && ch->chunkIsFloat) {
                             @synchronized(ch) {
                                 [ch->chunkBuf appendBytes:dst length:nf * sizeof(float)];
@@ -519,6 +523,7 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
     urlTaskRunning = NO;
     atomic_store(&chunkReady, 0);
     if (self.fileMode) CCRemoteTeeClose();
+    else CCLocalTeeClose();
     callGen++;
     partialGen++;
     @try {
@@ -681,6 +686,68 @@ static void CCRemoteTeeWrite(const int16_t *s, UInt32 n) {
 static void CCRemoteTeeClose(void) {
     if (g_remoteTee) { fclose(g_remoteTee); g_remoteTee = NULL; }
     g_remoteTeeBytes = 0;
+}
+
+// 本地麦克风：44.1k float -> 16k s16 连续写入 CC_DIR/local16k.wav 供 SpringBoard 识别
+static FILE *g_localTee;
+static double g_localTeePhase;
+static uint64_t g_localTeeBytes;
+static void CCLocalTeeOpen(void) {
+    if (g_localTee) return;
+    NSString *p = [CC_DIR stringByAppendingPathComponent:@"local16k.wav"];
+    g_localTee = fopen(p.fileSystemRepresentation, "wb");
+    if (!g_localTee) return;
+    uint32_t riff = 36, dsz = 0, rate = 16000, byteRate = 32000, sz16 = 16;
+    uint16_t fmt = 1, ch = 1, align = 2, bits = 16;
+    fwrite("RIFF", 1, 4, g_localTee); fwrite(&riff, 4, 1, g_localTee);
+    fwrite("WAVEfmt ", 1, 8, g_localTee); fwrite(&sz16, 4, 1, g_localTee);
+    fwrite(&fmt, 2, 1, g_localTee); fwrite(&ch, 2, 1, g_localTee);
+    fwrite(&rate, 4, 1, g_localTee); fwrite(&byteRate, 4, 1, g_localTee);
+    fwrite(&align, 2, 1, g_localTee); fwrite(&bits, 2, 1, g_localTee);
+    fwrite("data", 1, 4, g_localTee); fwrite(&dsz, 4, 1, g_localTee);
+    g_localTeeBytes = 0; g_localTeePhase = 0;
+    fflush(g_localTee);
+    chmod(p.fileSystemRepresentation, 0666);
+}
+static void CCLocalTeeWriteFloat(const float *src, UInt32 n) {
+    if (!n || !src) return;
+    if (!g_localTee) CCLocalTeeOpen();
+    if (!g_localTee) return;
+    double step = 44100.0 / 16000.0;
+    double pos = g_localTeePhase;
+    int16_t buf[1024];
+    UInt32 cnt = 0;
+    while (pos < (double)n) {
+        UInt32 i = (UInt32)pos;
+        float a = src[i];
+        float c = src[i + 1 < n ? i + 1 : i];
+        float v = a + (c - a) * (float)(pos - (double)i);
+        int iv = (int)lrintf(v * 32767.0f);
+        if (iv > 32767) iv = 32767;
+        if (iv < -32768) iv = -32768;
+        buf[cnt++] = (int16_t)iv;
+        if (cnt == 1024) {
+            fwrite(buf, 2, cnt, g_localTee);
+            g_localTeeBytes += (uint64_t)cnt * 2;
+            cnt = 0;
+        }
+        pos += step;
+    }
+    if (cnt) {
+        fwrite(buf, 2, cnt, g_localTee);
+        g_localTeeBytes += (uint64_t)cnt * 2;
+    }
+    g_localTeePhase = pos - (double)n;
+    uint32_t riff = (uint32_t)(36 + g_localTeeBytes);
+    uint32_t dsz = (uint32_t)g_localTeeBytes;
+    fseek(g_localTee, 4, SEEK_SET); fwrite(&riff, 4, 1, g_localTee);
+    fseek(g_localTee, 40, SEEK_SET); fwrite(&dsz, 4, 1, g_localTee);
+    fseek(g_localTee, 0, SEEK_END);
+    fflush(g_localTee);
+}
+static void CCLocalTeeClose(void) {
+    if (g_localTee) { fclose(g_localTee); g_localTee = NULL; }
+    g_localTeeBytes = 0; g_localTeePhase = 0;
 }
 
 static void CCWriteChunkWav(NSString *path, NSData *pcm) {
@@ -1163,10 +1230,8 @@ static void CheckArm(void) {
         // 文件模式：每次 tick 把 WhatsApp 探针新写出的 PCM 喂给识别器
         if (g_remote.fileMode) [g_remote pumpFileAudio];
         // 分块识别：两个通道攒够 4 秒就送 SFSpeechURLRecognitionRequest
-        for (CCChannel *ch in @[g_remote, g_local]) {
-            if (ch->capturing && atomic_load(&ch->chunkReady))
-                [ch flushChunk];
-        }
+        if (g_remote->capturing && atomic_load(&g_remote->chunkReady))
+            [g_remote flushChunk];
 
         // 我方通道（双向模式）
         BOOL localOn = CCPrefBool(CC_K_LOCAL_ENABLED, NO);
@@ -1254,6 +1319,26 @@ static void CheckArm(void) {
             }
         }
 
+        // SpringBoard 合成好的英文 TTS（CC_DIR/cc_tts.wav）复制到 WhatsApp Documents，
+        // App 探针会把它混进上行。
+        {
+            static NSTimeInterval lastTts = 0;
+            NSString *src = [CC_DIR stringByAppendingPathComponent:@"cc_tts.wav"];
+            NSDictionary *at = [[NSFileManager defaultManager] attributesOfItemAtPath:src error:nil];
+            NSTimeInterval mt = [at[NSFileModificationDate] timeIntervalSince1970];
+            if (at && mt > lastTts) {
+                lastTts = mt;
+                NSString *docs = CCFindWhatsAppDocs();
+                if (docs) {
+                    NSString *dst = [docs stringByAppendingPathComponent:@"cc_tts.wav"];
+                    [[NSFileManager defaultManager] removeItemAtPath:dst error:nil];
+                    BOOL ok = [[NSFileManager defaultManager] copyItemAtPath:src toPath:dst error:nil];
+                    if (ok) chmod(dst.fileSystemRepresentation, 0666);
+                    CCLogf(@"uplink tts copied ok=%d", ok);
+                }
+            }
+        }
+
         if (g_remote->capturing && now - g_remote->lastStatsAt >= 5.0) {
             g_remote->lastStatsAt = now;
             CCLogf(@"remote: alive, audio=%llu frames=%llu rms=%.4f noResult=%.1fs",
@@ -1305,7 +1390,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.14.0-alpha22)");
+        CCLogLine(@"audioservice started (v0.14.0-alpha23)");
         // LCT 的 livecallhelper 在识别前会配置 AVAudioSession（SoloAmbient/Default）；
         // 我们的守护进程以前没做这一步，补上。
         @try {

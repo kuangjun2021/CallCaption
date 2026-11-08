@@ -1268,6 +1268,222 @@ static void CCRemoteFileTick(void) {
     } @catch (NSException *e) { CCLogf(@"sb recog exc %@", e.reason); }
 }
 
+// ---------- SpringBoard 内识别：本地麦克风 ----------
+static NSString *g_lbPath;
+static unsigned long long g_lbOffset;
+static NSMutableData *g_lbChunk;
+static BOOL g_lbBusy;
+static NSString *g_lbLastText;
+static SFSpeechRecognizer *g_lbRecog;
+static SFSpeechRecognitionTask *g_lbTask;
+static CFAbsoluteTime g_lbLastVoiceAt;
+static BOOL g_lbHadVoice;
+
+static void CCWriteWav48kFile(NSString *path, NSData *pcm) {
+    FILE *fp = fopen(path.fileSystemRepresentation, "wb");
+    if (!fp) return;
+    uint32_t riff = 36 + (uint32_t)pcm.length;
+    uint32_t dsz = (uint32_t)pcm.length;
+    uint32_t rate = 48000, byteRate = 96000, sz16 = 16;
+    uint16_t fmt = 1, ch = 1, align = 2, bits = 16;
+    fwrite("RIFF", 1, 4, fp); fwrite(&riff, 4, 1, fp);
+    fwrite("WAVEfmt ", 1, 8, fp); fwrite(&sz16, 4, 1, fp);
+    fwrite(&fmt, 2, 1, fp); fwrite(&ch, 2, 1, fp);
+    fwrite(&rate, 4, 1, fp); fwrite(&byteRate, 4, 1, fp);
+    fwrite(&align, 2, 1, fp); fwrite(&bits, 2, 1, fp);
+    fwrite("data", 1, 4, fp); fwrite(&dsz, 4, 1, fp);
+    fwrite(pcm.bytes, 1, pcm.length, fp);
+    fclose(fp);
+    chmod(path.fileSystemRepresentation, 0666);
+}
+
+// 英文 TTS 合成成 48k PCM，写到 CC_DIR/cc_tts.wav；守护进程再复制给 App 探针做上行混音
+static void CCTTSBufferEnglish(NSString *text) {
+    if (!text.length) return;
+    AVSpeechSynthesizer *synth = [[AVSpeechSynthesizer alloc] init];
+    AVSpeechUtterance *u = [[AVSpeechUtterance alloc] initWithString:text];
+    NSString *vid = CCPrefStr(CC_K_LOCAL_VOICE, @"");
+    AVSpeechSynthesisVoice *v = vid.length ? [AVSpeechSynthesisVoice voiceWithIdentifier:vid] : nil;
+    u.voice = v ?: [AVSpeechSynthesisVoice voiceWithLanguage:@"en-US"];
+    NSMutableData *out = [NSMutableData data];
+    __block double phase = 0;
+    __block BOOL done = NO;
+    __block AVSpeechSynthesizer *keep = synth;
+    [synth writeUtterance:u toBufferCallback:^(AVAudioBuffer *buffer) {
+        @autoreleasepool {
+            if (![buffer isKindOfClass:[AVAudioPCMBuffer class]]) return;
+            AVAudioPCMBuffer *b = (AVAudioPCMBuffer *)buffer;
+            AVAudioFrameCount n = b.frameLength;
+            if (n == 0) {
+                if (!done) {
+                    done = YES;
+                    NSString *p = [CC_DIR stringByAppendingPathComponent:@"cc_tts.wav"];
+                    CCWriteWav48kFile(p, out);
+                    CCLogf(@"tts en -> cc_tts.wav %lu bytes", (unsigned long)out.length);
+                    keep = nil;
+                }
+                return;
+            }
+            float *src = b.floatChannelData ? b.floatChannelData[0] : NULL;
+            if (!src) return;
+            double sr = b.format.sampleRate > 0 ? b.format.sampleRate : 22050.0;
+            double step = sr / 48000.0;
+            double pos = phase;
+            int16_t buf[2048];
+            UInt32 cnt = 0;
+            while (pos < (double)n) {
+                UInt32 i = (UInt32)pos;
+                float a = src[i];
+                float c = src[i + 1 < n ? i + 1 : i];
+                float val = a + (c - a) * (float)(pos - (double)i);
+                int iv = (int)lrintf(val * 32767.0f);
+                if (iv > 32767) iv = 32767;
+                if (iv < -32768) iv = -32768;
+                buf[cnt++] = (int16_t)iv;
+                if (cnt == 2048) { [out appendBytes:buf length:cnt * 2]; cnt = 0; }
+                pos += step;
+            }
+            if (cnt) [out appendBytes:buf length:cnt * 2];
+            phase = pos - (double)n;
+        }
+    }];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        if (!done) {
+            done = YES;
+            NSString *p = [CC_DIR stringByAppendingPathComponent:@"cc_tts.wav"];
+            CCWriteWav48kFile(p, out);
+            keep = nil;
+        }
+    });
+}
+
+static void CCLBDeliverChunk(NSString *txt) {
+    @try {
+        NSString *part = txt;
+        if (g_lbLastText.length) part = CCWordMerge(g_lbLastText, txt);
+        g_lbLastText = txt;
+        part = [part stringByTrimmingCharactersInSet:
+                [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (!part.length) return;
+        CCLogf(@"sb local: %@", part);
+        CCUIDeliverLocalOriginal(part);
+        CCTranslateEx(part, @"zh", @"en", ^(NSString *out, NSString *engine) {
+            if (!out.length) return;
+            CCUIDeliverLocalTranslated(out);
+            if (engine.length) CCUIDeliverLocalEngine(engine);
+            CCTTSBufferEnglish(out);       // 上行注入用，不外放
+        });
+    } @catch (NSException *e) { }
+}
+
+static void CCLocalFileTick(void) {
+    @try {
+        if (!g_callActive) {
+            g_lbOffset = 0; g_lbPath = nil; g_lbChunk = nil; g_lbLastText = nil;
+            g_lbHadVoice = NO; g_lbLastVoiceAt = 0;
+            return;
+        }
+        NSString *p = [CC_DIR stringByAppendingPathComponent:@"local16k.wav"];
+        NSDictionary *at = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:nil];
+        if (!at) return;
+        unsigned long long size = [at[NSFileSize] unsignedLongLongValue];
+        if (size <= 44) return;
+        if (!g_lbPath || ![g_lbPath isEqualToString:p] || size < g_lbOffset) {
+            g_lbPath = p; g_lbOffset = 44; g_lbChunk = [NSMutableData data]; g_lbLastText = nil;
+        }
+        if (size <= g_lbOffset) return;
+        NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:p];
+        if (!fh) return;
+        [fh seekToFileOffset:g_lbOffset];
+        NSData *d = [fh readDataToEndOfFile];
+        [fh closeFile];
+        NSUInteger n = d.length & ~(NSUInteger)1;
+        if (n == 0) return;
+        g_lbOffset += n;
+        if (!g_lbChunk) g_lbChunk = [NSMutableData data];
+        [g_lbChunk appendData:[d subdataWithRange:NSMakeRange(0, n)]];
+
+        const int16_t *np = (const int16_t *)d.bytes;
+        NSUInteger nn = n / 2;
+        double ns = 0;
+        for (NSUInteger i = 0; i < nn; i++) ns += fabs((double)np[i]);
+        double nrms = nn ? ns / (double)nn / 32768.0 : 0;
+        if (nrms > 0.006) {
+            g_lbHadVoice = YES;
+            g_lbLastVoiceAt = CFAbsoluteTimeGetCurrent();
+        }
+
+        if (g_lbBusy) {
+            NSUInteger maxBytes = 16000 * 2 * 6;
+            if (g_lbChunk.length > maxBytes)
+                g_lbChunk = [[g_lbChunk subdataWithRange:
+                              NSMakeRange(g_lbChunk.length - maxBytes, maxBytes)] mutableCopy];
+            return;
+        }
+
+        double dur = (double)g_lbChunk.length / 32000.0;
+        double silence = g_lbLastVoiceAt > 0
+            ? CFAbsoluteTimeGetCurrent() - g_lbLastVoiceAt : 0;
+        BOOL voiceEnded = g_lbHadVoice && silence > 0.6;
+        if (!(dur >= 6.0 || (dur >= 2.0 && voiceEnded))) return;
+
+        NSData *pcm = [g_lbChunk copy];
+        NSUInteger keep = 16000 * 2;
+        g_lbChunk = [[pcm subdataWithRange:NSMakeRange(pcm.length - keep, keep)] mutableCopy];
+        g_lbHadVoice = NO;
+        g_lbLastVoiceAt = 0;
+
+        const int16_t *sp = pcm.bytes;
+        NSUInteger cnt = pcm.length / 2;
+        double sum = 0;
+        for (NSUInteger i = 0; i < cnt; i++) sum += fabs((double)sp[i]);
+        double avg = cnt ? sum / (double)cnt / 32768.0 : 0;
+        if (avg < 0.0015) return;
+
+        double gain = avg > 0.0001 ? 0.06 / avg : 1.0;
+        if (gain > 8.0) gain = 8.0;
+        if (gain < 1.0) gain = 1.0;
+        NSMutableData *ampl = [NSMutableData dataWithLength:pcm.length];
+        int16_t *ap = (int16_t *)ampl.mutableBytes;
+        for (NSUInteger i = 0; i < cnt; i++) {
+            int v = (int)((double)sp[i] * gain);
+            if (v > 32767) v = 32767;
+            if (v < -32768) v = -32768;
+            ap[i] = (int16_t)v;
+        }
+        pcm = ampl;
+        NSString *tmp = [NSTemporaryDirectory() stringByAppendingPathComponent:@"cc_sb_local.wav"];
+        CCWriteWav16kFile(tmp, pcm);
+        if (!g_lbRecog) {
+            g_lbRecog = [[SFSpeechRecognizer alloc] initWithLocale:
+                         [NSLocale localeWithLocaleIdentifier:CCPrefStr(CC_K_LOCAL_LOCALE, @"zh-CN")]];
+        }
+        if (!g_lbRecog) return;
+        SFSpeechURLRecognitionRequest *ur =
+            [[SFSpeechURLRecognitionRequest alloc] initWithURL:[NSURL fileURLWithPath:tmp]];
+        ur.shouldReportPartialResults = NO;
+        if (@available(iOS 13.0, *)) {
+            ur.taskHint = SFSpeechRecognitionTaskHintDictation;
+            ur.requiresOnDeviceRecognition = YES;
+        }
+        g_lbBusy = YES;
+        CCLogf(@"sb local chunk %.1fs rms%.3f", (double)pcm.length / 32000.0, avg);
+        g_lbTask = [g_lbRecog recognitionTaskWithRequest:ur
+            resultHandler:^(SFSpeechRecognitionResult *res, NSError *err) {
+                if (res.isFinal) {
+                    NSString *txt = [res.bestTranscription.formattedString
+                        stringByTrimmingCharactersInSet:
+                        [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                    if (txt.length) CCLBDeliverChunk(txt);
+                }
+                if (err) CCLogf(@"sb local err %ld %@", (long)err.code, err.localizedDescription);
+                g_lbBusy = NO;
+                [[NSFileManager defaultManager] removeItemAtPath:tmp error:nil];
+            }];
+    } @catch (NSException *e) { CCLogf(@"sb local exc %@", e.reason); }
+}
+
 // ---------- 一次性自检：SpringBoard 这个 App 进程能不能跑 SFSpeech ----------
 // 守护进程里 SFSpeech 一直 1110；如果 SpringBoard 里能识别同一个 WAV，
 // 就把识别搬进 SpringBoard，避开 daemon 环境限制。
@@ -1351,17 +1567,14 @@ void CCUIBoot(void) {
                                                                 repeats:YES
                                                                   block:^(NSTimer *t) {
                         CCRemoteFileTick();
+                        CCLocalFileTick();
                     }];
                 }
             } @catch (NSException *e) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
         });
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            CCRunSpeechSelfTest(YES);
-        });
-        CCLogLine(@"CallCaption UI booted (single window v0.14.0-alpha22)");
+        CCLogLine(@"CallCaption UI booted (single window v0.14.0-alpha23)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

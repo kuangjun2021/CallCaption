@@ -30,7 +30,6 @@ static NSString *g_stateText;
 
 static UIView *g_panelCard;
 static UIWindow *g_settingsWin;
-static id g_panelGuard;
 
 static CGFloat ScreenW(void) { return [UIScreen mainScreen].bounds.size.width; }
 static CGFloat ScreenH(void) { return [UIScreen mainScreen].bounds.size.height; }
@@ -66,15 +65,7 @@ static void AttachScene(UIWindow *win) {
     }
 }
 
-@interface CCPanelTapGuard : NSObject <UIGestureRecognizerDelegate>
-@property (nonatomic, weak) UIView *card;
-@end
-@implementation CCPanelTapGuard
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)g shouldReceiveTouch:(UITouch *)touch {
-    if (self.card && [touch.view isDescendantOfView:self.card]) return NO;
-    return YES;
-}
-@end
+
 
 // 在 SpringBoard 内直接弹出设置（不经过 Settings.app）
 static void CCOpenSettings(void) {
@@ -126,6 +117,20 @@ static void RefreshBoxes(void);
 
 
 
+@interface CCPanelBGView : UIView
+@property (nonatomic, weak) UIView *card;
+@end
+@implementation CCPanelBGView
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    UITouch *t = [touches anyObject];
+    CGPoint p = [t locationInView:self];
+    BOOL inside = (self.card && CGRectContainsPoint(self.card.frame, p));
+    CCLogf(@"panel: bg touch %.0f,%.0f insideCard=%d", p.x, p.y, inside);
+    if (inside) { [super touchesEnded:touches withEvent:event]; return; }
+    [[CCUIHelper class] outsideTapped:nil];
+}
+@end
+
 // ---------- 控制面板 ----------
 
 static void EnsurePanelUI(void) {
@@ -134,10 +139,10 @@ static void EnsurePanelUI(void) {
         CGFloat w = CardWidth();
         CGFloat h = 150;
         UIWindow *win = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-        win.windowLevel = UIWindowLevelStatusBar + 102;
+        win.windowLevel = UIWindowLevelAlert + 10;
         win.backgroundColor = [UIColor clearColor];
 
-        UIView *bg = [[UIView alloc] initWithFrame:win.bounds];
+        CCPanelBGView *bg = [[CCPanelBGView alloc] initWithFrame:win.bounds];
         bg.backgroundColor = [UIColor clearColor];
         [win addSubview:bg];
 
@@ -148,6 +153,7 @@ static void EnsurePanelUI(void) {
         blur.layer.cornerRadius = 22;
         blur.layer.masksToBounds = YES;
         [bg addSubview:blur];
+        bg.card = blur;
 
         UIView *ov = [[UIView alloc] initWithFrame:blur.bounds];
         ov.backgroundColor = [UIColor colorWithWhite:0 alpha:0.28];
@@ -200,14 +206,6 @@ static void EnsurePanelUI(void) {
             initWithTarget:[CCUIHelper class] action:@selector(openSettings:)];
         [blur addGestureRecognizer:lp];
 
-        CCPanelTapGuard *guard = [CCPanelTapGuard new];
-        guard.card = blur;
-        g_panelGuard = guard;
-        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
-            initWithTarget:[CCUIHelper class] action:@selector(outsideTapped:)];
-        tap.delegate = guard;
-        [bg addGestureRecognizer:tap];
-
         AttachScene(win);
         win.hidden = YES;
         g_panelWin = win;
@@ -221,7 +219,7 @@ static void EnsureMiniUI(void) {
         CGFloat s = 64.0;
         UIWindow *win = [[UIWindow alloc] initWithFrame:
             CGRectMake(ScreenW() - s - 16, ScreenH() * 0.52, s, s)];
-        win.windowLevel = UIWindowLevelStatusBar + 103;
+        win.windowLevel = UIWindowLevelAlert + 11;
         win.backgroundColor = [UIColor clearColor];
 
         UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];

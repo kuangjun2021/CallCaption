@@ -2,6 +2,7 @@
 // 使用 theos/headers 的真实 Preferences 头文件 + 标准 Root.plist，走系统原生渲染路径。
 #import <Preferences/PSListController.h>
 #import <Preferences/PSSpecifier.h>
+#import <Preferences/PSTableCell.h>
 #import <AVFoundation/AVFoundation.h>
 
 #define CC_DOMAIN @"net.user.callcaption"
@@ -35,20 +36,42 @@ __attribute__((visibility("default")))
             b = [NSBundle bundleWithPath:@"/var/jb/Library/PreferenceBundles/CallCaptionPrefs.bundle"];
             if (b) self.bundle = b;
         }
-        SLog(@"specifiers: bundle=%@", b.bundlePath);
-        _specifiers = [self loadSpecifiersFromPlistName:@"Root" target:self bundle:b];
-        SLog(@"Root count=%lu", (unsigned long)_specifiers.count);
-        if (!_specifiers.count) {
-            _specifiers = [self loadSpecifiersFromPlistName:@"CallCaptionRootListController" target:self bundle:b];
-            SLog(@"fallback count=%lu", (unsigned long)_specifiers.count);
+        NSString *path = [b pathForResource:@"Root" ofType:@"plist"];
+        NSArray *dicts = [NSArray arrayWithContentsOfFile:path];
+        SLog(@"manual load path=%@ dicts=%lu", path, (unsigned long)dicts.count);
+
+        if (dicts.count) {
+            NSMutableArray *arr = [NSMutableArray array];
+            for (NSDictionary *d in dicts) {
+                if (![d isKindOfClass:[NSDictionary class]]) continue;
+                NSString *cellStr = d[@"cell"] ?: @"PSGroupCell";
+                PSCellType type = [PSTableCell cellTypeFromString:cellStr];
+                NSString *label = d[@"label"] ?: @"";
+                PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:label
+                                                                target:self
+                                                                   set:NULL
+                                                                   get:NULL
+                                                                detail:nil
+                                                                  cell:type
+                                                                  edit:nil];
+                for (NSString *k in d) {
+                    if ([k isEqualToString:@"cell"] || [k isEqualToString:@"label"]) continue;
+                    [sp setProperty:d[k] forKey:k];
+                }
+                NSString *act = d[@"action"];
+                if ([act isKindOfClass:[NSString class]] && act.length) {
+                    sp.buttonAction = NSSelectorFromString(act);
+                    [sp setProperty:act forKey:@"action"];
+                }
+                [arr addObject:sp];
+            }
+            _specifiers = arr;
+            SLog(@"manual specs=%lu", (unsigned long)arr.count);
         }
+
         if (!_specifiers.count) {
-            Class PS = NSClassFromString(@"PSSpecifier");
-            PSSpecifier *g = [PS groupSpecifierWithName:@"CallCaption"];
-            PSSpecifier *t = [PS preferenceSpecifierNamed:@"加载失败：请把 settings.log 发给开发者"
-                                                   target:nil set:nil get:nil detail:nil
-                                                     cell:PSStaticTextCell edit:nil];
-            _specifiers = [@[g, t] mutableCopy];
+            _specifiers = [self loadSpecifiersFromPlistName:@"Root" target:self bundle:b];
+            SLog(@"native fallback count=%lu", (unsigned long)_specifiers.count);
         }
     }
     return _specifiers;

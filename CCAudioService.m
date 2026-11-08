@@ -483,7 +483,8 @@ static void CheckArm(void) {
             NSString *s = [NSString stringWithContentsOfFile:
                            @"/var/mobile/Library/CallCaption/tts_until"
                                               encoding:NSUTF8StringEncoding error:nil];
-            g_ttsUntil = s.length ? [s doubleValue] : 0;
+            // 文件里是 epoch 秒；CFAbsoluteTime 起点是 2001-01-01，必须减去 978307200
+            g_ttsUntil = s.length ? ([s doubleValue] - 978307200.0) : 0;
         } @catch (NSException *e) { }
 
         BOOL armed = [[NSFileManager defaultManager] fileExistsAtPath:CC_ARM_PATH];
@@ -603,7 +604,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.13.0)");
+        CCLogLine(@"audioservice started (v0.13.1)");
 
         g_stateQ = dispatch_queue_create("net.user.callcaption.audio", DISPATCH_QUEUE_SERIAL);
 

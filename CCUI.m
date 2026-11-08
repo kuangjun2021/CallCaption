@@ -1333,8 +1333,16 @@ static void CCTTSBuffer(NSString *text, NSString *lang, NSString *fileName) {
                 }
                 return;
             }
-            float *src = b.floatChannelData ? b.floatChannelData[0] : NULL;
-            if (!src) return;
+            const float *srcF = b.floatChannelData ? b.floatChannelData[0] : NULL;
+            const int16_t *srcI = b.int16ChannelData ? b.int16ChannelData[0] : NULL;
+            if (!srcF && !srcI) {
+                static int logged;
+                if (logged++ < 3)
+                    CCLogf(@"tts buf unsupported fmt=%d ch=%u frames=%u",
+                           (int)b.format.commonFormat,
+                           (unsigned)b.format.channelCount, (unsigned)n);
+                return;
+            }
             double sr = b.format.sampleRate > 0 ? b.format.sampleRate : 22050.0;
             double step = sr / 48000.0;
             double pos = phase;
@@ -1342,8 +1350,9 @@ static void CCTTSBuffer(NSString *text, NSString *lang, NSString *fileName) {
             UInt32 cnt = 0;
             while (pos < (double)n) {
                 UInt32 i = (UInt32)pos;
-                float a = src[i];
-                float c = src[i + 1 < n ? i + 1 : i];
+                UInt32 i2 = (i + 1 < n ? i + 1 : i);
+                float a = srcF ? srcF[i] : (float)srcI[i] / 32768.0f;
+                float c = srcF ? srcF[i2] : (float)srcI[i2] / 32768.0f;
                 float val = a + (c - a) * (float)(pos - (double)i);
                 int iv = (int)lrintf(val * 32767.0f);
                 if (iv > 32767) iv = 32767;
@@ -1586,7 +1595,7 @@ void CCUIBoot(void) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.14.0-alpha24)");
+        CCLogLine(@"CallCaption UI booted (single window v0.14.0-alpha25)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

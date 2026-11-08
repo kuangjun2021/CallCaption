@@ -10,6 +10,8 @@
 #import <CallKit/CallKit.h>
 #import <Speech/Speech.h>
 #import <objc/runtime.h>
+#import <sys/stat.h>
+#import <stdio.h>
 
 #pragma mark - 私有窗口类
 
@@ -1088,6 +1090,137 @@ static void EnsureUI(void) {
     }
 }
 
+// ---------- SpringBoard 内识别（自检已证明：App 进程里 SFSpeech 可用） ----------
+static NSString *g_sbPath;
+static unsigned long long g_sbOffset;
+static NSMutableData *g_sbChunk;
+static BOOL g_sbBusy;
+static NSString *g_sbLastText;
+static SFSpeechRecognizer *g_sbRecog;
+static SFSpeechRecognitionTask *g_sbTask;
+static NSTimer *g_sbTimer;
+
+static void CCWriteWav16kFile(NSString *path, NSData *pcm) {
+    FILE *fp = fopen(path.fileSystemRepresentation, "wb");
+    if (!fp) return;
+    uint32_t riff = 36 + (uint32_t)pcm.length;
+    uint32_t dsz = (uint32_t)pcm.length;
+    uint32_t rate = 16000, byteRate = 32000, sz16 = 16;
+    uint16_t fmt = 1, ch = 1, align = 2, bits = 16;
+    fwrite("RIFF", 1, 4, fp); fwrite(&riff, 4, 1, fp);
+    fwrite("WAVEfmt ", 1, 8, fp); fwrite(&sz16, 4, 1, fp);
+    fwrite(&fmt, 2, 1, fp); fwrite(&ch, 2, 1, fp);
+    fwrite(&rate, 4, 1, fp); fwrite(&byteRate, 4, 1, fp);
+    fwrite(&align, 2, 1, fp); fwrite(&bits, 2, 1, fp);
+    fwrite("data", 1, 4, fp); fwrite(&dsz, 4, 1, fp);
+    fwrite(pcm.bytes, 1, pcm.length, fp);
+    fclose(fp);
+    chmod(path.fileSystemRepresentation, 0666);
+}
+
+static NSString *CCWordMerge(NSString *prev, NSString *next) {
+    NSArray *a = [prev componentsSeparatedByString:@" "];
+    NSArray *b = [next componentsSeparatedByString:@" "];
+    NSInteger maxK = MIN((NSInteger)a.count, (NSInteger)b.count);
+    for (NSInteger k = maxK; k > 0; k--) {
+        BOOL ok = YES;
+        for (NSInteger i = 0; i < k; i++) {
+            NSString *x = [a[a.count - k + i] lowercaseString];
+            NSString *y = [b[i] lowercaseString];
+            if (![x isEqualToString:y]) { ok = NO; break; }
+        }
+        if (ok) return [[b subarrayWithRange:NSMakeRange(k, b.count - k)]
+                        componentsJoinedByString:@" "];
+    }
+    return next;
+}
+
+static void CCSBDeliverChunk(NSString *txt) {
+    @try {
+        NSString *part = txt;
+        if (g_sbLastText.length) part = CCWordMerge(g_sbLastText, txt);
+        g_sbLastText = txt;
+        part = [part stringByTrimmingCharactersInSet:
+                [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (!part.length) return;
+        CCLogf(@"sb recog: %@", part);
+        CCUIDeliverRemoteOriginal(part);
+        CCTranslateEx(part, @"en", @"zh", ^(NSString *out, NSString *engine) {
+            if (!out.length) return;
+            CCUIDeliverRemoteTranslated(out);
+            if (engine.length) CCUIDeliverRemoteEngine(engine);
+            if (CCPrefBool(CC_K_TTS_ENABLED, YES)) CCUISpeakText(out);
+        });
+    } @catch (NSException *e) { }
+}
+
+static void CCRemoteFileTick(void) {
+    @try {
+        if (!g_callActive) {
+            g_sbOffset = 0; g_sbPath = nil; g_sbChunk = nil; g_sbLastText = nil;
+            return;
+        }
+        NSString *p = [CC_DIR stringByAppendingPathComponent:@"remote16k.wav"];
+        NSDictionary *at = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:nil];
+        if (!at) return;
+        unsigned long long size = [at[NSFileSize] unsignedLongLongValue];
+        if (size <= 44) return;
+        if (!g_sbPath || ![g_sbPath isEqualToString:p] || size < g_sbOffset) {
+            g_sbPath = p; g_sbOffset = 44; g_sbChunk = [NSMutableData data]; g_sbLastText = nil;
+        }
+        if (size <= g_sbOffset) return;
+        NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:p];
+        if (!fh) return;
+        [fh seekToFileOffset:g_sbOffset];
+        NSData *d = [fh readDataToEndOfFile];
+        [fh closeFile];
+        NSUInteger n = d.length & ~(NSUInteger)1;
+        if (n == 0) return;
+        g_sbOffset += n;
+        if (!g_sbChunk) g_sbChunk = [NSMutableData data];
+        [g_sbChunk appendData:[d subdataWithRange:NSMakeRange(0, n)]];
+        if (g_sbBusy) return;
+        if (g_sbChunk.length < 16000 * 2 * 4) return;      // 4 秒一块
+        NSData *pcm = [g_sbChunk copy];
+        NSUInteger keep = 16000 * 2;                        // 1 秒重叠
+        g_sbChunk = [[pcm subdataWithRange:NSMakeRange(pcm.length - keep, keep)] mutableCopy];
+        const int16_t *sp = pcm.bytes;
+        NSUInteger cnt = pcm.length / 2;
+        double sum = 0;
+        for (NSUInteger i = 0; i < cnt; i++) sum += fabs((double)sp[i]);
+        double avg = cnt ? sum / (double)cnt / 32768.0 : 0;
+        if (avg < 0.003) return;                            // 静音块跳过
+        NSString *tmp = [NSTemporaryDirectory() stringByAppendingPathComponent:@"cc_sb_chunk.wav"];
+        CCWriteWav16kFile(tmp, pcm);
+        if (!g_sbRecog) {
+            g_sbRecog = [[SFSpeechRecognizer alloc] initWithLocale:
+                         [NSLocale localeWithLocaleIdentifier:CCPrefStr(CC_K_REMOTE_LOCALE, @"en-US")]];
+        }
+        if (!g_sbRecog) return;
+        SFSpeechURLRecognitionRequest *ur =
+            [[SFSpeechURLRecognitionRequest alloc] initWithURL:[NSURL fileURLWithPath:tmp]];
+        ur.shouldReportPartialResults = NO;
+        if (@available(iOS 13.0, *)) {
+            ur.taskHint = SFSpeechRecognitionTaskHintDictation;
+            ur.requiresOnDeviceRecognition = YES;           // 自检证明 on-device 可用
+        }
+        g_sbBusy = YES;
+        CCLogf(@"sb recog chunk %.1fs rms%.3f", (double)pcm.length / 32000.0, avg);
+        g_sbTask = [g_sbRecog recognitionTaskWithRequest:ur
+            resultHandler:^(SFSpeechRecognitionResult *res, NSError *err) {
+                if (res.isFinal) {
+                    NSString *txt = [res.bestTranscription.formattedString
+                        stringByTrimmingCharactersInSet:
+                        [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                    if (txt.length) CCSBDeliverChunk(txt);
+                }
+                if (err) CCLogf(@"sb recog err %ld %@", (long)err.code, err.localizedDescription);
+                g_sbBusy = NO;
+                [[NSFileManager defaultManager] removeItemAtPath:tmp error:nil];
+            }];
+    } @catch (NSException *e) { CCLogf(@"sb recog exc %@", e.reason); }
+}
+
 // ---------- 一次性自检：SpringBoard 这个 App 进程能不能跑 SFSpeech ----------
 // 守护进程里 SFSpeech 一直 1110；如果 SpringBoard 里能识别同一个 WAV，
 // 就把识别搬进 SpringBoard，避开 daemon 环境限制。
@@ -1166,6 +1299,13 @@ void CCUIBoot(void) {
                     ShowWindow();
                     [CCUIHelper expandPanel];
                 }
+                if (!g_sbTimer) {
+                    g_sbTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
+                                                                repeats:YES
+                                                                  block:^(NSTimer *t) {
+                        CCRemoteFileTick();
+                    }];
+                }
             } @catch (NSException *e) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
@@ -1174,7 +1314,7 @@ void CCUIBoot(void) {
                        dispatch_get_main_queue(), ^{
             CCRunSpeechSelfTest(YES);
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.14.0-alpha19)");
+        CCLogLine(@"CallCaption UI booted (single window v0.14.0-alpha20)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

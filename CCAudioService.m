@@ -518,6 +518,7 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
     lastChunkText = nil;
     urlTaskRunning = NO;
     atomic_store(&chunkReady, 0);
+    if (self.fileMode) CCRemoteTeeClose();
     callGen++;
     partialGen++;
     @try {
@@ -643,6 +644,44 @@ static NSString *CCMergeOverlap(NSString *prev, NSString *next) {
     return next;
 }
 
+// SpringBoard 侧识别的音频桥：把远程 16k mono s16 连续写成 CC_DIR/remote16k.wav
+static FILE *g_remoteTee;
+static uint64_t g_remoteTeeBytes;
+static void CCRemoteTeeOpen(void) {
+    if (g_remoteTee) return;
+    NSString *p = [CC_DIR stringByAppendingPathComponent:@"remote16k.wav"];
+    g_remoteTee = fopen(p.fileSystemRepresentation, "wb");
+    if (!g_remoteTee) return;
+    uint32_t riff = 36, dsz = 0, rate = 16000, byteRate = 32000, sz16 = 16;
+    uint16_t fmt = 1, ch = 1, align = 2, bits = 16;
+    fwrite("RIFF", 1, 4, g_remoteTee); fwrite(&riff, 4, 1, g_remoteTee);
+    fwrite("WAVEfmt ", 1, 8, g_remoteTee); fwrite(&sz16, 4, 1, g_remoteTee);
+    fwrite(&fmt, 2, 1, g_remoteTee); fwrite(&ch, 2, 1, g_remoteTee);
+    fwrite(&rate, 4, 1, g_remoteTee); fwrite(&byteRate, 4, 1, g_remoteTee);
+    fwrite(&align, 2, 1, g_remoteTee); fwrite(&bits, 2, 1, g_remoteTee);
+    fwrite("data", 1, 4, g_remoteTee); fwrite(&dsz, 4, 1, g_remoteTee);
+    g_remoteTeeBytes = 0;
+    fflush(g_remoteTee);
+    chmod(p.fileSystemRepresentation, 0666);
+}
+static void CCRemoteTeeWrite(const int16_t *s, UInt32 n) {
+    if (!n) return;
+    if (!g_remoteTee) CCRemoteTeeOpen();
+    if (!g_remoteTee) return;
+    fwrite(s, 2, n, g_remoteTee);
+    g_remoteTeeBytes += (uint64_t)n * 2;
+    uint32_t riff = (uint32_t)(36 + g_remoteTeeBytes);
+    uint32_t dsz = (uint32_t)g_remoteTeeBytes;
+    fseek(g_remoteTee, 4, SEEK_SET); fwrite(&riff, 4, 1, g_remoteTee);
+    fseek(g_remoteTee, 40, SEEK_SET); fwrite(&dsz, 4, 1, g_remoteTee);
+    fseek(g_remoteTee, 0, SEEK_END);
+    fflush(g_remoteTee);
+}
+static void CCRemoteTeeClose(void) {
+    if (g_remoteTee) { fclose(g_remoteTee); g_remoteTee = NULL; }
+    g_remoteTeeBytes = 0;
+}
+
 static void CCWriteChunkWav(NSString *path, NSData *pcm) {
     FILE *fp = fopen(path.fileSystemRepresentation, "wb");
     if (!fp) return;
@@ -716,19 +755,14 @@ static void CCWriteChunkWav(NSString *path, NSData *pcm) {
                 dst[idx] = (float)v / 32768.0f;
                 sum += fabs((double)v) / 32768.0;
             }
-            [chunkBuf appendBytes:tmp length:batch * 2];
+            CCRemoteTeeWrite(tmp, batch);
             produced += batch;
         }
         float rms = (float)(sum / (double)outFrames);
         lastRMS = rms;
         if (rms > 0.008f) lastLoudAt = CFAbsoluteTimeGetCurrent();
-        chunkEnergy += sum;
-        chunkSamples += outFrames;
         __atomic_add_fetch(&frames, outFrames, __ATOMIC_RELAXED);
         __atomic_add_fetch(&audioBytes, (uint64_t)outFrames * 2, __ATOMIC_RELAXED);
-        if (chunkRate > 0 && (double)chunkSamples / chunkRate >= 4.0)
-            atomic_store(&chunkReady, 1);
-        if (atomic_load(&chunkReady)) [self flushChunk];
     } @catch (NSException *e) { }
 }
 
@@ -1270,7 +1304,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.14.0-alpha19)");
+        CCLogLine(@"audioservice started (v0.14.0-alpha20)");
         // LCT 的 livecallhelper 在识别前会配置 AVAudioSession（SoloAmbient/Default）；
         // 我们的守护进程以前没做这一步，补上。
         @try {

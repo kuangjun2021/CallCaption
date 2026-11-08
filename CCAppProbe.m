@@ -54,6 +54,9 @@ static void CCAppLog(NSString *fmt, ...) {
         [paths addObject:@"/tmp/ccappprobe.log"];
         NSString *tmp = NSTemporaryDirectory();
         if (tmp.length) [paths addObject:[tmp stringByAppendingPathComponent:@"ccappprobe.log"]];
+        NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                              NSUserDomainMask, YES) firstObject];
+        if (docs.length) [paths addObject:[docs stringByAppendingPathComponent:@"ccappprobe.log"]];
         for (NSString *p in paths) {
             @try {
                 FILE *fp = fopen(p.fileSystemRepresentation, "a");
@@ -252,7 +255,8 @@ __attribute__((constructor))
 static void CCAppProbeBoot(void) {
     @autoreleasepool {
         NSString *proc = CCProcName();
-        CCAppLog(@"dylib loaded proc=%@ pid=%d", proc, getpid());
+        CCAppLog(@"dylib loaded proc=%@ bundle=%@ pid=%d",
+                 proc, [[NSBundle mainBundle] bundleIdentifier] ?: @"?", getpid());
         if (![proc isEqualToString:@"WhatsApp"]) return;
 
         g_reportQ = dispatch_queue_create("cc.appprobe.report", DISPATCH_QUEUE_SERIAL);

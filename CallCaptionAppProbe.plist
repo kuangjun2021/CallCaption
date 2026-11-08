@@ -8,6 +8,10 @@
 		<array>
 			<string>WhatsApp</string>
 		</array>
+		<key>Bundles</key>
+		<array>
+			<string>net.whatsapp.WhatsApp</string>
+		</array>
 	</dict>
 </dict>
 </plist>

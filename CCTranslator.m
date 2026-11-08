@@ -266,6 +266,7 @@ static void TranslateGoogle(NSString *text, NSString *from, NSString *to,
 // ---------- Bing（Edge 免费接口：国内可用、无需 Key） ----------
 static NSString *g_bingToken = nil;
 static CFAbsoluteTime g_bingTokenAt = 0;
+static CFAbsoluteTime g_bingDeadUntil = 0;
 
 static NSString *BingLang(NSString *code) {
     NSString *c = [code lowercaseString];
@@ -333,7 +334,7 @@ static void TranslateBing(NSString *text, NSString *from, NSString *to,
     }
     NSMutableURLRequest *treq = [NSMutableURLRequest requestWithURL:
         [NSURL URLWithString:@"https://edge.microsoft.com/translate/auth"]];
-    treq.timeoutInterval = 10;
+    treq.timeoutInterval = 6;
     [[[NSURLSession sharedSession] dataTaskWithRequest:treq
         completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
             @try {
@@ -348,6 +349,7 @@ static void TranslateBing(NSString *text, NSString *from, NSString *to,
                     g_bingTokenAt = CFAbsoluteTimeGetCurrent();
                     doTranslate(token);
                 } else {
+                    g_bingDeadUntil = CFAbsoluteTimeGetCurrent() + 600.0;  // Bing 令牌失败：冷却 10 分钟
                     done(nil, err ?: [NSError errorWithDomain:CC_DOMAIN code:44
                                                      userInfo:@{NSLocalizedDescriptionKey: @"bing auth failed"}]);
                 }
@@ -394,33 +396,35 @@ void CCTranslate(NSString *text, NSString *fromLang, NSString *toLang,
         BOOL aiReady = CCPrefStr(CC_K_AI_URL, @"").length > 0 &&
                        CCPrefStr(CC_K_AI_KEY, @"").length > 0;
 
-        // 引擎优先级：选中的排第一，其余按可用性降级；Bing 免费接口国内可用，排 Google 前
+        // 引擎优先级：选中的排第一；Google 免费接口当前可用，排在 Bing 前；
+        // Bing 令牌失败后冷却 10 分钟，避免每次翻译都白等一次超时。
+        BOOL bingReady = (CFAbsoluteTimeGetCurrent() >= g_bingDeadUntil);
         NSMutableArray<NSString *> *order = [NSMutableArray array];
         if ([engine isEqualToString:@"deepl"]) {
             if (dk.length) [order addObject:@"deepl"];
             if (aiReady) [order addObject:@"ai"];
-            [order addObject:@"bing"];
             [order addObject:@"google"];
+            if (bingReady) [order addObject:@"bing"];
         } else if ([engine isEqualToString:@"ai"]) {
             if (aiReady) [order addObject:@"ai"];
             if (dk.length) [order addObject:@"deepl"];
-            [order addObject:@"bing"];
             [order addObject:@"google"];
+            if (bingReady) [order addObject:@"bing"];
         } else if ([engine isEqualToString:@"bing"]) {
-            [order addObject:@"bing"];
+            if (bingReady) [order addObject:@"bing"];
             [order addObject:@"google"];
             if (dk.length) [order addObject:@"deepl"];
             if (aiReady) [order addObject:@"ai"];
         } else if ([engine isEqualToString:@"google"]) {
             [order addObject:@"google"];
-            [order addObject:@"bing"];
+            if (bingReady) [order addObject:@"bing"];
             if (dk.length) [order addObject:@"deepl"];
             if (aiReady) [order addObject:@"ai"];
         } else { // auto
             if (dk.length) [order addObject:@"deepl"];
             if (aiReady) [order addObject:@"ai"];
-            [order addObject:@"bing"];
             [order addObject:@"google"];
+            if (bingReady) [order addObject:@"bing"];
         }
 
         CCTranslateTry(order, 0, text, fromLang, toLang, done);

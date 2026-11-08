@@ -98,6 +98,7 @@ static void CCSpeakEnglish(NSString *text) {
     BOOL restartPending;
     BOOL onDevice;
     BOOL ttsPaused;              // 因 TTS 正在外放而暂停识别
+    BOOL endAudioSent;           // 已请求收句，等待 final
     uint64_t frames;
     uint64_t audioBytes;         // 原始音频字节（不依赖识别请求）
     uint64_t lastAudioSeen;
@@ -334,6 +335,7 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
         }
         req = r;
         lastPartialAt = 0;
+        endAudioSent = NO;
         CCLogf(@"%@ recog: task start (auth=%ld avail=%d cloud=%d locale=%@)",
                self.tag, (long)[SFSpeechRecognizer authorizationStatus],
                recog.isAvailable, !CCPrefBool(CC_K_CLOUD_ASR, YES), self.locale);
@@ -539,6 +541,17 @@ static void CheckArm(void) {
             }
         }
 
+        // 说话停顿检测：partial 1.5 秒没变化就主动 endAudio 收句，尽快拿到 final 去翻译
+        for (CCChannel *ch in chans) {
+            if (!ch->capturing || !ch->req || ch->endAudioSent) continue;
+            if (ch->lastPartialText.length >= 4 &&
+                now - ch->lastPartialAt > 1.5) {
+                ch->endAudioSent = YES;
+                CCLogf(@"%@: stable partial, requesting final", ch.tag);
+                [ch->req endAudio];
+            }
+        }
+
         // 帧停滞看门狗：换通话/音频会话重建后 Tap 可能不再送音频，自动重挂
         for (CCChannel *ch in chans) {
             if (!ch->capturing) continue;
@@ -604,7 +617,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.13.2)");
+        CCLogLine(@"audioservice started (v0.13.3)");
 
         g_stateQ = dispatch_queue_create("net.user.callcaption.audio", DISPATCH_QUEUE_SERIAL);
 

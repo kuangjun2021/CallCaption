@@ -156,9 +156,11 @@ static void EnsurePanelUI(void) {
         bg.card = blur;
 
         UIView *ov = [[UIView alloc] initWithFrame:blur.bounds];
-        ov.backgroundColor = [UIColor colorWithWhite:0 alpha:0.28];
+        ov.backgroundColor = [UIColor colorWithWhite:0 alpha:0.20];
         ov.userInteractionEnabled = NO;
         [blur.contentView addSubview:ov];
+        blur.layer.borderWidth = 0.8;
+        blur.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.18].CGColor;
 
         UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(0, 10, w, 18)];
         title.text = @"CallCaption";
@@ -267,10 +269,12 @@ static UIWindow *MakeBox(NSString *titleText, UIColor *titleColor) {
     [win addSubview:blur];
 
     UIView *ov = [[UIView alloc] initWithFrame:blur.bounds];
-    ov.backgroundColor = [UIColor colorWithWhite:0 alpha:0.30];
+    ov.backgroundColor = [UIColor colorWithWhite:0 alpha:0.16];
     ov.userInteractionEnabled = NO;
     ov.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [blur.contentView addSubview:ov];
+    blur.layer.borderWidth = 0.8;
+    blur.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.20].CGColor;
 
     UILabel *t = [[UILabel alloc] initWithFrame:CGRectZero];
     t.tag = 1001;
@@ -494,7 +498,14 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
         EnsureMiniUI();
         g_miniWin.center = g_panelCard.center;
         g_miniWin.hidden = NO;
-        g_panelWin.hidden = YES;
+        g_miniWin.alpha = 0.0;
+        [UIView animateWithDuration:0.18 animations:^{
+            g_miniWin.alpha = 1.0;
+            g_panelWin.alpha = 0.0;
+        } completion:^(BOOL finished) {
+            g_panelWin.hidden = YES;
+            g_panelWin.alpha = 1.0;
+        }];
         g_panelExpanded = NO;
     });
 }

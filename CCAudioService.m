@@ -86,11 +86,10 @@ static void CCSpeakEnglish(NSString *text) {
     });
 }
 
-static void CCWriteUplinkWav(NSData *pcm) {
-    if (!pcm.length || !g_waDocsDir) return;
-    NSString *path = [g_waDocsDir stringByAppendingPathComponent:@"cc_tts.wav"];
+static BOOL CCWriteWav48kAtPath(NSString *path, NSData *pcm) {
+    if (!path.length || !pcm.length) return NO;
     FILE *fp = fopen(path.fileSystemRepresentation, "wb");
-    if (!fp) { CCLogf(@"uplink tts open failed"); return; }
+    if (!fp) return NO;
     uint32_t riff = 36 + (uint32_t)pcm.length;
     uint32_t dsz = (uint32_t)pcm.length;
     uint32_t rate = 48000, byteRate = 96000;
@@ -105,6 +104,16 @@ static void CCWriteUplinkWav(NSData *pcm) {
     fwrite(pcm.bytes, 1, pcm.length, fp);
     fclose(fp);
     chmod(path.fileSystemRepresentation, 0666);
+    return YES;
+}
+
+static void CCWriteUplinkWav(NSData *pcm) {
+    if (!pcm.length || !g_waDocsDir) return;
+    NSString *path = [g_waDocsDir stringByAppendingPathComponent:@"cc_tts.wav"];
+    if (!CCWriteWav48kAtPath(path, pcm)) {
+        CCLogf(@"uplink tts open failed");
+        return;
+    }
     CCLogf(@"uplink tts written %lu bytes", (unsigned long)pcm.length);
 }
 
@@ -1164,7 +1173,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.14.0-alpha16)");
+        CCLogLine(@"audioservice started (v0.14.0-alpha17)");
         // LCT 的 livecallhelper 在识别前会配置 AVAudioSession（SoloAmbient/Default）；
         // 我们的守护进程以前没做这一步，补上。
         @try {
@@ -1187,6 +1196,32 @@ int main(int argc, char *argv[]) {
         }
 
         g_stateQ = dispatch_queue_create("net.user.callcaption.audio", DISPATCH_QUEUE_SERIAL);
+
+        // 自检素材：把最近一通 WhatsApp 通话里“有声音的那段”复制到
+        // /var/mobile/Library/CallCaption/selftest.wav，供 SpringBoard 里的
+        // SFSpeech 自检使用（不需要用户再打电话）。
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6 * NSEC_PER_SEC)),
+                       g_stateQ, ^{
+            @try {
+                NSString *dst = [CC_DIR stringByAppendingPathComponent:@"selftest.wav"];
+                if ([[NSFileManager defaultManager] fileExistsAtPath:dst]) return;
+                double mt = 0;
+                NSString *src = CCFindRemoteWav(nil, &mt);
+                if (!src) { CCLogf(@"selftest: no source wav"); return; }
+                NSData *d = [NSData dataWithContentsOfFile:src];
+                if (d.length < 44 + 48000 * 2) {
+                    CCLogf(@"selftest: source too small %lu", (unsigned long)d.length);
+                    return;
+                }
+                NSUInteger n = MIN(d.length - 44, (NSUInteger)48000 * 2 * 10);
+                NSData *pcm = [d subdataWithRange:NSMakeRange(44, n)];
+                if (CCWriteWav48kAtPath(dst, pcm))
+                    CCLogf(@"selftest: wrote %lu bytes from %@",
+                           (unsigned long)n, [src lastPathComponent]);
+            } @catch (NSException *e) {
+                CCLogf(@"selftest copy exc %@", e.reason);
+            }
+        });
 
         g_remote = [[CCChannel alloc] init];
         g_remote.tapPID = CC_TAP_PID_SPEAKER;

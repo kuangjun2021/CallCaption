@@ -8,6 +8,7 @@
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <CallKit/CallKit.h>
+#import <Speech/Speech.h>
 #import <objc/runtime.h>
 
 #pragma mark - 私有窗口类
@@ -1087,6 +1088,55 @@ static void EnsureUI(void) {
     }
 }
 
+// ---------- 一次性自检：SpringBoard 这个 App 进程能不能跑 SFSpeech ----------
+// 守护进程里 SFSpeech 一直 1110；如果 SpringBoard 里能识别同一个 WAV，
+// 就把识别搬进 SpringBoard，避开 daemon 环境限制。
+static void CCRunSpeechSelfTest(BOOL onDevice) {
+    static int attempts;
+    NSString *p = @"/var/mobile/Library/CallCaption/selftest.wav";
+    if (![[NSFileManager defaultManager] fileExistsAtPath:p]) {
+        attempts++;
+        CCLogf(@"selftest: no selftest.wav (attempt %d)", attempts);
+        if (attempts < 8) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ CCRunSpeechSelfTest(YES); });
+        }
+        return;
+    }
+    SFSpeechRecognizer *r = [[SFSpeechRecognizer alloc] initWithLocale:
+                             [NSLocale localeWithLocaleIdentifier:@"en-US"]];
+    CCLogf(@"selftest: enter onDevice=%d auth=%ld avail=%d supportOD=%d",
+           onDevice, (long)[SFSpeechRecognizer authorizationStatus],
+           r.isAvailable, r.supportsOnDeviceRecognition);
+    SFSpeechURLRecognitionRequest *req =
+        [[SFSpeechURLRecognitionRequest alloc] initWithURL:[NSURL fileURLWithPath:p]];
+    req.shouldReportPartialResults = YES;
+    if (@available(iOS 13.0, *)) {
+        req.taskHint = SFSpeechRecognitionTaskHintDictation;
+        req.requiresOnDeviceRecognition = onDevice;
+    }
+    __block BOOL got = NO;
+    [r recognitionTaskWithRequest:req
+        resultHandler:^(SFSpeechRecognitionResult *res, NSError *err) {
+            if (res) {
+                got = YES;
+                CCLogf(@"selftest: %@ (final=%d)",
+                       res.bestTranscription.formattedString, res.isFinal);
+            }
+            if (err) {
+                CCLogf(@"selftest: err %ld %@ code=%ld",
+                       (long)err.code, err.localizedDescription,
+                       (long)err.code);
+                if (!got && onDevice) {
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)),
+                                   dispatch_get_main_queue(), ^{
+                        CCRunSpeechSelfTest(NO);
+                    });
+                }
+            }
+        }];
+}
+
 void CCUIBoot(void) {
     @try {
         if (!CCIsSpringBoard() || g_uiReady) return;
@@ -1120,7 +1170,11 @@ void CCUIBoot(void) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.14.0-alpha16)");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            CCRunSpeechSelfTest(YES);
+        });
+        CCLogLine(@"CallCaption UI booted (single window v0.14.0-alpha17)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

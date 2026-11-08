@@ -116,6 +116,12 @@ static void RefreshBoxes(void);
 @property (nonatomic, weak) UIView *card;
 @end
 @implementation CCPanelBGView
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    UITouch *t = [touches anyObject];
+    CGPoint p = [t locationInView:self];
+    CCLogf(@"panel: bg began %.0f,%.0f", p.x, p.y);
+    [super touchesBegan:touches withEvent:event];
+}
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     UITouch *t = [touches anyObject];
     CGPoint p = [t locationInView:self];
@@ -134,7 +140,7 @@ static void EnsurePanelUI(void) {
         CGFloat w = CardWidth();
         CGFloat h = 150;
         UIWindow *win = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-        win.windowLevel = UIWindowLevelAlert + 10;
+        win.windowLevel = UIWindowLevelAlert + 1000;
         win.backgroundColor = [UIColor clearColor];
 
         CCPanelBGView *bg = [[CCPanelBGView alloc] initWithFrame:win.bounds];
@@ -156,6 +162,17 @@ static void EnsurePanelUI(void) {
         [blur.contentView addSubview:ov];
         blur.layer.borderWidth = 0.8;
         blur.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.18].CGColor;
+
+        UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+        closeBtn.frame = CGRectMake(w - 42, 8, 30, 30);
+        UIImage *closeImg = [UIImage systemImageNamed:@"xmark"
+                               withConfiguration:[UIImageSymbolConfiguration
+                                   configurationWithPointSize:13 weight:UIFontWeightSemibold]];
+        [closeBtn setImage:closeImg forState:UIControlStateNormal];
+        closeBtn.tintColor = [UIColor colorWithWhite:1 alpha:0.65];
+        [closeBtn addTarget:[CCUIHelper class] action:@selector(collapsePanel)
+           forControlEvents:UIControlEventTouchUpInside];
+        [blur.contentView addSubview:closeBtn];
 
         UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(0, 10, w, 18)];
         title.text = @"CallCaption";
@@ -216,7 +233,7 @@ static void EnsureMiniUI(void) {
         CGFloat s = 64.0;
         UIWindow *win = [[UIWindow alloc] initWithFrame:
             CGRectMake(ScreenW() - s - 16, ScreenH() * 0.52, s, s)];
-        win.windowLevel = UIWindowLevelAlert + 11;
+        win.windowLevel = UIWindowLevelAlert + 1001;
         win.backgroundColor = [UIColor clearColor];
 
         UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -358,6 +375,7 @@ static void LayoutLCTBox(UIWindow *win, NSString *recog, NSString *trans,
         any = YES;
         h.hidden = NO; r.hidden = NO;
         h.frame = CGRectMake(0, y, w, 16); y += 20.0;
+        r.text = recog;
         r.font = [UIFont systemFontOfSize:15];
         CGFloat hh = TextHeight(recog, r.font, cw);
         r.frame = CGRectMake(pad, y, cw, hh); y += hh + 12.0;
@@ -369,6 +387,7 @@ static void LayoutLCTBox(UIWindow *win, NSString *recog, NSString *trans,
         any = YES;
         sh.hidden = NO; t.hidden = NO; c.hidden = NO;
         sh.frame = CGRectMake(0, y, w, 16); y += 20.0;
+        t.text = trans;
         t.font = [UIFont systemFontOfSize:18 weight:UIFontWeightSemibold];
         CGFloat hh = TextHeight(trans, t.font, cw);
         t.frame = CGRectMake(pad, y, cw, hh); y += hh + 14.0;
@@ -539,7 +558,7 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
 + (void)expandPanel {
     dispatch_async(dispatch_get_main_queue(), ^{
         CCLogf(@"panel: expand");
-        if (g_miniWin) g_miniWin.hidden = YES;
+        if (g_miniWin) { g_miniWin.hidden = YES; g_miniWin.alpha = 1.0; }
         EnsurePanelUI();
         g_panelWin.hidden = NO;
         g_panelExpanded = YES;

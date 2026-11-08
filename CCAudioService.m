@@ -110,6 +110,7 @@ static void CCSpeakEnglish(NSString *text) {
     CFAbsoluteTime lastAuthLog;
     NSString *lastText;
     NSString *lastPartialText;
+    NSString *lastProvisional;
     CFAbsoluteTime lastTextAt;
 }
 @property (nonatomic, assign) int tapPID;
@@ -337,6 +338,7 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
         req = r;
         lastPartialAt = 0;
         endAudioSent = NO;
+        lastProvisional = nil;
         CCLogf(@"%@ recog: task start (auth=%ld avail=%d cloud=%d locale=%@)",
                self.tag, (long)[SFSpeechRecognizer authorizationStatus],
                recog.isAvailable, !CCPrefBool(CC_K_CLOUD_ASR, YES), self.locale);
@@ -431,6 +433,8 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
 
 - (void)translateProvisional:(NSString *)text {
     if (text.length < 4) return;
+    if (lastProvisional && [lastProvisional isEqualToString:text]) return;
+    lastProvisional = text;
     __weak CCChannel *weakSelf = self;
     CCTranslate(text, self.srcLang, self.dstLang, ^(NSString *out) {
         CCChannel *ch = weakSelf;
@@ -631,7 +635,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.13.5)");
+        CCLogLine(@"audioservice started (v0.13.6)");
 
         g_stateQ = dispatch_queue_create("net.user.callcaption.audio", DISPATCH_QUEUE_SERIAL);
 

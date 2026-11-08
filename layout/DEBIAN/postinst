@@ -7,6 +7,9 @@ chmod 0755 "$JB/usr/local/bin/CallCaptionAudioService" 2>/dev/null || true
 chown 0:0 "$JB/Library/LaunchDaemons/net.user.callcaption.audioservice.plist" 2>/dev/null || true
 chmod 0644 "$JB/Library/LaunchDaemons/net.user.callcaption.audioservice.plist" 2>/dev/null || true
 
+# 清掉旧版本遗留在错误路径的 Prefs bundle（Preferences 可能优先加载旧副本 → 一直闪退）
+rm -rf "$JB/CallCaptionPrefs.bundle" 2>/dev/null || true
+
 # 升级时让新二进制立即生效（launchd KeepAlive 会自动拉起新版）
 killall -9 CallCaptionAudioService 2>/dev/null || true
 

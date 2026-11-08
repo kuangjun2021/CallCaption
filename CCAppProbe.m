@@ -353,9 +353,74 @@ static OSStatus CCHookedSetProp(AudioUnit unit, AudioUnitPropertyID prop,
     }
 }
 
-// ---------- AudioUnitRender 直钩（只计数，兜底） ----------
+// ---------- AudioUnitRender 直钩 + 上行 TTS 混音 ----------
 static _Atomic(uint64_t) g_renderCalls;
 static _Atomic(uint32_t) g_renderRmsBits;
+static _Atomic(uint64_t) g_mixCalls;
+
+// LCT 的上行注入：把英文 TTS 的 PCM 混进麦克风上行 buffer。
+// 守护进程把 TTS 写成 48k mono s16 的 Documents/cc_tts.wav，这里读到环形缓冲，
+// 在 AudioUnitRender 返回后混进 ioData（仅当 buffer 是 float32 单声道时，避免弄坏通话）。
+static float *g_ttsRing;
+static uint32_t g_ttsCap;
+static _Atomic(uint32_t) g_ttsHead, g_ttsTail;
+static NSTimeInterval g_ttsMtime;
+
+static void CCLoadTTSIfNeeded(void) {
+    @try {
+        NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                              NSUserDomainMask, YES) firstObject];
+        if (!docs.length) return;
+        NSString *p = [docs stringByAppendingPathComponent:@"cc_tts.wav"];
+        NSDictionary *at = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:nil];
+        if (!at) return;
+        NSTimeInterval mt = [at[NSFileModificationDate] timeIntervalSince1970];
+        if (mt <= g_ttsMtime) return;
+        g_ttsMtime = mt;
+        NSData *d = [NSData dataWithContentsOfFile:p];
+        if (d.length <= 44) return;
+        if (!g_ttsRing) {
+            g_ttsCap = 48000 * 30;
+            g_ttsRing = calloc(g_ttsCap, sizeof(float));
+        }
+        if (!g_ttsRing) return;
+        const int16_t *s = (const int16_t *)((const uint8_t *)d.bytes + 44);
+        NSUInteger n = (d.length - 44) / 2;
+        uint32_t head = atomic_load(&g_ttsHead);
+        uint32_t tail = atomic_load(&g_ttsTail);
+        uint32_t space = g_ttsCap - (head - tail);
+        if (n > space) n = space;
+        for (NSUInteger i = 0; i < n; i++) {
+            g_ttsRing[head % g_ttsCap] = (float)s[i] / 32768.0f;
+            head++;
+        }
+        atomic_store(&g_ttsHead, head);
+        CCAppLog(@"tts loaded %lu samples", (unsigned long)n);
+    } @catch (NSException *e) { }
+}
+
+static void CCMaybeMixUplink(AudioBufferList *ioData, UInt32 frames) {
+    if (!g_ttsRing || !ioData || !frames) return;
+    AudioBuffer *b = &ioData->mBuffers[0];
+    if (!b->mData || b->mDataByteSize < 4) return;
+    UInt32 bpf = b->mDataByteSize / frames;
+    if (bpf != 4) return;                 // 只处理 float32 单声道
+    uint32_t head = atomic_load(&g_ttsHead);
+    uint32_t tail = atomic_load(&g_ttsTail);
+    UInt32 avail = head - tail;
+    if (!avail) return;
+    float *f = (float *)b->mData;
+    UInt32 n = b->mDataByteSize / 4;
+    if (n > frames) n = frames;
+    UInt32 m = MIN(n, avail);
+    for (UInt32 i = 0; i < m; i++) {
+        float t = g_ttsRing[tail % g_ttsCap];
+        f[i] = f[i] * 0.35f + t * 0.95f;   // 压低原声，混入英文 TTS
+        tail++;
+    }
+    atomic_store(&g_ttsTail, tail);
+    atomic_fetch_add(&g_mixCalls, 1);
+}
 
 static OSStatus CCHookedRender(AudioUnit unit, AudioUnitRenderActionFlags *flags,
                                const AudioTimeStamp *ts, UInt32 bus,
@@ -373,6 +438,7 @@ static OSStatus CCHookedRender(AudioUnit unit, AudioUnitRenderActionFlags *flags
             if (!isfinite(rms)) rms = 0;
             atomic_store(&g_renderRmsBits, CCFloatBits(rms));
         }
+        CCMaybeMixUplink(ioData, frames);
         atomic_fetch_add(&g_renderCalls, 1);
     }
     return st;
@@ -380,6 +446,7 @@ static OSStatus CCHookedRender(AudioUnit unit, AudioUnitRenderActionFlags *flags
 
 // ---------- 后台汇报 ----------
 static void CCReport(void) {
+    CCLoadTTSIfNeeded();
     int cbCount = atomic_load(&g_cbCount);
     for (int i = 0; i < cbCount; i++) {
         CCCB *c = g_cbs[i];
@@ -399,10 +466,11 @@ static void CCReport(void) {
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (now - lastBeat >= 5.0) {
         lastBeat = now;
-        CCAppLog(@"alive %@ ctx%d rt%llu rtrms%.4f setprop%p msh%p",
+        CCAppLog(@"alive %@ ctx%d rt%llu rtrms%.4f mix%llu setprop%p msh%p",
                  CCProcName(), cbCount,
                  (unsigned long long)atomic_load(&g_renderCalls),
                  CCBitsFloat(atomic_load(&g_renderRmsBits)),
+                 (unsigned long long)atomic_load(&g_mixCalls),
                  (void *)g_origSetProp, (void *)g_MSHook);
     }
 }

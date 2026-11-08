@@ -8,6 +8,7 @@
 #import <AudioToolbox/AudioToolbox.h>
 #import <Speech/Speech.h>
 #import <objc/runtime.h>
+#import <sys/stat.h>
 
 // ---------- 私有 AudioToolbox Tap API（iOS 16+） ----------
 @interface ATAudioTapDescription : NSObject
@@ -64,6 +65,8 @@ static void CCASendState(NSString *s) {
     CCTransportSendLine([@"S|" stringByAppendingString:s]);
 }
 
+static NSString *g_waDocsDir;   // WhatsApp 的 Documents（App 探针 WAV / 上行 TTS 都在这里）
+
 // 英文 TTS（我方通道）：同时设置静音窗口，避免喇叭外放的英文被两路 Tap 又听回去
 static void CCSpeakEnglish(NSString *text) {
     if (text.length == 0) return;
@@ -81,6 +84,110 @@ static void CCSpeakEnglish(NSString *text) {
             CCLogf(@"local tts en: %@", text);
         } @catch (NSException *e) { CCLogf(@"local tts exc: %@", e.reason); }
     });
+}
+
+static void CCWriteUplinkWav(NSData *pcm) {
+    if (!pcm.length || !g_waDocsDir) return;
+    NSString *path = [g_waDocsDir stringByAppendingPathComponent:@"cc_tts.wav"];
+    FILE *fp = fopen(path.fileSystemRepresentation, "wb");
+    if (!fp) { CCLogf(@"uplink tts open failed"); return; }
+    uint32_t riff = 36 + (uint32_t)pcm.length;
+    uint32_t dsz = (uint32_t)pcm.length;
+    uint32_t rate = 48000, byteRate = 96000;
+    uint16_t fmt = 1, ch = 1, align = 2, bits = 16;
+    uint32_t sz16 = 16;
+    fwrite("RIFF", 1, 4, fp); fwrite(&riff, 4, 1, fp);
+    fwrite("WAVEfmt ", 1, 8, fp); fwrite(&sz16, 4, 1, fp);
+    fwrite(&fmt, 2, 1, fp); fwrite(&ch, 2, 1, fp);
+    fwrite(&rate, 4, 1, fp); fwrite(&byteRate, 4, 1, fp);
+    fwrite(&align, 2, 1, fp); fwrite(&bits, 2, 1, fp);
+    fwrite("data", 1, 4, fp); fwrite(&dsz, 4, 1, fp);
+    fwrite(pcm.bytes, 1, pcm.length, fp);
+    fclose(fp);
+    chmod(path.fileSystemRepresentation, 0666);
+    CCLogf(@"uplink tts written %lu bytes", (unsigned long)pcm.length);
+}
+
+static NSString *CCFindWhatsAppDocs(void) {
+    if (g_waDocsDir) return g_waDocsDir;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *base = @"/var/mobile/Containers/Data/Application";
+    for (NSString *a in [fm contentsOfDirectoryAtPath:base error:nil]) {
+        NSString *dir = [base stringByAppendingPathComponent:a];
+        NSString *meta = [dir stringByAppendingPathComponent:
+                          @".com.apple.mobile_container_manager.metadata.plist"];
+        NSDictionary *md = [NSDictionary dictionaryWithContentsOfFile:meta];
+        if ([md[@"MCMMetadataIdentifier"] isEqualToString:@"net.whatsapp.WhatsApp"]) {
+            NSString *docs = [dir stringByAppendingPathComponent:@"Documents"];
+            if ([fm fileExistsAtPath:docs]) { g_waDocsDir = docs; return docs; }
+        }
+    }
+    return nil;
+}
+
+// LCT 的上行注入：用 writeUtterance:toBufferCallback: 把英文 TTS 合成成 PCM，
+// 转成 48k mono s16 写到 WhatsApp Documents/cc_tts.wav，
+// App 探针会把它混进麦克风上行 buffer（对方能听到英文）。
+static BOOL CCGenerateUplinkTTS(NSString *text) {
+    if (text.length == 0) return NO;
+    NSString *docs = CCFindWhatsAppDocs();
+    if (!docs) return NO;                 // 没有 App 探针文件目录，退回外放
+    AVSpeechSynthesizer *synth = [[AVSpeechSynthesizer alloc] init];
+    AVSpeechUtterance *u = [[AVSpeechUtterance alloc] initWithString:text];
+    NSString *vid = CCPrefStr(CC_K_LOCAL_VOICE, @"");
+    AVSpeechSynthesisVoice *v = vid.length ? [AVSpeechSynthesisVoice voiceWithIdentifier:vid] : nil;
+    u.voice = v ?: [AVSpeechSynthesisVoice voiceWithLanguage:@"en-US"];
+    NSMutableData *out = [NSMutableData data];
+    __block double phase = 0.0;
+    __block BOOL finished = NO;
+    __block AVSpeechSynthesizer *keep = synth;
+    [synth writeUtterance:u toBufferCallback:^(AVAudioBuffer *buffer) {
+        @autoreleasepool {
+            if (![buffer isKindOfClass:[AVAudioPCMBuffer class]]) return;
+            AVAudioPCMBuffer *b = (AVAudioPCMBuffer *)buffer;
+            AVAudioFrameCount n = b.frameLength;
+            if (n == 0) {
+                if (!finished) {
+                    finished = YES;
+                    CCWriteUplinkWav(out);
+                    keep = nil;
+                }
+                return;
+            }
+            float *src = b.floatChannelData ? b.floatChannelData[0] : NULL;
+            if (!src) return;
+            double sr = b.format.sampleRate > 0 ? b.format.sampleRate : 22050.0;
+            double step = sr / 48000.0;
+            double pos = phase;
+            int16_t buf[2048];
+            UInt32 cnt = 0;
+            while (pos < (double)n) {
+                int i = (int)pos;
+                float a = src[i];
+                float c = src[i + 1 < n ? i + 1 : i];
+                float fr = (float)(pos - (double)i);
+                float val = a + (c - a) * fr;
+                int iv = (int)lrintf(val * 32767.0f);
+                if (iv > 32767) iv = 32767;
+                if (iv < -32768) iv = -32768;
+                buf[cnt++] = (int16_t)iv;
+                if (cnt == 2048) { [out appendBytes:buf length:cnt * 2]; cnt = 0; }
+                pos += step;
+            }
+            if (cnt) [out appendBytes:buf length:cnt * 2];
+            phase = pos - (double)n;
+        }
+    }];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        if (!finished) {
+            finished = YES;
+            CCWriteUplinkWav(out);
+            keep = nil;
+        }
+    });
+    CCLogf(@"uplink tts start: %@", text);
+    return YES;
 }
 
 // ---------- 通道 ----------
@@ -205,7 +312,8 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
                         ch->lastRMS = rms;
                         if (rms > 0.008f)
                             ch->lastLoudAt = CFAbsoluteTimeGetCurrent();
-                        [r appendAudioPCMBuffer:pcm];
+                        if (rms > 0.0015f)
+                            [r appendAudioPCMBuffer:pcm];
                         __atomic_add_fetch(&ch->frames, nf, __ATOMIC_RELAXED);
                     }
                 }
@@ -397,7 +505,6 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
 // 读取 WhatsApp 探针写出的 cc_remote_*.wav（48k mono s16）。
 // 通话时会有多个单元各写一个文件，只有真正有声音的那个是对方语音，
 // 所以按“文件尾部 1 秒的能量”挑，而不是按修改时间。
-static NSString *g_waDocsDir;
 
 static double CCFileTailEnergy(NSString *path, double *mtimeOut) {
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -863,7 +970,7 @@ static void CCWriteChunkWav(NSString *path, NSData *pcm) {
         NSString *rp = ch.expectCJK ? @"LR|" : @"R|";
         if (engine.length) CCTransportSendLine([ep stringByAppendingString:engine]);
         CCTransportSendLine([rp stringByAppendingString:out]);
-        if (ch.expectCJK) CCSpeakEnglish(out);   // 我方译文：英文外放给对方
+        if (ch.expectCJK) { if (!CCGenerateUplinkTTS(out)) CCSpeakEnglish(out); }
     });
 }
 
@@ -1057,7 +1164,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.14.0-alpha14)");
+        CCLogLine(@"audioservice started (v0.14.0-alpha15)");
         // LCT 的 livecallhelper 在识别前会配置 AVAudioSession（SoloAmbient/Default）；
         // 我们的守护进程以前没做这一步，补上。
         @try {

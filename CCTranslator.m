@@ -287,6 +287,59 @@ static void TranslateGoogleFree(NSString *text, NSString *from, NSString *to,
     [task resume];
 }
 
+// ---------- MyMemory（LCT 默认免费服务，无需 Key） ----------
+static NSString *CCUnescapeHTML(NSString *s);
+static NSString *MyMemoryLang(NSString *code) {
+    NSString *c = [code lowercaseString];
+    if ([c hasPrefix:@"zh"]) return @"zh-CN";
+    if ([c isEqualToString:@"en"] || [c hasPrefix:@"en-"]) return @"en";
+    if (c.length == 0 || [c isEqualToString:@"auto"]) return @"en";
+    return c;
+}
+
+static void TranslateMyMemory(NSString *text, NSString *from, NSString *to,
+                              void (^done)(NSString *, NSError *)) {
+    NSString *fl = MyMemoryLang(from);
+    NSString *tl = MyMemoryLang(to);
+    NSString *urlStr = [NSString stringWithFormat:
+        @"https://api.mymemory.translated.net/get?q=%@&langpair=%@%%7C%@",
+        CCEscape(text), CCEscape(fl), CCEscape(tl)];
+    NSURL *url = [NSURL URLWithString:urlStr];
+    if (!url) {
+        done(nil, [NSError errorWithDomain:CC_DOMAIN code:51
+                                   userInfo:@{NSLocalizedDescriptionKey: @"bad mymemory url"}]);
+        return;
+    }
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+    req.timeoutInterval = 4.0;
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req
+        completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+            @try {
+                if (err || !data) {
+                    done(nil, err ?: [NSError errorWithDomain:CC_DOMAIN code:52 userInfo:nil]);
+                    return;
+                }
+                id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                NSString *out = nil;
+                NSString *detail = nil;
+                if ([json isKindOfClass:[NSDictionary class]]) {
+                    id rd = json[@"responseData"];
+                    if ([rd isKindOfClass:[NSDictionary class]]) out = rd[@"translatedText"];
+                    if ([json[@"responseDetails"] isKindOfClass:[NSString class]])
+                        detail = json[@"responseDetails"];
+                }
+                if ([out isKindOfClass:[NSString class]] &&
+                    out.length && ![out containsString:@"MYMEMORY WARNING"]) {
+                    done(CCUnescapeHTML(out), nil);
+                } else {
+                    done(nil, [NSError errorWithDomain:CC_DOMAIN code:53
+                        userInfo:@{NSLocalizedDescriptionKey:
+                        detail.length ? detail : @"bad mymemory response"}]);
+                }
+            } @catch (NSException *e) { done(nil, nil); }
+        }] resume];
+}
+
 // ---------- Google Cloud Translation API（填了 Key 时优先） ----------
 static NSString *CCUnescapeHTML(NSString *s) {
     NSMutableString *m = [s mutableCopy];
@@ -479,7 +532,8 @@ static void CCTranslateTry(NSArray<NSString *> *order, NSUInteger idx,
     };
     if ([eng isEqualToString:@"deepl"]) TranslateDeepL(text, fromLang, toLang, cb);
     else if ([eng isEqualToString:@"ai"]) TranslateAI(text, fromLang, toLang, cb);
-    else if ([eng isEqualToString:@"bing"]) TranslateBing(text, fromLang, toLang, cb);
+    else if ([eng isEqualToString:@"mymemory"]) TranslateMyMemory(text, fromLang, toLang, cb);
+    else if ([eng isEqualToString:@"bing"]) TranslateMyMemory(text, fromLang, toLang, cb);
     else TranslateGoogle(text, fromLang, toLang, cb);
 }
 
@@ -498,47 +552,47 @@ void CCTranslateEx(NSString *text, NSString *fromLang, NSString *toLang,
         }
 
         NSString *engine = CCPrefStr(CC_K_ENGINE, @"auto").lowercaseString;
+        // 兼容旧设置：Bing 免费端点已下线，统一走 MyMemory。
+        if ([engine isEqualToString:@"bing"]) engine = @"mymemory";
         NSString *dk = DeepLKey();
         BOOL aiReady = CCPrefStr(CC_K_AI_URL, @"https://api.deepseek.com/v1/chat/completions").length > 0 &&
                        CCPrefStr(CC_K_AI_KEY, @"").length > 0;
 
-        // 引擎优先级：选中的排第一；Google 免费接口当前可用，排在 Bing 前；
-        // Bing 令牌失败后冷却 10 分钟，避免每次翻译都白等一次超时。
-        BOOL bingReady = (CFAbsoluteTimeGetCurrent() >= g_bingDeadUntil);
+        // 引擎优先级：选中的排第一；免费兜底用 Google / MyMemory。
         NSMutableArray<NSString *> *order = [NSMutableArray array];
         if ([engine isEqualToString:@"deepl"]) {
             if (dk.length) [order addObject:@"deepl"];
             if (aiReady) [order addObject:@"ai"];
             [order addObject:@"google"];
-            if (bingReady) [order addObject:@"bing"];
+            [order addObject:@"mymemory"];
         } else if ([engine isEqualToString:@"ai"]) {
             if (aiReady) [order addObject:@"ai"];
             if (dk.length) [order addObject:@"deepl"];
             [order addObject:@"google"];
-            if (bingReady) [order addObject:@"bing"];
-        } else if ([engine isEqualToString:@"bing"]) {
-            [order addObject:@"bing"];   // 用户明确选择：永远排第一
+            [order addObject:@"mymemory"];
+        } else if ([engine isEqualToString:@"mymemory"]) {
+            [order addObject:@"mymemory"];
             [order addObject:@"google"];
             if (dk.length) [order addObject:@"deepl"];
             if (aiReady) [order addObject:@"ai"];
         } else if ([engine isEqualToString:@"google"]) {
             [order addObject:@"google"];
-            if (bingReady) [order addObject:@"bing"];
+            [order addObject:@"mymemory"];
             if (dk.length) [order addObject:@"deepl"];
             if (aiReady) [order addObject:@"ai"];
         } else { // auto
             if (dk.length) [order addObject:@"deepl"];
             if (aiReady) [order addObject:@"ai"];
             [order addObject:@"google"];
-            if (bingReady) [order addObject:@"bing"];
+            [order addObject:@"mymemory"];
         }
 
         NSString *orderStr = [order componentsJoinedByString:@","];
         static NSString *g_lastOrder = nil;
         if (![g_lastOrder isEqualToString:orderStr]) {
             g_lastOrder = orderStr;
-            CCLogf(@"translate order=%@ (engine=%@ deeplKey=%d aiReady=%d bingReady=%d)",
-                   orderStr, engine, dk.length > 0, aiReady, bingReady);
+            CCLogf(@"translate order=%@ (engine=%@ deeplKey=%d aiReady=%d)",
+                   orderStr, engine, dk.length > 0, aiReady);
         }
         if ([engine isEqualToString:@"deepl"] && !dk.length)
             CCLogf(@"deepl selected but key missing (own + LiveCallTranslator), fallback");

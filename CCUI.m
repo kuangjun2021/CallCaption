@@ -122,7 +122,7 @@ static NSString *CCEngineName(NSString *eng) {
     }
     if ([e isEqualToString:@"deepl"]) return @"DeepL";
     if ([e isEqualToString:@"google"]) return @"Google";
-    if ([e isEqualToString:@"bing"]) return @"Bing";
+    if ([e isEqualToString:@"mymemory"] || [e isEqualToString:@"bing"]) return @"MyMemory";
     if ([e isEqualToString:@"ai"]) return @"AI";
     if ([e isEqualToString:@"cache"]) return @"缓存";
     return @"翻译服务";
@@ -557,14 +557,14 @@ static void LayoutBox(UIView *box, NSString *recog, NSString *trans, NSString *e
 
 static void ResetRemoteTimer(void) {
     [g_remoteHide invalidate];
-    g_remoteHide = [NSTimer timerWithTimeInterval:30.0 target:[CCUIHelper class]
+    g_remoteHide = [NSTimer timerWithTimeInterval:15.0 target:[CCUIHelper class]
                                           selector:@selector(hideCaption)
                                           userInfo:nil repeats:NO];
     [[NSRunLoop mainRunLoop] addTimer:g_remoteHide forMode:NSRunLoopCommonModes];
 }
 static void ResetLocalTimer(void) {
     [g_localHide invalidate];
-    g_localHide = [NSTimer timerWithTimeInterval:30.0 target:[CCUIHelper class]
+    g_localHide = [NSTimer timerWithTimeInterval:15.0 target:[CCUIHelper class]
                                          selector:@selector(hideCaption)
                                          userInfo:nil repeats:NO];
     [[NSRunLoop mainRunLoop] addTimer:g_localHide forMode:NSRunLoopCommonModes];
@@ -1074,7 +1074,7 @@ void CCUIBoot(void) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.13.17)");
+        CCLogLine(@"CallCaption UI booted (single window v0.13.18)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

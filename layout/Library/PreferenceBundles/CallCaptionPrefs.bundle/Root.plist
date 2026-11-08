@@ -184,7 +184,7 @@
 		<key>label</key>
 		<string>翻译引擎</string>
 		<key>footerText</key>
-		<string>自动 = 已填 Key 优先，失败自动切换。Bing 免费接口国内可用；Google 不填 Key 用免费接口。DeepL Key 留空时，会尝试复用 LiveCallTranslator 已保存的 DEEPL_API_KEY。点“测试翻译接口 / Key”会真实请求各接口并显示 HTTP 状态与返回原因。</string>
+		<string>自动 = 已填 Key 优先，失败自动切换。Bing 免费端点已下线，已改用 MyMemory（LCT 同款免费服务）；Google 不填 Key 用免费接口。DeepL Key 留空时，会尝试复用 LiveCallTranslator 已保存的 DEEPL_API_KEY。点“测试翻译接口 / Key”会真实请求各接口并显示 HTTP 状态与返回原因。</string>
 	</dict>
 	<dict>
 		<key>cell</key>

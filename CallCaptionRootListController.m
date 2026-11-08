@@ -203,10 +203,11 @@ static void CCMigrateCFPrefsToFile(void) {
 // ---------- 引擎 ----------
 
 - (void)chooseEngine {
-    NSArray *vals = @[@"auto", @"deepl", @"bing", @"google", @"ai"];
-    NSArray *titles = @[@"自动（推荐）", @"DeepL", @"Bing（免费·国内推荐）",
+    NSArray *vals = @[@"auto", @"deepl", @"mymemory", @"google", @"ai"];
+    NSArray *titles = @[@"自动（推荐）", @"DeepL", @"MyMemory（免费）",
                         @"Google（免费 / Key）", @"AI 自定义"];
     NSString *cur = CCObjString(@"Engine", @"auto");
+    if ([cur isEqualToString:@"bing"]) cur = @"mymemory";
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"翻译引擎"
                                                                   message:nil
                                                            preferredStyle:UIAlertControllerStyleActionSheet];
@@ -430,51 +431,31 @@ static NSString *CCApiSnippet(NSData *data) {
             }] resume];
     }
 
+    // MyMemory（LCT 默认免费服务；Bing 免费端点已下线）
     dispatch_group_enter(group);
     {
-        NSMutableURLRequest *auth = [NSMutableURLRequest requestWithURL:
-            [NSURL URLWithString:@"https://edge.microsoft.com/translate/auth"]];
-        auth.timeoutInterval = 4.0;
-        [[[NSURLSession sharedSession] dataTaskWithRequest:auth
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:
+            [NSURL URLWithString:@"https://api.mymemory.translated.net/get?q=Hello&langpair=en%7Czh-CN"]];
+        req.timeoutInterval = 4.0;
+        [[[NSURLSession sharedSession] dataTaskWithRequest:req
             completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
                 NSInteger status = [resp isKindOfClass:[NSHTTPURLResponse class]]
                                    ? [(NSHTTPURLResponse *)resp statusCode] : 0;
-                NSString *token = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
-                token = [token stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-                if (err || !token.length) {
-                    @synchronized(res) {
-                        res[@"Bing"] = [NSString stringWithFormat:@"auth HTTP %ld · %@",
-                                        (long)status, err.localizedDescription ?: CCApiSnippet(data)];
-                    }
-                    dispatch_group_leave(group);
-                    return;
+                NSString *line;
+                if (err) {
+                    line = [NSString stringWithFormat:@"HTTP %ld · 网络错误：%@",
+                            (long)status, err.localizedDescription];
+                } else {
+                    line = [NSString stringWithFormat:@"HTTP %ld · %@",
+                            (long)status, CCApiSnippet(data)];
                 }
-                NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:
-                    [NSURL URLWithString:@"https://api-edge.cognitive.microsofttranslator.com/translate?api-version=3.0&to=zh-Hans&from=en"]];
-                req.HTTPMethod = @"POST";
-                [req setValue:[NSString stringWithFormat:@"Bearer %@", token]
-           forHTTPHeaderField:@"Authorization"];
-                [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-                req.HTTPBody = [NSJSONSerialization dataWithJSONObject:@[@{@"Text": @"Hello"}]
-                                                               options:0 error:nil];
-                req.timeoutInterval = 5.0;
-                [[[NSURLSession sharedSession] dataTaskWithRequest:req
-                    completionHandler:^(NSData *data2, NSURLResponse *resp2, NSError *err2) {
-                        NSInteger st2 = [resp2 isKindOfClass:[NSHTTPURLResponse class]]
-                                         ? [(NSHTTPURLResponse *)resp2 statusCode] : 0;
-                        NSString *line = err2
-                            ? [NSString stringWithFormat:@"HTTP %ld · 网络错误：%@",
-                               (long)st2, err2.localizedDescription]
-                            : [NSString stringWithFormat:@"HTTP %ld · %@",
-                               (long)st2, CCApiSnippet(data2)];
-                        @synchronized(res) { res[@"Bing"] = line; }
-                        dispatch_group_leave(group);
-                    }] resume];
+                @synchronized(res) { res[@"MyMemory"] = line; }
+                dispatch_group_leave(group);
             }] resume];
     }
 
     dispatch_group_notify(group, dispatch_get_main_queue(), ^{
-        NSArray *order = @[@"DeepL", @"Google", @"AI", @"Bing"];
+        NSArray *order = @[@"DeepL", @"Google", @"AI", @"MyMemory"];
         NSMutableArray *lines = [NSMutableArray array];
         for (NSString *k in order) {
             NSString *v = res[k] ?: @"未测试";

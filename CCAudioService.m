@@ -251,7 +251,10 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
         lastChunkText = nil;
         urlTaskRunning = NO;
         urlUseOnDevice = YES;
-        CCLogf(@"%@: file capture started (wav chunked, locale=%@)", self.tag, self.locale);
+        // LCT 的识别就是流式 SFSpeechAudioBufferRecognitionRequest：
+        // 先起任务，再把文件音频持续 append 进去。
+        [self recogStart];
+        CCLogf(@"%@: file capture started (wav stream, locale=%@)", self.tag, self.locale);
         return YES;
     }
 
@@ -417,7 +420,7 @@ static double CCFileTailEnergy(NSString *path, double *mtimeOut) {
     return sum / (double)n / 32768.0;
 }
 
-static NSString *CCFindRemoteWav(double *mtimeOut) {
+static NSString *CCFindRemoteWav(NSString *preferred, double *mtimeOut) {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSMutableArray<NSString *> *dirs = [NSMutableArray array];
     if (g_waDocsDir) [dirs addObject:g_waDocsDir];
@@ -432,7 +435,7 @@ static NSString *CCFindRemoteWav(double *mtimeOut) {
         }
     }
     NSString *best = nil, *newest = nil;
-    double bestE = 0, bestT = 0, newestT = 0;
+    double bestE = 0, bestT = 0, newestT = 0, preferredE = -1;
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
     for (NSString *d in dirs) {
         NSArray *files = [fm contentsOfDirectoryAtPath:d error:nil];
@@ -441,11 +444,16 @@ static NSString *CCFindRemoteWav(double *mtimeOut) {
             NSString *p = [d stringByAppendingPathComponent:f];
             double t = 0;
             double e = CCFileTailEnergy(p, &t);
+            if (preferred && [p isEqualToString:preferred]) preferredE = e;
             if (t > newestT) { newestT = t; newest = p; }
             if (now - t < 20.0 && e > bestE) { bestE = e; best = p; }
         }
     }
-    NSString *pick = (best && bestE > 0.0015) ? best : newest;
+    // 迟滞：当前文件还有点声音就不乱切，避免把两路音频混进同一个识别任务
+    NSString *pick = nil;
+    if (preferred && preferredE > 0.0008) pick = preferred;
+    else if (best && bestE > 0.0015) pick = best;
+    else pick = newest;
     if (pick) g_waDocsDir = [pick stringByDeletingLastPathComponent];
     if (mtimeOut) *mtimeOut = bestT;
     return pick;
@@ -493,7 +501,7 @@ static void CCWriteChunkWav(NSString *path, NSData *pcm) {
     @try {
         if (!self.fileMode || !capturing) return;
         double mt = 0;
-        NSString *path = CCFindRemoteWav(&mt);
+        NSString *path = CCFindRemoteWav(filePath, &mt);
         if (!path) {
             if (lastFileAt > 0 && CFAbsoluteTimeGetCurrent() - lastFileAt > 10.0)
                 g_waDocsDir = nil;   // 文件没了，下次重新找
@@ -518,7 +526,7 @@ static void CCWriteChunkWav(NSString *path, NSData *pcm) {
         fileOffset += n;
         lastFileAt = CFAbsoluteTimeGetCurrent();
 
-        // 48k -> 16k：每 3 个样本取平均（简单低通），输出 s16
+        // 48k -> 16k：每 3 个样本取平均（简单低通）
         const int16_t *s = (const int16_t *)d.bytes;
         NSUInteger inSamples = n / 2;
         UInt32 outFrames = (UInt32)(inSamples / 3);
@@ -526,6 +534,11 @@ static void CCWriteChunkWav(NSString *path, NSData *pcm) {
         if (!chunkBuf) chunkBuf = [NSMutableData data];
         double sum = 0;
         int16_t tmp[2048];
+        AVAudioPCMBuffer *pcm = [[AVAudioPCMBuffer alloc] initWithPCMFormat:mono
+                                                             frameCapacity:outFrames];
+        if (!pcm) return;
+        pcm.frameLength = outFrames;
+        float *dst = pcm.floatChannelData[0];
         UInt32 produced = 0;
         while (produced < outFrames) {
             UInt32 batch = MIN((UInt32)2048, outFrames - produced);
@@ -535,6 +548,7 @@ static void CCWriteChunkWav(NSString *path, NSData *pcm) {
                 if (v > 32767) v = 32767;
                 if (v < -32768) v = -32768;
                 tmp[i] = (int16_t)v;
+                dst[idx] = (float)v / 32768.0f;
                 sum += fabs((double)v) / 32768.0;
             }
             [chunkBuf appendBytes:tmp length:batch * 2];
@@ -548,9 +562,12 @@ static void CCWriteChunkWav(NSString *path, NSData *pcm) {
         __atomic_add_fetch(&frames, outFrames, __ATOMIC_RELAXED);
         __atomic_add_fetch(&audioBytes, (uint64_t)outFrames * 2, __ATOMIC_RELAXED);
 
-        // 4 秒一块做文件式识别（LCT 同款 SFSpeechURLRecognitionRequest）
-        if (outFrames >= 16000 * 3 || chunkBuf.length >= 16000 * 2 * 4)
-            [self flushChunk];
+        // 静音段不喂识别器：1110 No speech detected 多半是持续静音触发的
+        if (rms > 0.0015f && req) {
+            [req appendAudioPCMBuffer:pcm];
+        } else if (!req && capturing) {
+            [self recogStart];
+        }
     } @catch (NSException *e) { }
 }
 
@@ -1040,7 +1057,20 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.14.0-alpha13)");
+        CCLogLine(@"audioservice started (v0.14.0-alpha14)");
+        // LCT 的 livecallhelper 在识别前会配置 AVAudioSession（SoloAmbient/Default）；
+        // 我们的守护进程以前没做这一步，补上。
+        @try {
+            AVAudioSession *sess = [AVAudioSession sharedInstance];
+            [sess setCategory:AVAudioSessionCategorySoloAmbient
+                         mode:AVAudioSessionModeDefault
+                      options:0
+                        error:nil];
+            [sess setActive:YES error:nil];
+            CCLogf(@"audio session: cat=%@ mode=%@", sess.category, sess.mode);
+        } @catch (NSException *e) {
+            CCLogf(@"audio session exc %@", e.reason);
+        }
         {
             NSString *dk = CCPrefStr(CC_K_DEEPL_KEY, @"");
             CCLogf(@"prefs boot: engine=%@ deeplKeyLen=%lu remote=%d local=%d",

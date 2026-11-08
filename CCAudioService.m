@@ -120,6 +120,10 @@ static void CCSpeakEnglish(NSString *text) {
     CFAbsoluteTime lastRealResultAt; // 最近一次真正识别出内容
     CFAbsoluteTime lastTapProbeAt;   // 最近一次静音 Tap 探测
     int tapProbeCount;               // 静音 Tap 探测次数（-2→-1→-3，最多 3 次）
+    BOOL fileMode;                   // YES: 不用 ATAudioTap，读 App 探针写出的 WAV
+    NSString *filePath;              // 当前读取的 WAV
+    unsigned long long fileOffset;   // 已读到的字节偏移
+    CFAbsoluteTime lastFileAt;       // 最近一次从文件读到新数据的时间
     NSUInteger callGen;          // 通话/采集代际：stop/新采集递增，用于丢弃上一通的结果
     NSUInteger partialGen;       // 临时翻译代际：只接受最新 partial 的译文
 }
@@ -130,9 +134,11 @@ static void CCSpeakEnglish(NSString *text) {
 @property (nonatomic, copy) NSString *dstLang;
 @property (nonatomic, assign) BOOL expectCJK;     // YES: 我方通道，识别中文
 @property (nonatomic, assign) BOOL speakEnglish;  // YES: 译文用英文 TTS 外放
+@property (nonatomic, assign) BOOL fileMode;        // YES: 读 App 探针 WAV 而不是 ATAudioTap
 - (void)configure;
 - (BOOL)start;
 - (void)stop;
+- (void)pumpFileAudio;
 - (void)pauseRecog;
 - (void)recogStart;
 - (void)recogRestart:(double)delay;
@@ -201,6 +207,7 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
 }
 
 @implementation CCChannel
+@synthesize fileMode = fileMode;   // 复用已有 ivar，避免 _fileMode 与 fileMode 两份状态
 
 - (void)configure {
     if (self.tapPID == CC_TAP_PID_MIC) {
@@ -221,6 +228,18 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
 
 - (BOOL)start {
     if (capturing) return YES;
+
+    // 文件模式：音频来自 WhatsApp 探针写出的 /Documents/cc_remote_*.wav，
+    // 不需要 ATAudioTap，也不需要 AudioQueue。
+    if (self.fileMode) {
+        capturing = YES;
+        [self configure];
+        mono = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32
+                                                sampleRate:16000.0 channels:1 interleaved:NO];
+        [self recogStart];
+        CCLogf(@"%@: file capture started (wav, locale=%@)", self.tag, self.locale);
+        return YES;
+    }
 
     SFSpeechRecognizerAuthorizationStatus auth = [SFSpeechRecognizer authorizationStatus];
     if (auth != SFSpeechRecognizerAuthorizationStatusAuthorized) {
@@ -334,6 +353,9 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
     lastRealResultAt = 0;
     lastTapProbeAt = 0;
     endAudioSent = NO;
+    filePath = nil;
+    fileOffset = 0;
+    lastFileAt = 0;
     callGen++;
     partialGen++;
     @try {
@@ -347,6 +369,99 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
         }
         tap = nil;
         CCLogf(@"%@: capture stopped", self.tag);
+    } @catch (NSException *e) { }
+}
+
+// 读取 WhatsApp 探针写出的 cc_remote_*.wav（48k mono s16），
+// 降采样到 16k float32 后喂给当前识别任务。
+static NSString *g_waDocsDir;
+static NSString *CCFindRemoteWav(double *mtimeOut) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableArray<NSString *> *dirs = [NSMutableArray array];
+    if (g_waDocsDir) [dirs addObject:g_waDocsDir];
+    NSString *best = nil;
+    double bestT = 0;
+    if (dirs.count == 0) {
+        NSString *base = @"/var/mobile/Containers/Data/Application";
+        NSArray *apps = [fm contentsOfDirectoryAtPath:base error:nil];
+        for (NSString *a in apps) {
+            NSString *docs = [[base stringByAppendingPathComponent:a]
+                              stringByAppendingPathComponent:@"Documents"];
+            if (!docs) continue;
+            [dirs addObject:docs];
+        }
+    }
+    for (NSString *d in dirs) {
+        NSArray *files = [fm contentsOfDirectoryAtPath:d error:nil];
+        for (NSString *f in files) {
+            if (![f hasPrefix:@"cc_remote_"] || ![f hasSuffix:@".wav"]) continue;
+            NSString *p = [d stringByAppendingPathComponent:f];
+            NSDictionary *at = [fm attributesOfItemAtPath:p error:nil];
+            double t = [at[NSFileModificationDate] timeIntervalSince1970];
+            if (t > bestT) { bestT = t; best = p; }
+        }
+    }
+    if (best) g_waDocsDir = [best stringByDeletingLastPathComponent];
+    if (mtimeOut) *mtimeOut = bestT;
+    return best;
+}
+
+- (void)pumpFileAudio {
+    @try {
+        if (!self.fileMode || !capturing) return;
+        double mt = 0;
+        NSString *path = CCFindRemoteWav(&mt);
+        if (!path) {
+            if (lastFileAt > 0 && CFAbsoluteTimeGetCurrent() - lastFileAt > 10.0)
+                g_waDocsDir = nil;   // 文件没了，下次重新找
+            return;
+        }
+        if (!filePath || ![filePath isEqualToString:path]) {
+            filePath = path;
+            fileOffset = 44;         // 跳过 WAV 头
+            CCLogf(@"%@: file source %@", self.tag, [path lastPathComponent]);
+        }
+        NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:path];
+        if (!fh) return;
+        NSDictionary *at = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
+        unsigned long long size = [at[NSFileSize] unsignedLongLongValue];
+        if (size < fileOffset) fileOffset = 44;   // 同名文件被新通话覆盖，从头读
+        if (size <= fileOffset) { [fh closeFile]; return; }
+        [fh seekToFileOffset:fileOffset];
+        NSData *d = [fh readDataToEndOfFile];
+        [fh closeFile];
+        NSUInteger n = d.length & ~(NSUInteger)1;
+        if (n < 6) return;
+        fileOffset += n;
+        lastFileAt = CFAbsoluteTimeGetCurrent();
+
+        // 48k -> 16k：每 3 个样本取平均（简单低通），ASR 足够
+        const int16_t *s = (const int16_t *)d.bytes;
+        NSUInteger inSamples = n / 2;
+        UInt32 outFrames = (UInt32)(inSamples / 3);
+        if (outFrames == 0) return;
+        AVAudioPCMBuffer *pcm = [[AVAudioPCMBuffer alloc] initWithPCMFormat:mono
+                                                             frameCapacity:outFrames];
+        if (!pcm) return;
+        pcm.frameLength = outFrames;
+        float *dst = pcm.floatChannelData[0];
+        double sum = 0;
+        for (UInt32 i = 0; i < outFrames; i++) {
+            int32_t v = ((int32_t)s[i * 3] + s[i * 3 + 1] + s[i * 3 + 2]) / 3;
+            dst[i] = (float)v / 32768.0f;
+            sum += fabsf(dst[i]);
+        }
+        float rms = (float)(sum / (double)outFrames);
+        lastRMS = rms;
+        if (rms > 0.008f) lastLoudAt = CFAbsoluteTimeGetCurrent();
+        __atomic_add_fetch(&frames, outFrames, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&audioBytes, (uint64_t)outFrames * 4, __ATOMIC_RELAXED);
+
+        if (req) {
+            [req appendAudioPCMBuffer:pcm];
+        } else if (capturing) {
+            [self recogStart];
+        }
     } @catch (NSException *e) { }
 }
 
@@ -620,6 +735,8 @@ static void CheckArm(void) {
             g_remote->lastAttempt = now;
             [g_remote start];
         }
+        // 文件模式：每次 tick 把 WhatsApp 探针新写出的 PCM 喂给识别器
+        if (g_remote.fileMode) [g_remote pumpFileAudio];
 
         // 我方通道（双向模式）
         BOOL localOn = CCPrefBool(CC_K_LOCAL_ENABLED, NO);
@@ -679,28 +796,40 @@ static void CheckArm(void) {
                     [ch recogStart];
                 }
             } else if (now - ch->lastFrameChangeAt > 8.0) {
-                // 只重挂同一个 PID，不再乱换 -2/-1/-3：
-                // 换到 -3 会把麦克风声音当“对方”，还会把通道语言切成中文。
-                CCLogf(@"%@: audio stalled (frames=%llu), restarting tap pid=%d",
-                       ch.tag, (unsigned long long)ch->frames, ch.tapPID);
-                [ch stop];
-                ch->lastAttempt = 0;
-                ch->lastFrameChangeAt = now;
+                if (ch->fileMode) {
+                    // 文件模式没有 Tap 可重挂；文件 8 秒没长，多半是通话结束了
+                    ch->lastFrameChangeAt = now;
+                } else {
+                    // 只重挂同一个 PID，不再乱换 -2/-1/-3：
+                    // 换到 -3 会把麦克风声音当“对方”，还会把通道语言切成中文。
+                    CCLogf(@"%@: audio stalled (frames=%llu), restarting tap pid=%d",
+                           ch.tag, (unsigned long long)ch->frames, ch.tapPID);
+                    [ch stop];
+                    ch->lastAttempt = 0;
+                    ch->lastFrameChangeAt = now;
+                }
             }
         }
 
-        // 识别健康看门狗：有真实声音、但 6 秒没有任何识别结果 → 重挂同一个 Tap。
+        // 识别健康看门狗：有真实声音、但 6 秒没有任何识别结果 → 重启识别
         for (CCChannel *ch in chans) {
             if (!ch->capturing || ch->ttsPaused) continue;
             if (ch->lastLoudAt > 0 &&
                 now - ch->lastLoudAt < 2.0 &&
                 now - ch->lastResultAt > 6.0) {
-                CCLogf(@"%@: loud(rms=%.3f) but no recognition for %.1fs, restarting tap pid=%d",
-                       ch.tag, ch->lastRMS, now - ch->lastResultAt, ch.tapPID);
-                ch->lastResultAt = now;
-                [ch stop];
-                ch->lastAttempt = 0;
-                ch->lastFrameChangeAt = now;
+                if (ch->fileMode) {
+                    CCLogf(@"%@: loud(rms=%.3f) but no recognition for %.1fs, restart recog",
+                           ch.tag, ch->lastRMS, now - ch->lastResultAt);
+                    ch->lastResultAt = now;
+                    [ch recogRestart:0.5];
+                } else {
+                    CCLogf(@"%@: loud(rms=%.3f) but no recognition for %.1fs, restarting tap pid=%d",
+                           ch.tag, ch->lastRMS, now - ch->lastResultAt, ch.tapPID);
+                    ch->lastResultAt = now;
+                    [ch stop];
+                    ch->lastAttempt = 0;
+                    ch->lastFrameChangeAt = now;
+                }
             }
         }
 
@@ -755,7 +884,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.14.0-alpha11)");
+        CCLogLine(@"audioservice started (v0.14.0-alpha12)");
         {
             NSString *dk = CCPrefStr(CC_K_DEEPL_KEY, @"");
             CCLogf(@"prefs boot: engine=%@ deeplKeyLen=%lu remote=%d local=%d",
@@ -769,6 +898,7 @@ int main(int argc, char *argv[]) {
         g_remote = [[CCChannel alloc] init];
         g_remote.tapPID = CC_TAP_PID_SPEAKER;
         g_remote.tag = @"remote";
+        g_remote.fileMode = YES;   // 对方语音来自 App 探针写出的 WAV
         [g_remote configure];
 
         g_local = [[CCChannel alloc] init];
@@ -783,7 +913,7 @@ int main(int argc, char *argv[]) {
         dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,
                                                          0, 0, g_stateQ);
         dispatch_source_set_timer(timer, DISPATCH_TIME_NOW,
-                                  (uint64_t)1 * NSEC_PER_SEC,
+                                  (uint64_t)500 * NSEC_PER_MSEC,
                                   (uint64_t)200 * NSEC_PER_MSEC);
         dispatch_source_set_event_handler(timer, ^{ CheckArm(); });
         dispatch_resume(timer);

@@ -639,6 +639,7 @@ static void CCReport(void) {
     }
 
     static CFAbsoluteTime lastTtsLog;
+    static CFAbsoluteTime lastBeat;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (now - lastTtsLog >= 5.0) {
         lastTtsLog = now;

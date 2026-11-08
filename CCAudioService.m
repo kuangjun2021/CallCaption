@@ -112,6 +112,7 @@ static void CCSpeakEnglish(NSString *text) {
     NSString *lastPartialText;
     NSString *lastProvisional;
     CFAbsoluteTime lastTextAt;
+    CFAbsoluteTime lastProvTransAt;   // 连续说话时的增量翻译节流
     NSUInteger callGen;          // 通话/采集代际：stop/新采集递增，用于丢弃上一通的结果
     NSUInteger partialGen;       // 临时翻译代际：只接受最新 partial 的译文
 }
@@ -299,6 +300,7 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
     lastProvisional = nil;
     lastPartialAt = 0;
     lastTextAt = 0;
+    lastProvTransAt = 0;
     endAudioSent = NO;
     callGen++;
     partialGen++;
@@ -321,6 +323,7 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
     lastPartialText = nil;
     lastProvisional = nil;
     lastPartialAt = 0;
+    lastProvTransAt = 0;
     endAudioSent = NO;
     partialGen++;
     @try {
@@ -362,6 +365,7 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
         // 触发 endAudio → final → 新任务 → 再旧句的死循环。
         lastPartialText = nil;
         lastPartialAt = CFAbsoluteTimeGetCurrent();
+        lastProvTransAt = 0;
         endAudioSent = NO;
         lastProvisional = nil;
         partialGen++;
@@ -442,6 +446,10 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
                     if (ok) {
                         NSString *prefix = self.expectCJK ? @"LI|" : @"I|";
                         CCTransportSendLine([prefix stringByAppendingString:txt]);
+                        // LCT 式的流式体验：连续说话时也每隔 1.5 秒增量翻一次，
+                        // 不用等到整句停顿/结束才出译文。
+                        if (txt.length >= 6 && now - lastProvTransAt > 1.5)
+                            [self translateProvisional:txt];
                     }
                 }
             }
@@ -469,6 +477,7 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
     if (self.expectCJK && !CCPrefBool(CC_K_LOCAL_ENABLED, NO)) return;
     if (!self.expectCJK && !CCPrefBool(CC_K_REMOTE_ENABLED, YES)) return;
     lastProvisional = text;
+    lastProvTransAt = CFAbsoluteTimeGetCurrent();
     NSUInteger gen = ++partialGen;
     NSUInteger cg = callGen;
     __weak CCChannel *weakSelf = self;

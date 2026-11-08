@@ -393,12 +393,13 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
             }];
         task = t;
 
-        // 连续说话时每 12 秒强制收一段（8 秒太碎，切坏句子）
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)12 * NSEC_PER_SEC),
+        // 连续说话时每 30 秒强制收一段。12 秒太短，会把长句切断；
+        // 正常停顿由 0.8 秒 stable partial 负责收句。
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)30 * NSEC_PER_SEC),
                        g_stateQ, ^{
             CCChannel *ch = weakSelf;
             if (ch && ch->capturing && ch->task == t) {
-                CCLogf(@"%@: force finalize (12s chunk)", ch.tag);
+                CCLogf(@"%@: force finalize (30s safety chunk)", ch.tag);
                 [t finish];
             }
         });
@@ -431,13 +432,14 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
             lastResultAt = now;
             NSString *txt = CCTrim(result.bestTranscription.formattedString);
             if (result.isFinal) {
-                if (!muted) {
+                if (!muted && txt.length) {
                     double conf = CCResultConfidence(result);
-                    if (conf < 0 || conf >= 0.45) {
-                        [self deliverFinal:txt];
-                    } else {
-                        CCLogf(@"%@: low confidence %.2f, skip: %@", self.tag, conf, txt);
+                    if (conf >= 0 && conf < 0.45) {
+                        // 低置信度不再丢弃：LCT 也不按置信度过滤。
+                        // 我们有语言过滤和 lastText 去重，误识别比漏句更可接受。
+                        CCLogf(@"%@: low confidence %.2f, accept anyway: %@", self.tag, conf, txt);
                     }
+                    [self deliverFinal:txt];
                 }
                 // final 已经产出：清掉 partial 状态，防止下一次 recogStart 又被旧 partial 触发
                 lastPartialText = nil;
@@ -448,7 +450,7 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
                 return;
             }
             if (!muted && txt.length > 1 &&
-                (!lastPartialText || now - lastPartialAt > 0.7)) {
+                (!lastPartialText || now - lastPartialAt > 0.4)) {
                 BOOL same = lastPartialText && [lastPartialText isEqualToString:txt];
                 if (!same) {
                     lastPartialAt = now;
@@ -460,7 +462,7 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
                         CCTransportSendLine([prefix stringByAppendingString:txt]);
                         // LCT 式的流式体验：连续说话时也每隔 1.5 秒增量翻一次，
                         // 不用等到整句停顿/结束才出译文。
-                        if (txt.length >= 6 && now - lastProvTransAt > 1.5)
+                        if (txt.length >= 6 && now - lastProvTransAt > 1.0)
                             [self translateProvisional:txt];
                     }
                 }
@@ -681,15 +683,19 @@ static void CheckArm(void) {
 
         if (g_remote->capturing && now - g_remote->lastStatsAt >= 5.0) {
             g_remote->lastStatsAt = now;
-            CCLogf(@"remote: alive, audio=%llu frames=%llu",
+            CCLogf(@"remote: alive, audio=%llu frames=%llu rms=%.4f noResult=%.1fs",
                    (unsigned long long)g_remote->audioBytes,
-                   (unsigned long long)g_remote->frames);
+                   (unsigned long long)g_remote->frames,
+                   g_remote->lastRMS,
+                   g_remote->lastResultAt > 0 ? now - g_remote->lastResultAt : -1);
         }
         if (g_local->capturing && now - g_local->lastStatsAt >= 5.0) {
             g_local->lastStatsAt = now;
-            CCLogf(@"local: alive, audio=%llu frames=%llu",
+            CCLogf(@"local: alive, audio=%llu frames=%llu rms=%.4f noResult=%.1fs",
                    (unsigned long long)g_local->audioBytes,
-                   (unsigned long long)g_local->frames);
+                   (unsigned long long)g_local->frames,
+                   g_local->lastRMS,
+                   g_local->lastResultAt > 0 ? now - g_local->lastResultAt : -1);
         }
     } @catch (NSException *e) { }
 }
@@ -726,7 +732,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.13.11)");
+        CCLogLine(@"audioservice started (v0.13.12)");
         {
             NSString *dk = CCPrefStr(CC_K_DEEPL_KEY, @"");
             CCLogf(@"prefs boot: engine=%@ deeplKeyLen=%lu remote=%d local=%d",

@@ -28,6 +28,7 @@
 + (void)handlePanelPan:(UIPanGestureRecognizer *)p;
 + (void)handleBoxPan:(UIPanGestureRecognizer *)p;
 + (void)boxTapped:(id)sender;
++ (void)bgCatcherTapped:(id)sender;
 + (void)collapsePanel;
 + (void)expandPanel;
 + (void)handleGrabberPan:(UIPanGestureRecognizer *)p;
@@ -48,6 +49,7 @@
 
 static UIWindow *g_win;                 // 唯一全屏窗口
 static UIView *g_root;                  // 全屏透明容器
+static UIControl *g_bgCatcher;          // g_root 下面的全屏兜底点击层
 static UIVisualEffectView *g_panelCard; // 底部控制面板
 static UILabel *g_titleLabel;
 static UIButton *g_btns[5];
@@ -129,12 +131,18 @@ static NSString *CCEngineName(NSString *eng) {
 
 static void ShowWindow(void) {
     if (!g_win) return;
+    CGRect scr = [UIScreen mainScreen].bounds;
+    g_win.frame = scr;
+    if (g_root) g_root.frame = scr;
+    if (g_bgCatcher) g_bgCatcher.frame = scr;
     g_win.hidden = NO;
     if ([g_win respondsToSelector:@selector(orderFront:)]) {
         @try { [g_win orderFront:nil]; } @catch (NSException *e) { }
     }
-    CCLogf(@"window: orderFront class=%@ scene=%@ hidden=%d",
-           NSStringFromClass([g_win class]), g_win.windowScene, g_win.hidden);
+    CCLogf(@"window: orderFront class=%@ scene=%@ hidden=%d frame=%@ bounds=%@ root=%@",
+           NSStringFromClass([g_win class]), g_win.windowScene, g_win.hidden,
+           NSStringFromCGRect(g_win.frame), NSStringFromCGRect(g_win.bounds),
+           NSStringFromCGRect(g_root ? g_root.frame : CGRectZero));
 }
 
 static void HideWindow(void) {
@@ -179,13 +187,18 @@ static UIWindow *CreateOverlayWindow(void) {
 // 空白背景且面板展开 → 立即收起；返回 nil 让触摸继续传给通话界面。
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hit = [super hitTest:point withEvent:event];
-    if (!hit) return nil;
 
-    BOOL background = (hit == g_root || hit == self.contentView || hit == self);
+    // 关键：super 返回 nil 也按“空白背景”处理。
+    // 不再假设空背景一定会返回 g_root/contentView，避免点了半天什么都不发生。
+    BOOL background = (!hit || hit == g_root || hit == g_bgCatcher ||
+                       hit == self.contentView || hit == self);
     if (!background) {
         CCLogf(@"hitTest: %@", NSStringFromClass([hit class]));
         return hit;
     }
+    if (!hit)
+        CCLogf(@"hitTest: nil bg at %.0f,%.0f root=%@",
+               point.x, point.y, NSStringFromCGRect(g_root ? g_root.frame : CGRectZero));
 
     if (g_panelExpanded) {
         CCLogf(@"panel: outside tap (hitTest)");
@@ -838,6 +851,12 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
     }
 }
 
++ (void)bgCatcherTapped:(id)sender {
+    CCLogf(@"panel: outside tap (catcher)");
+    if (g_panelExpanded) [self collapsePanel];
+    else if (g_callActive && !g_grabberVisible) [self showGrabber];
+}
+
 + (void)boxTapped:(id)sender {
     if (g_panelExpanded) {
         CCLogf(@"panel: outside tap (box)");
@@ -949,10 +968,25 @@ static void EnsureUI(void) {
     if (g_win) return;
     @try {
         g_win = CreateOverlayWindow();
-        g_root = [[UIView alloc] initWithFrame:g_win.bounds];
+        CGRect scr = [UIScreen mainScreen].bounds;
+        g_win.frame = scr;
+
+        // 全屏兜底点击层：放在 g_root 下面，g_root 不接管空白区域时由它接。
+        g_bgCatcher = [[UIControl alloc] initWithFrame:scr];
+        g_bgCatcher.backgroundColor = [UIColor clearColor];
+        g_bgCatcher.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [g_bgCatcher addTarget:[CCUIHelper class] action:@selector(bgCatcherTapped:)
+              forControlEvents:UIControlEventTouchUpInside];
+        [g_win addSubview:g_bgCatcher];
+
+        g_root = [[UIView alloc] initWithFrame:scr];
         g_root.backgroundColor = [UIColor clearColor];
+        g_root.userInteractionEnabled = YES;
         g_root.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         [g_win addSubview:g_root];
+        CCLogf(@"ui: windowFrame=%@ rootFrame=%@ catcherFrame=%@",
+               NSStringFromCGRect(g_win.frame), NSStringFromCGRect(g_root.frame),
+               NSStringFromCGRect(g_bgCatcher.frame));
 
         EnsurePanelUI();
         EnsureGrabberUI();
@@ -1001,7 +1035,7 @@ void CCUIBoot(void) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.13.11)");
+        CCLogLine(@"CallCaption UI booted (single window v0.13.12)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

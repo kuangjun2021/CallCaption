@@ -94,30 +94,30 @@ static NSString *DeepLKey(void) {
 }
 
 // ---------- DeepL ----------
-static void TranslateDeepL(NSString *text, NSString *from, NSString *to,
-                           void (^done)(NSString *, NSError *)) {
-    NSString *key = DeepLKey();
-    if (key.length == 0) {
-        done(nil, [NSError errorWithDomain:CC_DOMAIN code:1 userInfo:@{NSLocalizedDescriptionKey: @"DeepL key not set"}]);
-        return;
-    }
+static void DeepLRequest(NSString *text, NSString *from, NSString *to, NSString *key,
+                         NSString *endpoint,
+                         void (^done)(NSString *, NSError *, NSInteger status)) {
     NSMutableString *body = [NSMutableString stringWithFormat:@"auth_key=%@&text=%@&target_lang=%@",
                              CCEscape(key), CCEscape(text), to.uppercaseString];
     if (![[from lowercaseString] isEqualToString:@"auto"]) {
         [body appendFormat:@"&source_lang=%@", from.uppercaseString];
     }
-    NSURL *url = [NSURL URLWithString:@"https://api-free.deepl.com/v2/translate"];
+    NSURL *url = [NSURL URLWithString:endpoint];
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
     req.HTTPMethod = @"POST";
     [req setValue:@"application/x-www-form-urlencoded" forHTTPHeaderField:@"Content-Type"];
     req.HTTPBody = [body dataUsingEncoding:NSUTF8StringEncoding];
     req.timeoutInterval = 3.0;
 
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req
         completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
             @try {
+                NSInteger status = [resp isKindOfClass:[NSHTTPURLResponse class]]
+                                   ? [(NSHTTPURLResponse *)resp statusCode] : 0;
                 if (err || !data) {
-                    done(nil, err ?: [NSError errorWithDomain:CC_DOMAIN code:2 userInfo:nil]);
+                    CCLogf(@"deepl endpoint=%@ http=%ld err=%@", endpoint, (long)status,
+                           err.localizedDescription ?: @"no data");
+                    done(nil, err ?: [NSError errorWithDomain:CC_DOMAIN code:2 userInfo:nil], status);
                     return;
                 }
                 id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
@@ -127,11 +127,44 @@ static void TranslateDeepL(NSString *text, NSString *from, NSString *to,
                     if ([arr isKindOfClass:[NSArray class]] && arr.count > 0)
                         out = arr[0][@"text"];
                 }
-                if ([out isKindOfClass:[NSString class]] && out.length) done(out, nil);
-                else done(nil, [NSError errorWithDomain:CC_DOMAIN code:3 userInfo:@{NSLocalizedDescriptionKey: @"bad deepl response"}]);
-            } @catch (NSException *e) { done(nil, nil); }
-        }];
-    [task resume];
+                if ([out isKindOfClass:[NSString class]] && out.length) {
+                    done(out, nil, status);
+                    return;
+                }
+                NSString *rb = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+                if (rb.length > 160) rb = [rb substringToIndex:160];
+                rb = [rb stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
+                CCLogf(@"deepl endpoint=%@ http=%ld body=%@", endpoint, (long)status, rb ?: @"");
+                done(nil, [NSError errorWithDomain:CC_DOMAIN code:3
+                                          userInfo:@{NSLocalizedDescriptionKey: @"bad deepl response"}],
+                     status);
+            } @catch (NSException *e) { done(nil, nil, 0); }
+        }] resume];
+}
+
+static void TranslateDeepL(NSString *text, NSString *from, NSString *to,
+                           void (^done)(NSString *, NSError *)) {
+    NSString *key = DeepLKey();
+    if (key.length == 0) {
+        done(nil, [NSError errorWithDomain:CC_DOMAIN code:1 userInfo:@{NSLocalizedDescriptionKey: @"DeepL key not set"}]);
+        return;
+    }
+    // 先走 free 端点；如果是 Pro Key（401/403），再试 api.deepl.com。
+    DeepLRequest(text, from, to, key, @"https://api-free.deepl.com/v2/translate",
+                 ^(NSString *out, NSError *err, NSInteger status) {
+        if (out.length) { done(out, nil); return; }
+        if (status == 401 || status == 403) {
+            DeepLRequest(text, from, to, key, @"https://api.deepl.com/v2/translate",
+                         ^(NSString *out2, NSError *err2, NSInteger status2) {
+                if (out2.length) done(out2, nil);
+                else done(nil, err2 ?: [NSError errorWithDomain:CC_DOMAIN code:3
+                                    userInfo:@{NSLocalizedDescriptionKey: @"bad deepl response"}]);
+            });
+            return;
+        }
+        done(nil, err ?: [NSError errorWithDomain:CC_DOMAIN code:3
+                                   userInfo:@{NSLocalizedDescriptionKey: @"bad deepl response"}]);
+    });
 }
 
 // ---------- URL 编码 ----------

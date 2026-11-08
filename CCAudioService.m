@@ -164,17 +164,25 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
                         pcm.frameLength = nf;
                         float *dst = pcm.floatChannelData[0];
                         const float *src = (const float *)buf->mAudioData;
+                        float rms = 0;
                         if (sa->mChannelsPerFrame >= 2) {
-                            // 只取左声道：通话音频常见左右反相，平均会互相抵消
+                            // 通话音频可能只出现在右声道，也可能左右反相。
+                            // 不能盲取左声道：先比较两路能量，选更响的那路。
+                            float sl = 0, sr = 0;
+                            for (AVAudioFrameCount i = 0; i < nf; i++) {
+                                sl += fabsf(src[2 * i]);
+                                sr += fabsf(src[2 * i + 1]);
+                            }
+                            BOOL useR = (sr > sl * 1.5f);
                             for (AVAudioFrameCount i = 0; i < nf; i++)
-                                dst[i] = src[2 * i];
+                                dst[i] = useR ? src[2 * i + 1] : src[2 * i];
+                            rms = nf ? (MAX(sl, sr) / (float)nf) : 0;
                         } else {
                             memcpy(dst, src, nf * sizeof(float));
+                            float sum = 0;
+                            for (AVAudioFrameCount i = 0; i < nf; i++) sum += fabsf(src[i]);
+                            rms = nf ? (sum / (float)nf) : 0;
                         }
-                        // 粗略音量（左声道平均绝对值），用于判断“有声音但识别没结果”
-                        float sum = 0;
-                        for (AVAudioFrameCount i = 0; i < nf; i++) sum += fabsf(src[2 * i]);
-                        float rms = nf ? (sum / (float)nf) : 0;
                         ch->lastRMS = rms;
                         if (rms > 0.008f)
                             ch->lastLoudAt = CFAbsoluteTimeGetCurrent();
@@ -316,8 +324,8 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
     partialGen++;
     @try {
         // 不调用 [task ：本环境会在 SFLocalSpeechRecognitionClient stopSpeech 触发 SIGBUS
+        task = nil;                 // 先置空，旧 task 的 216 取消回调会被 ch->task != t 丢弃
         if (req) { [req endAudio]; req = nil; }
-        task = nil;
         if (queue) {
             AudioQueueStop(queue, true);
             AudioQueueDispose(queue, true);
@@ -338,8 +346,8 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
     partialGen++;
     @try {
         // 不调用 [task ：本环境会在 SFLocalSpeechRecognitionClient stopSpeech 触发 SIGBUS
+        task = nil;                 // 先置空，旧 task 的 216 取消回调会被 ch->task != t 丢弃
         if (req) { [req endAudio]; req = nil; }
-        task = nil;
     } @catch (NSException *e) { }
 }
 
@@ -358,8 +366,8 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
             return;
         }
         // 不调用 [task ：本环境会在 SFLocalSpeechRecognitionClient stopSpeech 触发 SIGBUS
+        task = nil;                 // 先置空，旧 task 的 216 取消回调会被 ch->task != t 丢弃
         if (req) { [req endAudio]; req = nil; }
-        task = nil;
 
         SFSpeechAudioBufferRecognitionRequest *r =
             [[SFSpeechAudioBufferRecognitionRequest alloc] init];
@@ -385,10 +393,14 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
                recog.isAvailable, !CCPrefBool(CC_K_CLOUD_ASR, YES), self.locale);
 
         __weak CCChannel *weakSelf = self;
-        SFSpeechRecognitionTask *t = [recog recognitionTaskWithRequest:r
+        __block SFSpeechRecognitionTask *t = nil;
+        t = [recog recognitionTaskWithRequest:r
             resultHandler:^(SFSpeechRecognitionResult *result, NSError *error) {
                 CCChannel *ch = weakSelf;
                 if (!ch) return;
+                // 旧 task 被 recogStart/endAudio 取消后会回调 216。
+                // 如果不判断，会把刚建好的新 task 再取消，形成 1 秒一次的 task 重启死循环。
+                if (ch->task != t) return;
                 [ch handleResult:result error:error];
             }];
         task = t;
@@ -465,9 +477,9 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
         if (error) {
             NSInteger code = error.code;
             BOOL benign = (code == 216 /* cancelled */ || code == 1110 /* no speech */);
+            CCLogf(@"%@ recog end: code=%ld benign=%d onDevice=%d %@",
+                   self.tag, (long)code, benign, onDevice, error.localizedDescription);
             if (!benign) {
-                CCLogf(@"%@ recog err: %@ (code=%ld onDevice=%d)",
-                       self.tag, error.localizedDescription, (long)code, onDevice);
                 if (onDevice) {
                     onDevice = NO;
                     CCLogf(@"%@: fallback to server recognition", self.tag);
@@ -726,7 +738,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.13.13)");
+        CCLogLine(@"audioservice started (v0.13.14)");
         {
             NSString *dk = CCPrefStr(CC_K_DEEPL_KEY, @"");
             CCLogf(@"prefs boot: engine=%@ deeplKeyLen=%lu remote=%d local=%d",

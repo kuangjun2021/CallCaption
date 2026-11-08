@@ -48,6 +48,7 @@
 #pragma mark - 全局状态
 
 static UIWindow *g_win;                 // 唯一全屏窗口
+static UIViewController *g_rootVC;      // 全屏 rootViewController
 static UIView *g_root;                  // 全屏透明容器
 static UIControl *g_bgCatcher;          // g_root 下面的全屏兜底点击层
 static UIVisualEffectView *g_panelCard; // 底部控制面板
@@ -133,16 +134,18 @@ static void ShowWindow(void) {
     if (!g_win) return;
     CGRect scr = [UIScreen mainScreen].bounds;
     g_win.frame = scr;
+    if (g_rootVC) g_rootVC.view.frame = scr;
     if (g_root) g_root.frame = scr;
     if (g_bgCatcher) g_bgCatcher.frame = scr;
     g_win.hidden = NO;
     if ([g_win respondsToSelector:@selector(orderFront:)]) {
         @try { [g_win orderFront:nil]; } @catch (NSException *e) { }
     }
-    CCLogf(@"window: orderFront class=%@ scene=%@ hidden=%d frame=%@ bounds=%@ root=%@",
+    CCLogf(@"window: orderFront class=%@ scene=%@ hidden=%d frame=%@ bounds=%@ root=%@ rvc=%@",
            NSStringFromClass([g_win class]), g_win.windowScene, g_win.hidden,
            NSStringFromCGRect(g_win.frame), NSStringFromCGRect(g_win.bounds),
-           NSStringFromCGRect(g_root ? g_root.frame : CGRectZero));
+           NSStringFromCGRect(g_root ? g_root.frame : CGRectZero),
+           NSStringFromCGRect(g_rootVC ? g_rootVC.view.frame : CGRectZero));
 }
 
 static void HideWindow(void) {
@@ -190,8 +193,8 @@ static UIWindow *CreateOverlayWindow(void) {
 
     // 关键：super 返回 nil 也按“空白背景”处理。
     // 不再假设空背景一定会返回 g_root/contentView，避免点了半天什么都不发生。
-    BOOL background = (!hit || hit == g_root || hit == g_bgCatcher ||
-                       hit == self.contentView || hit == self);
+    BOOL background = (!hit || hit == g_root || hit == g_root.superview ||
+                       hit == g_bgCatcher || hit == self.contentView || hit == self);
     if (!background) {
         CCLogf(@"hitTest: %@", NSStringFromClass([hit class]));
         return hit;
@@ -971,22 +974,31 @@ static void EnsureUI(void) {
         CGRect scr = [UIScreen mainScreen].bounds;
         g_win.frame = scr;
 
+        // 给 _UIRootWindow 一个全屏 rootViewController：
+        // 保证窗口的 contentView 真正覆盖全屏，空白区域也能进入 hitTest。
+        g_rootVC = [[UIViewController alloc] init];
+        g_rootVC.view.frame = scr;
+        g_rootVC.view.backgroundColor = [UIColor clearColor];
+        g_rootVC.view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        g_win.rootViewController = g_rootVC;
+
         // 全屏兜底点击层：放在 g_root 下面，g_root 不接管空白区域时由它接。
         g_bgCatcher = [[UIControl alloc] initWithFrame:scr];
         g_bgCatcher.backgroundColor = [UIColor clearColor];
         g_bgCatcher.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         [g_bgCatcher addTarget:[CCUIHelper class] action:@selector(bgCatcherTapped:)
               forControlEvents:UIControlEventTouchUpInside];
-        [g_win addSubview:g_bgCatcher];
+        [g_rootVC.view addSubview:g_bgCatcher];
 
         g_root = [[UIView alloc] initWithFrame:scr];
         g_root.backgroundColor = [UIColor clearColor];
         g_root.userInteractionEnabled = YES;
         g_root.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        [g_win addSubview:g_root];
-        CCLogf(@"ui: windowFrame=%@ rootFrame=%@ catcherFrame=%@",
+        [g_rootVC.view addSubview:g_root];
+        CCLogf(@"ui: windowFrame=%@ rootFrame=%@ catcherFrame=%@ rvcFrame=%@ contentFrame=%@",
                NSStringFromCGRect(g_win.frame), NSStringFromCGRect(g_root.frame),
-               NSStringFromCGRect(g_bgCatcher.frame));
+               NSStringFromCGRect(g_bgCatcher.frame), NSStringFromCGRect(g_rootVC.view.frame),
+               NSStringFromCGRect(g_win.contentView ? g_win.contentView.frame : CGRectZero));
 
         EnsurePanelUI();
         EnsureGrabberUI();
@@ -1035,7 +1047,7 @@ void CCUIBoot(void) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.13.13)");
+        CCLogLine(@"CallCaption UI booted (single window v0.13.14)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

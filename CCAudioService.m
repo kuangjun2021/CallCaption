@@ -112,6 +112,8 @@ static void CCSpeakEnglish(NSString *text) {
     NSString *lastPartialText;
     NSString *lastProvisional;
     CFAbsoluteTime lastTextAt;
+    NSUInteger callGen;          // 通话/采集代际：stop/新采集递增，用于丢弃上一通的结果
+    NSUInteger partialGen;       // 临时翻译代际：只接受最新 partial 的译文
 }
 @property (nonatomic, assign) int tapPID;
 @property (nonatomic, copy) NSString *tag;
@@ -267,6 +269,12 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
     lastFrameChangeAt = CFAbsoluteTimeGetCurrent();
     lastRecogTry = 0;
     lastStatsAt = CFAbsoluteTimeGetCurrent();
+    callGen++;                 // 新采集：旧通话的 final 译文一律丢弃
+    lastText = nil;
+    lastPartialText = nil;
+    lastProvisional = nil;
+    lastPartialAt = 0;
+    lastTextAt = 0;
     [self recogStart];
 
     st = AudioQueueStart(queue, NULL);
@@ -285,6 +293,15 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
     capturing = NO;
     restartPending = NO;
     ttsPaused = NO;
+    // 清空识别/翻译状态：新通话不能复用上一通的 lastPartialText，否则会把旧句反复当新句
+    lastText = nil;
+    lastPartialText = nil;
+    lastProvisional = nil;
+    lastPartialAt = 0;
+    lastTextAt = 0;
+    endAudioSent = NO;
+    callGen++;
+    partialGen++;
     @try {
         // 不调用 [task ：本环境会在 SFLocalSpeechRecognitionClient stopSpeech 触发 SIGBUS
         if (req) { [req endAudio]; req = nil; }
@@ -301,6 +318,11 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
 
 // 暂停识别但保留音频队列（TTS 外放期间，避免把播报回声喂进识别器）
 - (void)pauseRecog {
+    lastPartialText = nil;
+    lastProvisional = nil;
+    lastPartialAt = 0;
+    endAudioSent = NO;
+    partialGen++;
     @try {
         // 不调用 [task ：本环境会在 SFLocalSpeechRecognitionClient stopSpeech 触发 SIGBUS
         if (req) { [req endAudio]; req = nil; }
@@ -336,9 +358,13 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
                 r.requiresOnDeviceRecognition = YES;
         }
         req = r;
-        lastPartialAt = 0;
+        // 关键：新任务必须清掉上一轮的 partial，否则 CheckArm 会立刻把旧句当稳定句，
+        // 触发 endAudio → final → 新任务 → 再旧句的死循环。
+        lastPartialText = nil;
+        lastPartialAt = CFAbsoluteTimeGetCurrent();
         endAudioSent = NO;
         lastProvisional = nil;
+        partialGen++;
         CCLogf(@"%@ recog: task start (auth=%ld avail=%d cloud=%d locale=%@)",
                self.tag, (long)[SFSpeechRecognizer authorizationStatus],
                recog.isAvailable, !CCPrefBool(CC_K_CLOUD_ASR, YES), self.locale);
@@ -357,7 +383,7 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
                        g_stateQ, ^{
             CCChannel *ch = weakSelf;
             if (ch && ch->capturing && ch->task == t) {
-                CCLogf(@"%@: force finalize (8s chunk)", ch.tag);
+                CCLogf(@"%@: force finalize (12s chunk)", ch.tag);
                 [t finish];
             }
         });
@@ -397,10 +423,16 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
                         CCLogf(@"%@: low confidence %.2f, skip: %@", self.tag, conf, txt);
                     }
                 }
+                // final 已经产出：清掉 partial 状态，防止下一次 recogStart 又被旧 partial 触发
+                lastPartialText = nil;
+                lastPartialAt = 0;
+                lastProvisional = nil;
+                endAudioSent = NO;
                 if (capturing && !ttsPaused) [self recogRestart:0.25];
                 return;
             }
-            if (!muted && txt.length > 1 && now - lastPartialAt > 0.7) {
+            if (!muted && txt.length > 1 &&
+                (!lastPartialText || now - lastPartialAt > 0.7)) {
                 BOOL same = lastPartialText && [lastPartialText isEqualToString:txt];
                 if (!same) {
                     lastPartialAt = now;
@@ -434,13 +466,20 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
 - (void)translateProvisional:(NSString *)text {
     if (text.length < 4) return;
     if (lastProvisional && [lastProvisional isEqualToString:text]) return;
+    if (self.expectCJK && !CCPrefBool(CC_K_LOCAL_ENABLED, NO)) return;
+    if (!self.expectCJK && !CCPrefBool(CC_K_REMOTE_ENABLED, YES)) return;
     lastProvisional = text;
+    NSUInteger gen = ++partialGen;
+    NSUInteger cg = callGen;
     __weak CCChannel *weakSelf = self;
-    CCTranslate(text, self.srcLang, self.dstLang, ^(NSString *out) {
+    CCTranslateEx(text, self.srcLang, self.dstLang, ^(NSString *out, NSString *engine) {
         CCChannel *ch = weakSelf;
         if (!ch || out.length == 0) return;
-        NSString *rp = ch.expectCJK ? @"LR|" : @"R|";
-        CCLogf(@"%@ provisional trans: %@", ch.tag, out);
+        if (gen != ch->partialGen || cg != ch->callGen) return;  // 已经有更新的 partial / 通话已切换
+        NSString *ep = ch.expectCJK ? @"LE|" : @"RE|";
+        NSString *rp = ch.expectCJK ? @"LRP|" : @"RP|";
+        if (engine.length) CCTransportSendLine([ep stringByAppendingString:engine]);
+        CCLogf(@"%@ provisional trans[%@]: %@", ch.tag, engine ?: @"?", out);
         CCTransportSendLine([rp stringByAppendingString:out]);
     });
 }
@@ -465,8 +504,10 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
     if (self.expectCJK && !CCPrefBool(CC_K_LOCAL_ENABLED, NO)) return;
     if (!self.expectCJK && !CCPrefBool(CC_K_REMOTE_ENABLED, YES)) return;
 
+    partialGen++;                 // 取消还没回来的 provisional，final 优先
+    NSUInteger cg = callGen;
     __weak CCChannel *weakSelf = self;
-    CCTranslate(t, self.srcLang, self.dstLang, ^(NSString *out) {
+    CCTranslateEx(t, self.srcLang, self.dstLang, ^(NSString *out, NSString *engine) {
         CCChannel *ch = weakSelf;
         if (!ch) return;
         if (out.length == 0) {
@@ -478,8 +519,11 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
             }
             return;
         }
-        CCLogf(@"%@ trans: %@", ch.tag, out);
+        if (cg != ch->callGen) return;   // 通话已结束/切换，丢弃旧译文
+        CCLogf(@"%@ trans[%@]: %@", ch.tag, engine ?: @"?", out);
+        NSString *ep = ch.expectCJK ? @"LE|" : @"RE|";
         NSString *rp = ch.expectCJK ? @"LR|" : @"R|";
+        if (engine.length) CCTransportSendLine([ep stringByAppendingString:engine]);
         CCTransportSendLine([rp stringByAppendingString:out]);
         if (ch.expectCJK) CCSpeakEnglish(out);   // 我方译文：英文外放给对方
     });
@@ -558,11 +602,13 @@ static void CheckArm(void) {
             }
         }
 
-        // 说话停顿检测：partial 1.5 秒没变化就主动 endAudio 收句，尽快拿到 final 去翻译
+        // 说话停顿检测：partial 0.8 秒没变化就主动 endAudio 收句，尽快拿到 final 去翻译
+        // 注意 lastPartialAt > 0：recogStart 刚启动时没有 partial，绝不能把旧 lastPartialText 当稳定句。
         for (CCChannel *ch in chans) {
             if (!ch->capturing || !ch->req || ch->endAudioSent) continue;
             if (ch->lastPartialText.length >= 4 &&
-                now - ch->lastPartialAt > 1.5) {
+                ch->lastPartialAt > 0 &&
+                now - ch->lastPartialAt > 0.8) {
                 ch->endAudioSent = YES;
                 CCLogf(@"%@: stable partial, requesting final", ch.tag);
                 [ch translateProvisional:ch->lastPartialText];
@@ -635,7 +681,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.13.7)");
+        CCLogLine(@"audioservice started (v0.13.8)");
 
         g_stateQ = dispatch_queue_create("net.user.callcaption.audio", DISPATCH_QUEUE_SERIAL);
 

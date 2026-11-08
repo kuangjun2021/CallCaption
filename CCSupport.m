@@ -257,20 +257,44 @@ static void SBDeliverLine(NSString *line) {
     (void)line;   // 守护进程不消费结果行（只生产）
 #else
     CCPrefsReload();   // 设置面板改动后即时生效
+
+    // 防御：同一内容行 1.2 秒内重复到达时丢弃，避免任何识别/翻译异常把字幕计时器无限重置。
+    BOOL content = [line hasPrefix:@"R|"] || [line hasPrefix:@"RP|"] ||
+                   [line hasPrefix:@"I|"] || [line hasPrefix:@"LR|"] ||
+                   [line hasPrefix:@"LRP|"] || [line hasPrefix:@"LI|"];
+    static NSString *lastLine = nil;
+    static CFAbsoluteTime lastLineAt = 0;
+    CFAbsoluteTime nowLine = CFAbsoluteTimeGetCurrent();
+    if (content) {
+        if (lastLine && [lastLine isEqualToString:line] && nowLine - lastLineAt < 1.2) return;
+        lastLine = line;
+        lastLineAt = nowLine;
+    }
+
     NSString *dbg = line.length > 70 ? [line substringToIndex:70] : line;
     CCLogf(@"ui line: %@", dbg);
-    // 行格式： R|<译文>  /  I|<原文>  /  S|<状态>
-    //          LR|<我方英文译文>  /  LI|<我方原文>（双向模式，不再重复 TTS）
-    if ([line hasPrefix:@"LR|"]) {
+    // 行格式： R|<最终译文>  /  RP|<临时译文>  /  I|<原文>  /  S|<状态>
+    //          LR|<我方最终英文译文>  /  LRP|<我方临时译文>  /  LI|<我方原文>
+    //          RE|<对方实际引擎>  /  LE|<我方实际引擎>
+    // 只有最终译文才 TTS；临时译文只更新字幕，避免 partial 阶段反复播报。
+    if ([line hasPrefix:@"LRP|"]) {
+        CCUIDeliverLocalTranslated([line substringFromIndex:4]);
+    } else if ([line hasPrefix:@"LR|"]) {
         CCUIDeliverLocalTranslated([line substringFromIndex:3]);
     } else if ([line hasPrefix:@"LI|"]) {
         CCUIDeliverLocalOriginal([line substringFromIndex:3]);
+    } else if ([line hasPrefix:@"RP|"]) {
+        CCUIDeliverRemoteTranslated([line substringFromIndex:3]);
     } else if ([line hasPrefix:@"R|"]) {
         NSString *t = [line substringFromIndex:2];
         CCUIDeliverRemoteTranslated(t);
         if (CCPrefBool(CC_K_TTS_ENABLED, YES)) CCUISpeakText(t);
     } else if ([line hasPrefix:@"I|"]) {
         CCUIDeliverRemoteOriginal([line substringFromIndex:2]);
+    } else if ([line hasPrefix:@"RE|"]) {
+        CCUIDeliverRemoteEngine([line substringFromIndex:3]);
+    } else if ([line hasPrefix:@"LE|"]) {
+        CCUIDeliverLocalEngine([line substringFromIndex:3]);
     } else if ([line hasPrefix:@"S|"]) {
         CCUIDeliverState([line substringFromIndex:2]);
     }

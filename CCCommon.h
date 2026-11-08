@@ -49,7 +49,10 @@ void CCUIDeliverRemoteOriginal(NSString *text);    // 对方：识别原文
 void CCUIDeliverRemoteTranslated(NSString *text);  // 对方：译文
 void CCUIDeliverLocalOriginal(NSString *text);     // 我方：识别原文
 void CCUIDeliverLocalTranslated(NSString *text);   // 我方：译文
+void CCUIDeliverRemoteEngine(NSString *engine);    // 对方：实际翻译引擎
+void CCUIDeliverLocalEngine(NSString *engine);     // 我方：实际翻译引擎
 void CCUIDeliverState(NSString *state);
+void CCUIClearCaptions(void);                      // 通话开始/结束清空字幕
 // 兼容旧接口
 void CCUIDeliverCaption(NSString *translated);
 void CCUIDeliverOriginal(NSString *original);
@@ -78,6 +81,9 @@ void CCTransportHandleChunk(NSString *suffix); // SB 侧：分片兜底重组
 // ---------- 翻译 ----------
 void CCTranslate(NSString *text, NSString *fromLang, NSString *toLang,
                  void (^done)(NSString *translated));
+// 带实际引擎回报的版本：engine = deepl/google/bing/ai/cache
+void CCTranslateEx(NSString *text, NSString *fromLang, NSString *toLang,
+                   void (^done)(NSString *translated, NSString *engine));
 
 // ---------- 音频抓取 / 识别 / TTS（mediaserverd 侧，旧架构） ----------
 void CCEngineBoot(void);                       // 预分配环缓冲、创建识别器/TTS

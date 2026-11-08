@@ -2,23 +2,43 @@
 #import "CCCommon.h"
 
 static NSMutableDictionary<NSString *, NSString *> *g_cache;
+static NSMutableDictionary<NSString *, NSString *> *g_cacheEng;
+static NSMutableArray<NSString *> *g_cacheOrder;
 static dispatch_queue_t g_netQ;
 
 static void CacheInit(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         g_cache = [NSMutableDictionary dictionary];
+        g_cacheEng = [NSMutableDictionary dictionary];
+        g_cacheOrder = [NSMutableArray array];
         g_netQ = dispatch_queue_create("net.user.callcaption.translator", DISPATCH_QUEUE_SERIAL);
     });
+}
+
+static NSString *CacheKey(NSString *text, NSString *from, NSString *to) {
+    return [NSString stringWithFormat:@"%@|%@|%@",
+            [from lowercaseString] ?: @"auto", [to lowercaseString] ?: @"zh", text];
 }
 
 static NSString *CacheGet(NSString *k) {
     return [g_cache objectForKey:k];
 }
 
-static void CachePut(NSString *k, NSString *v) {
-    if (g_cache.count > 500) [g_cache removeAllObjects]; // 简单上限，防膨胀
-    [g_cache setObject:v forKey:k];
+static NSString *CacheGetEngine(NSString *k) {
+    return [g_cacheEng objectForKey:k];
+}
+
+static void CachePut(NSString *k, NSString *v, NSString *engine) {
+    if (!k.length || !v.length) return;
+    if (!g_cache[k]) [g_cacheOrder addObject:k];
+    while (g_cacheOrder.count > 300) {          // 小 LRU，防膨胀
+        NSString *old = g_cacheOrder.firstObject;
+        [g_cacheOrder removeObjectAtIndex:0];
+        if (old) { [g_cache removeObjectForKey:old]; [g_cacheEng removeObjectForKey:old]; }
+    }
+    g_cache[k] = v;
+    if (engine.length) g_cacheEng[k] = engine;
 }
 
 // ---------- 语言名映射（AI 提示词用） ----------
@@ -48,7 +68,7 @@ static void TranslateDeepL(NSString *text, NSString *from, NSString *to,
     req.HTTPMethod = @"POST";
     [req setValue:@"application/x-www-form-urlencoded" forHTTPHeaderField:@"Content-Type"];
     req.HTTPBody = [body dataUsingEncoding:NSUTF8StringEncoding];
-    req.timeoutInterval = 15;
+    req.timeoutInterval = 3.0;
 
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req
         completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
@@ -92,7 +112,7 @@ static void TranslateAI(NSString *text, NSString *from, NSString *to,
     req.HTTPMethod = @"POST";
     [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     if (key.length) [req setValue:[NSString stringWithFormat:@"Bearer %@", key] forHTTPHeaderField:@"Authorization"];
-    req.timeoutInterval = 25;
+    req.timeoutInterval = 4.0;
 
     NSString *sys = [NSString stringWithFormat:
         @"You are a real-time spoken interpreter. Translate the user's message from %@ to %@. "
@@ -155,7 +175,7 @@ static void TranslateGoogleFree(NSString *text, NSString *from, NSString *to,
         return;
     }
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
-    req.timeoutInterval = 15;
+    req.timeoutInterval = 3.0;
 
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req
         completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
@@ -217,7 +237,7 @@ static void TranslateGoogleCloud(NSString *text, NSString *from, NSString *to, N
     if (![[from lowercaseString] isEqualToString:@"auto"])
         [body appendFormat:@"&source=%@", [from lowercaseString]];
     req.HTTPBody = [body dataUsingEncoding:NSUTF8StringEncoding];
-    req.timeoutInterval = 15;
+    req.timeoutInterval = 3.0;
 
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req
         completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
@@ -298,7 +318,7 @@ static void TranslateBing(NSString *text, NSString *from, NSString *to,
         [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
         req.HTTPBody = [NSJSONSerialization dataWithJSONObject:@[@{@"Text": text}]
                                                        options:0 error:nil];
-        req.timeoutInterval = 15;
+        req.timeoutInterval = 3.0;
 
         [[[NSURLSession sharedSession] dataTaskWithRequest:req
             completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
@@ -334,7 +354,7 @@ static void TranslateBing(NSString *text, NSString *from, NSString *to,
     }
     NSMutableURLRequest *treq = [NSMutableURLRequest requestWithURL:
         [NSURL URLWithString:@"https://edge.microsoft.com/translate/auth"]];
-    treq.timeoutInterval = 6;
+    treq.timeoutInterval = 2.5;
     [[[NSURLSession sharedSession] dataTaskWithRequest:treq
         completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
             @try {
@@ -361,16 +381,17 @@ static void TranslateBing(NSString *text, NSString *from, NSString *to,
 
 static void CCTranslateTry(NSArray<NSString *> *order, NSUInteger idx,
                            NSString *text, NSString *fromLang, NSString *toLang,
-                           void (^done)(NSString *translated)) {
+                           void (^done)(NSString *translated, NSString *engine)) {
     if (idx >= order.count) {
-        dispatch_async(dispatch_get_main_queue(), ^{ done(nil); });
+        dispatch_async(dispatch_get_main_queue(), ^{ if (done) done(nil, nil); });
         return;
     }
     NSString *eng = order[idx];
     void (^cb)(NSString *, NSError *) = ^(NSString *r, NSError *e) {
         if (r.length) {
-            CachePut(text, r);
-            dispatch_async(dispatch_get_main_queue(), ^{ done(r); });
+            CachePut(CacheKey(text, fromLang, toLang), r, eng);
+            CCLogf(@"translate[%@] ok", eng);
+            dispatch_async(dispatch_get_main_queue(), ^{ if (done) done(r, eng); });
             return;
         }
         if (e) CCLogf(@"translate[%@] failed: %@", eng, e.localizedDescription);
@@ -382,14 +403,19 @@ static void CCTranslateTry(NSArray<NSString *> *order, NSUInteger idx,
     else TranslateGoogle(text, fromLang, toLang, cb);
 }
 
-void CCTranslate(NSString *text, NSString *fromLang, NSString *toLang,
-                 void (^done)(NSString *translated)) {
+void CCTranslateEx(NSString *text, NSString *fromLang, NSString *toLang,
+                   void (^done)(NSString *translated, NSString *engine)) {
     CacheInit();
-    if (text.length == 0) { done(nil); return; }
+    if (text.length == 0) { if (done) done(nil, nil); return; }
 
     dispatch_async(g_netQ, ^{
-        NSString *cached = CacheGet(text);
-        if (cached) { done(cached); return; }
+        NSString *key = CacheKey(text, fromLang, toLang);
+        NSString *cached = CacheGet(key);
+        if (cached) {
+            NSString *eng = CacheGetEngine(key) ?: @"cache";
+            dispatch_async(dispatch_get_main_queue(), ^{ if (done) done(cached, eng); });
+            return;
+        }
 
         NSString *engine = CCPrefStr(CC_K_ENGINE, @"auto").lowercaseString;
         NSString *dk = CCPrefStr(CC_K_DEEPL_KEY, @"");
@@ -428,5 +454,12 @@ void CCTranslate(NSString *text, NSString *fromLang, NSString *toLang,
         }
 
         CCTranslateTry(order, 0, text, fromLang, toLang, done);
+    });
+}
+
+void CCTranslate(NSString *text, NSString *fromLang, NSString *toLang,
+                 void (^done)(NSString *translated)) {
+    CCTranslateEx(text, fromLang, toLang, ^(NSString *out, NSString *engine) {
+        if (done) done(out);
     });
 }

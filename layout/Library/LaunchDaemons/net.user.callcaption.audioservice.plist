@@ -17,6 +17,6 @@
 	<key>ThrottleInterval</key>
 	<integer>5</integer>
 	<key>UserName</key>
-	<string>root</string>
+	<string>mobile</string>
 </dict>
 </plist>

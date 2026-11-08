@@ -47,5 +47,19 @@
 	<true/>
 	<key>com.apple.assistant.dictation.prerecorded</key>
 	<true/>
+
+	<!-- LCT 的 livecallhelper 里有、我们之前缺的（它用这些跑 SFSpeech/TTS/翻译） -->
+	<key>com.apple.developer.siri</key>
+	<true/>
+	<key>com.apple.assistant.settings</key>
+	<true/>
+	<key>com.apple.private.translation</key>
+	<true/>
+	<key>com.apple.private.tcc.manager</key>
+	<true/>
+	<key>com.apple.siri.VoiceShortcuts.xpc</key>
+	<true/>
+	<key>com.apple.siriknowledged</key>
+	<true/>
 </dict>
 </plist>

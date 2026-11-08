@@ -411,7 +411,7 @@ void CCTranslate(NSString *text, NSString *fromLang, NSString *toLang,
             [order addObject:@"google"];
             if (bingReady) [order addObject:@"bing"];
         } else if ([engine isEqualToString:@"bing"]) {
-            if (bingReady) [order addObject:@"bing"];
+            [order addObject:@"bing"];   // 用户明确选择：永远排第一
             [order addObject:@"google"];
             if (dk.length) [order addObject:@"deepl"];
             if (aiReady) [order addObject:@"ai"];

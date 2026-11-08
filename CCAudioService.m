@@ -127,6 +127,7 @@ static void CCSpeakEnglish(NSString *text) {
 - (void)recogRestart:(double)delay;
 - (void)handleResult:(SFSpeechRecognitionResult *)result error:(NSError *)error;
 - (void)deliverFinal:(NSString *)text;
+- (void)translateProvisional:(NSString *)text;
 @end
 
 static CCChannel *g_remote;
@@ -428,6 +429,18 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
     } @catch (NSException *e) { }
 }
 
+- (void)translateProvisional:(NSString *)text {
+    if (text.length < 4) return;
+    __weak CCChannel *weakSelf = self;
+    CCTranslate(text, self.srcLang, self.dstLang, ^(NSString *out) {
+        CCChannel *ch = weakSelf;
+        if (!ch || out.length == 0) return;
+        NSString *rp = ch.expectCJK ? @"LR|" : @"R|";
+        CCLogf(@"%@ provisional trans: %@", ch.tag, out);
+        CCTransportSendLine([rp stringByAppendingString:out]);
+    });
+}
+
 - (void)deliverFinal:(NSString *)text {
     NSString *t = CCTrim(text);
     if (t.length < 2) return;
@@ -548,6 +561,7 @@ static void CheckArm(void) {
                 now - ch->lastPartialAt > 1.5) {
                 ch->endAudioSent = YES;
                 CCLogf(@"%@: stable partial, requesting final", ch.tag);
+                [ch translateProvisional:ch->lastPartialText];
                 [ch->req endAudio];
             }
         }
@@ -617,7 +631,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.13.3)");
+        CCLogLine(@"audioservice started (v0.13.4)");
 
         g_stateQ = dispatch_queue_create("net.user.callcaption.audio", DISPATCH_QUEUE_SERIAL);
 

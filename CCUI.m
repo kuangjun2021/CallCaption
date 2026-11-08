@@ -12,15 +12,10 @@ static id g_callWatcher;
 static BOOL g_callActive;
 static BOOL g_panelExpanded;
 
-static UIWindow *g_origWin;
-static UILabel *g_origTitle;
-static UILabel *g_origText;
-static NSTimer *g_origHide;
-
-static UIWindow *g_transWin;
-static UILabel *g_transTitle;
-static UILabel *g_transText;
-static NSTimer *g_transHide;
+static UIWindow *g_remoteWin;
+static NSTimer *g_remoteHide;
+static UIWindow *g_localWin;
+static NSTimer *g_localHide;
 
 static BOOL g_sessionActive;
 static BOOL g_uiReady;
@@ -251,12 +246,12 @@ static void EnsureMiniUI(void) {
     } @catch (NSException *e) { }
 }
 
-// ---------- 双字幕框 ----------
+// ---------- 双字幕框（LCT 风格：Remote / Local 各一框） ----------
 
-static UIWindow *MakeBox(NSString *titleText, UIColor *titleColor) {
+static UIWindow *MakeLCTBox(NSString *recogHeader) {
     CGFloat w = CardWidth();
     UIWindow *win = [[UIWindow alloc] initWithFrame:
-        CGRectMake((ScreenW() - w) / 2.0, ScreenH() - 420, w, 10)];
+        CGRectMake((ScreenW() - w) / 2.0, ScreenH() - 520, w, 10)];
     win.windowLevel = UIWindowLevelStatusBar + 101;
     win.backgroundColor = [UIColor clearColor];
 
@@ -266,33 +261,58 @@ static UIWindow *MakeBox(NSString *titleText, UIColor *titleColor) {
     blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     blur.layer.cornerRadius = 18;
     blur.layer.masksToBounds = YES;
+    blur.layer.borderWidth = 0.8;
+    blur.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.18].CGColor;
     [win addSubview:blur];
 
     UIView *ov = [[UIView alloc] initWithFrame:blur.bounds];
-    ov.backgroundColor = [UIColor colorWithWhite:0 alpha:0.16];
+    ov.backgroundColor = [UIColor colorWithWhite:0 alpha:0.30];
     ov.userInteractionEnabled = NO;
     ov.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [blur.contentView addSubview:ov];
-    blur.layer.borderWidth = 0.8;
-    blur.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.20].CGColor;
+
+    UILabel *h = [[UILabel alloc] initWithFrame:CGRectZero];
+    h.tag = 1001;
+    h.text = recogHeader;
+    h.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    h.textColor = BlueTitle();
+    h.textAlignment = NSTextAlignmentCenter;
+    [blur.contentView addSubview:h];
+
+    UILabel *r = [[UILabel alloc] initWithFrame:CGRectZero];
+    r.tag = 1002;
+    r.font = [UIFont systemFontOfSize:15];
+    r.textColor = [UIColor colorWithWhite:1 alpha:0.96];
+    r.numberOfLines = 0;
+    [blur.contentView addSubview:r];
+
+    UILabel *sh = [[UILabel alloc] initWithFrame:CGRectZero];
+    sh.tag = 1003;
+    sh.text = @"Did speak:";
+    sh.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    sh.textColor = GreenTitle();
+    sh.textAlignment = NSTextAlignmentCenter;
+    [blur.contentView addSubview:sh];
 
     UILabel *t = [[UILabel alloc] initWithFrame:CGRectZero];
-    t.tag = 1001;
-    t.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
-    t.textColor = titleColor;
-    t.text = titleText;
+    t.tag = 1004;
+    t.font = [UIFont systemFontOfSize:18 weight:UIFontWeightSemibold];
+    t.textColor = [UIColor colorWithRed:1.0 green:0.86 blue:0.38 alpha:1.0];
+    t.numberOfLines = 0;
     [blur.contentView addSubview:t];
 
-    UILabel *x = [[UILabel alloc] initWithFrame:CGRectZero];
-    x.tag = 1002;
-    x.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
-    x.textColor = [UIColor colorWithWhite:1 alpha:0.95];
-    x.numberOfLines = 0;
-    [blur.contentView addSubview:x];
+    UILabel *c = [[UILabel alloc] initWithFrame:CGRectZero];
+    c.tag = 1005;
+    c.text = @"Translated by Google";
+    c.font = [UIFont systemFontOfSize:11];
+    c.textColor = [UIColor colorWithWhite:1 alpha:0.55];
+    c.textAlignment = NSTextAlignmentRight;
+    [blur.contentView addSubview:c];
 
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
         initWithTarget:[CCUIHelper class] action:@selector(handleBoxPan:)];
     [blur addGestureRecognizer:pan];
+
     AttachScene(win);
     win.hidden = YES;
     return win;
@@ -301,94 +321,103 @@ static UIWindow *MakeBox(NSString *titleText, UIColor *titleColor) {
 static void EnsureCaptionUI(void) {
     if (g_captionBuilt) return;
     @try {
-        g_origWin = MakeBox(@"Recognized", BlueTitle());
-        g_origTitle = (UILabel *)[g_origWin viewWithTag:1001];
-        g_origText = (UILabel *)[g_origWin viewWithTag:1002];
-        NSNumber *ox = CCPref(@"OrigX"), *oy = CCPref(@"OrigY");
-        if ([ox isKindOfClass:[NSNumber class]] && [oy isKindOfClass:[NSNumber class]]) {
-            g_origWin.center = CGPointMake([ox floatValue], [oy floatValue]);
+        g_remoteWin = MakeLCTBox(@"Recognized Remote:");
+        NSNumber *rx = CCPref(@"RemoteBoxX"), *ry = CCPref(@"RemoteBoxY");
+        if ([rx isKindOfClass:[NSNumber class]] && [ry isKindOfClass:[NSNumber class]]) {
+            g_remoteWin.center = CGPointMake([rx floatValue], [ry floatValue]);
         } else {
-            g_origWin.center = CGPointMake(ScreenW() / 2.0, ScreenH() - 470);
+            g_remoteWin.center = CGPointMake(ScreenW() / 2.0, ScreenH() - 520);
         }
 
-        g_transWin = MakeBox(@"Translated", GreenTitle());
-        g_transTitle = (UILabel *)[g_transWin viewWithTag:1001];
-        g_transText = (UILabel *)[g_transWin viewWithTag:1002];
-        NSNumber *tx = CCPref(CC_K_CAPTION_X), *ty = CCPref(CC_K_CAPTION_Y);
-        if ([tx isKindOfClass:[NSNumber class]] && [ty isKindOfClass:[NSNumber class]]) {
-            g_transWin.center = CGPointMake([tx floatValue], [ty floatValue]);
+        g_localWin = MakeLCTBox(@"Recognized Local:");
+        NSNumber *lx = CCPref(@"LocalBoxX"), *ly = CCPref(@"LocalBoxY");
+        if ([lx isKindOfClass:[NSNumber class]] && [ly isKindOfClass:[NSNumber class]]) {
+            g_localWin.center = CGPointMake([lx floatValue], [ly floatValue]);
         } else {
-            g_transWin.center = CGPointMake(ScreenW() / 2.0, ScreenH() - 360);
+            g_localWin.center = CGPointMake(ScreenW() / 2.0, ScreenH() - 340);
         }
         g_captionBuilt = YES;
     } @catch (NSException *e) { }
 }
 
-static void LayoutBox(UIWindow *win, UILabel *title, UILabel *text,
-                      NSString *content, BOOL visible) {
+static void LayoutLCTBox(UIWindow *win, NSString *recog, NSString *trans,
+                         BOOL showRecog, BOOL showTrans) {
     if (!win) return;
-    if (!visible || content.length == 0) { win.hidden = YES; return; }
+    UILabel *h = (UILabel *)[win viewWithTag:1001];
+    UILabel *r = (UILabel *)[win viewWithTag:1002];
+    UILabel *sh = (UILabel *)[win viewWithTag:1003];
+    UILabel *t = (UILabel *)[win viewWithTag:1004];
+    UILabel *c = (UILabel *)[win viewWithTag:1005];
     CGFloat w = win.bounds.size.width;
     CGFloat pad = 16.0;
-    CGFloat contentW = w - pad * 2.0;
-    text.text = content;
-    CGFloat th = TextHeight(content, text.font, contentW);
-    title.frame = CGRectMake(pad, 14, contentW, 14);
-    text.frame = CGRectMake(pad, 32, contentW, th);
-    CGFloat h = 32 + th + 14;
+    CGFloat cw = w - pad * 2.0;
+    CGFloat y = 14.0;
+    BOOL any = NO;
+
+    if (showRecog && recog.length) {
+        any = YES;
+        h.hidden = NO; r.hidden = NO;
+        h.frame = CGRectMake(0, y, w, 16); y += 20.0;
+        r.font = [UIFont systemFontOfSize:15];
+        CGFloat hh = TextHeight(recog, r.font, cw);
+        r.frame = CGRectMake(pad, y, cw, hh); y += hh + 12.0;
+    } else {
+        h.hidden = YES; r.hidden = YES;
+    }
+
+    if (showTrans && trans.length) {
+        any = YES;
+        sh.hidden = NO; t.hidden = NO; c.hidden = NO;
+        sh.frame = CGRectMake(0, y, w, 16); y += 20.0;
+        t.font = [UIFont systemFontOfSize:18 weight:UIFontWeightSemibold];
+        CGFloat hh = TextHeight(trans, t.font, cw);
+        t.frame = CGRectMake(pad, y, cw, hh); y += hh + 14.0;
+        c.frame = CGRectMake(pad, y, cw, 14); y += 18.0;
+    } else {
+        sh.hidden = YES; t.hidden = YES; c.hidden = YES;
+    }
+
+    if (!any) { win.hidden = YES; return; }
     CGRect f = win.frame;
-    CGPoint c = win.center;
-    f.size.height = h;
+    CGPoint cen = win.center;
+    f.size.height = y;
     win.frame = f;
-    win.center = c;
+    win.center = cen;
+    UIVisualEffectView *blur = (UIVisualEffectView *)win.subviews.firstObject;
+    blur.frame = win.bounds;
     win.hidden = NO;
     win.alpha = 1.0;
 }
 
-static void ResetOrigTimer(void) {
-    [g_origHide invalidate];
-    g_origHide = [NSTimer timerWithTimeInterval:8.0 target:[CCUIHelper class]
-                                        selector:@selector(hideCaption)
-                                        userInfo:nil repeats:NO];
-    [[NSRunLoop mainRunLoop] addTimer:g_origHide forMode:NSRunLoopCommonModes];
+static void ResetRemoteTimer(void) {
+    [g_remoteHide invalidate];
+    g_remoteHide = [NSTimer timerWithTimeInterval:8.0 target:[CCUIHelper class]
+                                          selector:@selector(hideCaption)
+                                          userInfo:nil repeats:NO];
+    [[NSRunLoop mainRunLoop] addTimer:g_remoteHide forMode:NSRunLoopCommonModes];
 }
-
-static void ResetTransTimer(void) {
-    [g_transHide invalidate];
-    g_transHide = [NSTimer timerWithTimeInterval:8.0 target:[CCUIHelper class]
+static void ResetLocalTimer(void) {
+    [g_localHide invalidate];
+    g_localHide = [NSTimer timerWithTimeInterval:8.0 target:[CCUIHelper class]
                                          selector:@selector(hideCaption)
                                          userInfo:nil repeats:NO];
-    [[NSRunLoop mainRunLoop] addTimer:g_transHide forMode:NSRunLoopCommonModes];
+    [[NSRunLoop mainRunLoop] addTimer:g_localHide forMode:NSRunLoopCommonModes];
 }
 
 static void RefreshBoxes(void) {
     if (!g_captionBuilt) return;
     BOOL showR = CCPrefBool(CC_K_SHOW_RECOGNIZED, YES);
     BOOL showT = CCPrefBool(CC_K_SHOW_TRANSLATED, YES);
+    BOOL remoteOn = CCPrefBool(CC_K_REMOTE_ENABLED, YES);
     BOOL localOn = CCPrefBool(CC_K_LOCAL_ENABLED, NO);
-    BOOL large = CCPrefBool(CC_K_LARGE_CAPTIONS, NO);
 
-    g_origText.font = [UIFont systemFontOfSize:(large ? 18 : 15) weight:UIFontWeightRegular];
-    g_transText.font = [UIFont systemFontOfSize:(large ? 21 : 18) weight:UIFontWeightSemibold];
+    LayoutLCTBox(g_remoteWin, g_texts[0], g_texts[1], showR, showT);
+    if (!remoteOn) g_remoteWin.hidden = YES;
+    LayoutLCTBox(g_localWin, g_texts[2], g_texts[3], showR, showT);
+    if (!localOn) g_localWin.hidden = YES;
 
-    NSMutableString *orig = [NSMutableString string];
-    if (g_texts[0].length) [orig appendString:g_texts[0]];
-    if (localOn && g_texts[2].length) {
-        if (orig.length) [orig appendString:@"\n"];
-        [orig appendFormat:@"我：%@", g_texts[2]];
-    }
-    NSMutableString *trans = [NSMutableString string];
-    if (g_texts[1].length) [trans appendString:g_texts[1]];
-    if (localOn && g_texts[3].length) {
-        if (trans.length) [trans appendString:@"\n"];
-        [trans appendFormat:@"我→EN：%@", g_texts[3]];
-    }
-
-    LayoutBox(g_origWin, g_origTitle, g_origText, orig, showR);
-    LayoutBox(g_transWin, g_transTitle, g_transText, trans, showT);
-
-    if (!g_origWin.hidden) ResetOrigTimer();
-    if (!g_transWin.hidden) ResetTransTimer();
+    if (!g_remoteWin.hidden) ResetRemoteTimer();
+    if (!g_localWin.hidden) ResetLocalTimer();
 }
 
 // ---------- 交付 ----------
@@ -421,13 +450,13 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
 
 + (void)hideCaption {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (g_origWin && g_origWin.hidden == NO) {
-            [UIView animateWithDuration:0.4 animations:^{ g_origWin.alpha = 0; }
-                             completion:^(BOOL f) { if (f) g_origWin.hidden = YES; }];
-        }
-        if (g_transWin && g_transWin.hidden == NO) {
-            [UIView animateWithDuration:0.4 animations:^{ g_transWin.alpha = 0; }
-                             completion:^(BOOL f) { if (f) g_transWin.hidden = YES; }];
+        NSArray *wins = @[g_remoteWin ?: [NSNull null], g_localWin ?: [NSNull null]];
+        for (id obj in wins) {
+            if (![obj isKindOfClass:[UIWindow class]]) continue;
+            UIWindow *w = (UIWindow *)obj;
+            if (w.hidden) continue;
+            [UIView animateWithDuration:0.4 animations:^{ w.alpha = 0; }
+                             completion:^(BOOL f) { if (f) w.hidden = YES; }];
         }
     });
 }
@@ -567,8 +596,8 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
     win.center = c;
     [p setTranslation:CGPointZero inView:nil];
     if (p.state == UIGestureRecognizerStateEnded) {
-        if (win == g_origWin) SavePos(@"OrigX", @"OrigY", c);
-        else SavePos(CC_K_CAPTION_X, CC_K_CAPTION_Y, c);
+        if (win == g_remoteWin) SavePos(@"RemoteBoxX", @"RemoteBoxY", c);
+        else SavePos(@"LocalBoxX", @"LocalBoxY", c);
     }
 }
 

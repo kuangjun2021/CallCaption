@@ -353,6 +353,8 @@
 		<string>PSLinkListCell</string>
 		<key>default</key>
 		<integer>30</integer>
+		<key>defaults</key>
+		<string>net.user.callcaption</string>
 		<key>key</key>
 		<string>RemoteOriginalVolume</string>
 		<key>label</key>
@@ -381,6 +383,8 @@
 		<string>PSLinkListCell</string>
 		<key>default</key>
 		<integer>30</integer>
+		<key>defaults</key>
+		<string>net.user.callcaption</string>
 		<key>key</key>
 		<string>LocalOriginalVolume</string>
 		<key>label</key>

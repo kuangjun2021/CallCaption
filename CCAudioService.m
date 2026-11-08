@@ -393,16 +393,9 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
             }];
         task = t;
 
-        // 连续说话时每 30 秒强制收一段。12 秒太短，会把长句切断；
-        // 正常停顿由 0.8 秒 stable partial 负责收句。
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)30 * NSEC_PER_SEC),
-                       g_stateQ, ^{
-            CCChannel *ch = weakSelf;
-            if (ch && ch->capturing && ch->task == t) {
-                CCLogf(@"%@: force finalize (30s safety chunk)", ch.tag);
-                [t finish];
-            }
-        });
+        // 不做任何“按时间强制切句”。说话长短、停顿、重复都由用户决定；
+        // 只有检测到自然停顿（stable partial）才 endAudio 收句。
+        // 如果 SFSpeech 自己因为超时/错误结束，handleResult 会重建 task。
     } @catch (NSException *e) {
         CCLogf(@"%@: recog exc %@", self.tag, e.reason);
         [self recogRestart:2.0];
@@ -625,13 +618,14 @@ static void CheckArm(void) {
             }
         }
 
-        // 说话停顿检测：partial 0.8 秒没变化就主动 endAudio 收句，尽快拿到 final 去翻译
+        // 自然停顿检测：partial 2 秒没变化才收句。
+        // 0.8 秒太短，会把“思考一下再说”切断；2 秒更接近 LCT/Siri 的 endpointing。
         // 注意 lastPartialAt > 0：recogStart 刚启动时没有 partial，绝不能把旧 lastPartialText 当稳定句。
         for (CCChannel *ch in chans) {
             if (!ch->capturing || !ch->req || ch->endAudioSent) continue;
             if (ch->lastPartialText.length >= 4 &&
                 ch->lastPartialAt > 0 &&
-                now - ch->lastPartialAt > 0.8) {
+                now - ch->lastPartialAt > 2.0) {
                 ch->endAudioSent = YES;
                 CCLogf(@"%@: stable partial, requesting final", ch.tag);
                 [ch translateProvisional:ch->lastPartialText];
@@ -732,7 +726,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.13.12)");
+        CCLogLine(@"audioservice started (v0.13.13)");
         {
             NSString *dk = CCPrefStr(CC_K_DEEPL_KEY, @"");
             CCLogf(@"prefs boot: engine=%@ deeplKeyLen=%lu remote=%d local=%d",

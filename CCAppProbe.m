@@ -21,6 +21,8 @@
 #import <dlfcn.h>
 #import <stdatomic.h>
 
+static void CCMixZhDownlink(AudioBufferList *ioData, UInt32 frames, UInt32 bpf);
+
 typedef void (*CCMSHookFunction)(void *symbol, void *hook, void **old);
 static CCMSHookFunction g_MSHook = NULL;
 static os_log_t g_oslog = NULL;
@@ -205,7 +207,13 @@ static OSStatus CCWrappedRender(void *refCon, AudioUnitRenderActionFlags *flags,
     CCCB *c = (CCCB *)refCon;
     OSStatus st = (c && c->proc)
         ? c->proc(c->refcon, flags, ts, bus, frames, ioData) : -1;
-    if (st == noErr) CCRecordCB(c, ioData, frames);
+    if (st == noErr) {
+        CCRecordCB(c, ioData, frames);
+        if (ioData && frames && ioData->mNumberBuffers > 0) {
+            UInt32 bpf = ioData->mBuffers[0].mDataByteSize / frames;
+            CCMixZhDownlink(ioData, frames, bpf);
+        }
+    }
     return st;
 }
 
@@ -366,6 +374,17 @@ static uint32_t g_ttsCap;
 static _Atomic(uint32_t) g_ttsHead, g_ttsTail;
 static NSTimeInterval g_ttsMtime;
 
+// 中文 TTS：混进“对方声音”的下行（用户听到中文，原音按设置压低）
+static float *g_ttsZhRing;
+static uint32_t g_ttsZhCap;
+static _Atomic(uint32_t) g_ttsZhHead, g_ttsZhTail;
+static NSTimeInterval g_ttsZhMtime;
+
+// 原音音量：0.0~1.0（0 = TTS 播放时原音静音）
+static double g_duckRemote = 0.30;
+static double g_duckLocal = 0.30;
+static NSTimeInterval g_cfgMtime;
+
 static void CCLoadTTSIfNeeded(void) {
     @try {
         NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
@@ -399,6 +418,81 @@ static void CCLoadTTSIfNeeded(void) {
     } @catch (NSException *e) { }
 }
 
+static void CCLoadZhTTSIfNeeded(void) {
+    @try {
+        NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                              NSUserDomainMask, YES) firstObject];
+        if (!docs.length) return;
+        NSString *p = [docs stringByAppendingPathComponent:@"cc_tts_zh.wav"];
+        NSDictionary *at = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:nil];
+        if (!at) return;
+        NSTimeInterval mt = [at[NSFileModificationDate] timeIntervalSince1970];
+        if (mt <= g_ttsZhMtime) return;
+        g_ttsZhMtime = mt;
+        NSData *d = [NSData dataWithContentsOfFile:p];
+        if (d.length <= 44) return;
+        if (!g_ttsZhRing) {
+            g_ttsZhCap = 48000 * 30;
+            g_ttsZhRing = calloc(g_ttsZhCap, sizeof(float));
+        }
+        if (!g_ttsZhRing) return;
+        const int16_t *src = (const int16_t *)((const uint8_t *)d.bytes + 44);
+        NSUInteger n = (d.length - 44) / 2;
+        uint32_t head = atomic_load(&g_ttsZhHead);
+        uint32_t tail = atomic_load(&g_ttsZhTail);
+        uint32_t space = g_ttsZhCap - (head - tail);
+        if (n > space) n = space;
+        for (NSUInteger i = 0; i < n; i++) {
+            g_ttsZhRing[head % g_ttsZhCap] = (float)src[i] / 32768.0f;
+            head++;
+        }
+        atomic_store(&g_ttsZhHead, head);
+        CCAppLog(@"tts zh loaded %lu samples", (unsigned long)n);
+    } @catch (NSException *e) { }
+}
+
+static void CCLoadConfigIfNeeded(void) {
+    @try {
+        NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                              NSUserDomainMask, YES) firstObject];
+        if (!docs.length) return;
+        NSString *p = [docs stringByAppendingPathComponent:@"cc_cfg.txt"];
+        NSDictionary *at = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:nil];
+        if (!at) return;
+        NSTimeInterval mt = [at[NSFileModificationDate] timeIntervalSince1970];
+        if (mt <= g_cfgMtime) return;
+        g_cfgMtime = mt;
+        NSString *txt = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil];
+        for (NSString *line in [txt componentsSeparatedByString:@"\n"]) {
+            NSArray *kv = [line componentsSeparatedByString:@"="];
+            if (kv.count != 2) continue;
+            double v = [kv[1] doubleValue];
+            if (v < 0) v = 0;
+            if (v > 1) v = 1;
+            if ([kv[0] isEqualToString:@"remote"]) g_duckRemote = v;
+            if ([kv[0] isEqualToString:@"local"]) g_duckLocal = v;
+        }
+        CCAppLog(@"cfg remote=%.2f local=%.2f", g_duckRemote, g_duckLocal);
+    } @catch (NSException *e) { }
+}
+
+static void CCMixZhDownlink(AudioBufferList *ioData, UInt32 frames, UInt32 bpf) {
+    if (!g_ttsZhRing || !ioData || frames == 0 || bpf != 4) return;
+    uint32_t head = atomic_load(&g_ttsZhHead);
+    uint32_t tail = atomic_load(&g_ttsZhTail);
+    if (head == tail) return;
+    float *f = (float *)ioData->mBuffers[0].mData;
+    if (!f) return;
+    UInt32 n = MIN(frames, ioData->mBuffers[0].mDataByteSize / 4);
+    for (UInt32 i = 0; i < n; i++) {
+        if (tail == head) break;
+        float t = g_ttsZhRing[tail % g_ttsZhCap];
+        f[i] = f[i] * (float)g_duckRemote + t;
+        tail++;
+    }
+    atomic_store(&g_ttsZhTail, tail);
+}
+
 static void CCMaybeMixUplink(AudioBufferList *ioData, UInt32 frames) {
     if (!g_ttsRing || !ioData || !frames) return;
     AudioBuffer *b = &ioData->mBuffers[0];
@@ -415,7 +509,7 @@ static void CCMaybeMixUplink(AudioBufferList *ioData, UInt32 frames) {
     UInt32 m = MIN(n, avail);
     for (UInt32 i = 0; i < m; i++) {
         float t = g_ttsRing[tail % g_ttsCap];
-        f[i] = f[i] * 0.35f + t * 0.95f;   // 压低原声，混入英文 TTS
+        f[i] = f[i] * (float)g_duckLocal + t;   // 原声按设置压低，混入英文 TTS
         tail++;
     }
     atomic_store(&g_ttsTail, tail);
@@ -447,6 +541,8 @@ static OSStatus CCHookedRender(AudioUnit unit, AudioUnitRenderActionFlags *flags
 // ---------- 后台汇报 ----------
 static void CCReport(void) {
     CCLoadTTSIfNeeded();
+    CCLoadZhTTSIfNeeded();
+    CCLoadConfigIfNeeded();
     int cbCount = atomic_load(&g_cbCount);
     for (int i = 0; i < cbCount; i++) {
         CCCB *c = g_cbs[i];

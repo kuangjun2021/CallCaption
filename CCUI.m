@@ -13,6 +13,8 @@
 #import <sys/stat.h>
 #import <stdio.h>
 
+static void CCTTSBuffer(NSString *text, NSString *lang, NSString *fileName);
+
 #pragma mark - 私有窗口类
 
 // iOS 16 SpringBoard 里真实存在；LCT 就是 _UIRootWindow 子类。
@@ -1151,7 +1153,8 @@ static void CCSBDeliverChunk(NSString *txt) {
             if (!out.length) return;
             CCUIDeliverRemoteTranslated(out);
             if (engine.length) CCUIDeliverRemoteEngine(engine);
-            if (CCPrefBool(CC_K_TTS_ENABLED, YES)) CCUISpeakText(out);
+            if (CCPrefBool(CC_K_TTS_ENABLED, YES))
+                CCTTSBuffer(out, @"zh-CN", @"cc_tts_zh.wav");
         });
     } @catch (NSException *e) { }
 }
@@ -1169,7 +1172,11 @@ static void CCRemoteFileTick(void) {
         unsigned long long size = [at[NSFileSize] unsignedLongLongValue];
         if (size <= 44) return;
         if (!g_sbPath || ![g_sbPath isEqualToString:p] || size < g_sbOffset) {
-            g_sbPath = p; g_sbOffset = 44; g_sbChunk = [NSMutableData data]; g_sbLastText = nil;
+            BOOL fresh = (g_sbPath == nil);
+            g_sbPath = p;
+            // 新通话第一拍：如果读到上一通留下的整段音频，直接跳到末尾，避免 120 秒巨型块
+            g_sbOffset = (fresh && size > 16000 * 2 * 10) ? size : 44;
+            g_sbChunk = [NSMutableData data]; g_sbLastText = nil;
         }
         if (size <= g_sbOffset) return;
         NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:p];
@@ -1297,14 +1304,15 @@ static void CCWriteWav48kFile(NSString *path, NSData *pcm) {
     chmod(path.fileSystemRepresentation, 0666);
 }
 
-// 英文 TTS 合成成 48k PCM，写到 CC_DIR/cc_tts.wav；守护进程再复制给 App 探针做上行混音
-static void CCTTSBufferEnglish(NSString *text) {
+// TTS 合成成 48k PCM，写到 CC_DIR/<fileName>；守护进程再复制给 App 探针做混音
+static void CCTTSBuffer(NSString *text, NSString *lang, NSString *fileName) {
     if (!text.length) return;
     AVSpeechSynthesizer *synth = [[AVSpeechSynthesizer alloc] init];
     AVSpeechUtterance *u = [[AVSpeechUtterance alloc] initWithString:text];
-    NSString *vid = CCPrefStr(CC_K_LOCAL_VOICE, @"");
+    NSString *vid = [lang hasPrefix:@"zh"] ? CCPrefStr(CC_K_TTS_VOICE, @"")
+                                           : CCPrefStr(CC_K_LOCAL_VOICE, @"");
     AVSpeechSynthesisVoice *v = vid.length ? [AVSpeechSynthesisVoice voiceWithIdentifier:vid] : nil;
-    u.voice = v ?: [AVSpeechSynthesisVoice voiceWithLanguage:@"en-US"];
+    u.voice = v ?: [AVSpeechSynthesisVoice voiceWithLanguage:lang];
     NSMutableData *out = [NSMutableData data];
     __block double phase = 0;
     __block BOOL done = NO;
@@ -1317,9 +1325,10 @@ static void CCTTSBufferEnglish(NSString *text) {
             if (n == 0) {
                 if (!done) {
                     done = YES;
-                    NSString *p = [CC_DIR stringByAppendingPathComponent:@"cc_tts.wav"];
+                    NSString *p = [CC_DIR stringByAppendingPathComponent:fileName];
                     CCWriteWav48kFile(p, out);
-                    CCLogf(@"tts en -> cc_tts.wav %lu bytes", (unsigned long)out.length);
+                    CCLogf(@"tts %@ -> %@ %lu bytes", lang, fileName,
+                           (unsigned long)out.length);
                     keep = nil;
                 }
                 return;
@@ -1351,7 +1360,7 @@ static void CCTTSBufferEnglish(NSString *text) {
                    dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         if (!done) {
             done = YES;
-            NSString *p = [CC_DIR stringByAppendingPathComponent:@"cc_tts.wav"];
+            NSString *p = [CC_DIR stringByAppendingPathComponent:fileName];
             CCWriteWav48kFile(p, out);
             keep = nil;
         }
@@ -1372,7 +1381,7 @@ static void CCLBDeliverChunk(NSString *txt) {
             if (!out.length) return;
             CCUIDeliverLocalTranslated(out);
             if (engine.length) CCUIDeliverLocalEngine(engine);
-            CCTTSBufferEnglish(out);       // 上行注入用，不外放
+            CCTTSBuffer(out, @"en-US", @"cc_tts.wav");   // 上行注入用，不外放
         });
     } @catch (NSException *e) { }
 }
@@ -1390,7 +1399,10 @@ static void CCLocalFileTick(void) {
         unsigned long long size = [at[NSFileSize] unsignedLongLongValue];
         if (size <= 44) return;
         if (!g_lbPath || ![g_lbPath isEqualToString:p] || size < g_lbOffset) {
-            g_lbPath = p; g_lbOffset = 44; g_lbChunk = [NSMutableData data]; g_lbLastText = nil;
+            BOOL fresh = (g_lbPath == nil);
+            g_lbPath = p;
+            g_lbOffset = (fresh && size > 16000 * 2 * 10) ? size : 44;
+            g_lbChunk = [NSMutableData data]; g_lbLastText = nil;
         }
         if (size <= g_lbOffset) return;
         NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:p];
@@ -1574,7 +1586,7 @@ void CCUIBoot(void) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.14.0-alpha23)");
+        CCLogLine(@"CallCaption UI booted (single window v0.14.0-alpha24)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

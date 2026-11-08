@@ -347,5 +347,39 @@
 		<key>action</key>
 		<string>openLog</string>
 	</dict>
+	<dict>
+		<key>cell</key>
+		<string>PSGroupCell</string>
+		<key>label</key>
+		<string>原音音量（TTS 播报时自动压低原声）</string>
+	</dict>
+	<dict>
+		<key>cell</key>
+		<string>PSSliderCell</string>
+		<key>label</key>
+		<string>对方原音</string>
+		<key>key</key>
+		<string>RemoteOriginalVolume</string>
+		<key>default</key>
+		<integer>30</integer>
+		<key>min</key>
+		<integer>0</integer>
+		<key>max</key>
+		<integer>100</integer>
+	</dict>
+	<dict>
+		<key>cell</key>
+		<string>PSSliderCell</string>
+		<key>label</key>
+		<string>我方原音</string>
+		<key>key</key>
+		<string>LocalOriginalVolume</string>
+		<key>default</key>
+		<integer>30</integer>
+		<key>min</key>
+		<integer>0</integer>
+		<key>max</key>
+		<integer>100</integer>
+	</dict>
 </array>
 </plist>

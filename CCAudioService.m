@@ -1319,6 +1319,27 @@ static void CheckArm(void) {
             }
         }
 
+        // 把两个“原音音量”设置写给 App 探针（App 沙盒读不到 /var/mobile 的 prefs）
+        {
+            static NSString *lastCfg = nil;
+            NSString *docs = CCFindWhatsAppDocs();
+            if (docs) {
+                int rv = [CCPrefStr(@"RemoteOriginalVolume", @"30") intValue];
+                int lv = [CCPrefStr(@"LocalOriginalVolume", @"30") intValue];
+                if (rv < 0) rv = 0; if (rv > 100) rv = 100;
+                if (lv < 0) lv = 0; if (lv > 100) lv = 100;
+                NSString *cfg = [NSString stringWithFormat:@"remote=%.2f\nlocal=%.2f\n",
+                                 rv / 100.0, lv / 100.0];
+                if (![cfg isEqualToString:lastCfg]) {
+                    NSString *p = [docs stringByAppendingPathComponent:@"cc_cfg.txt"];
+                    [cfg writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                    chmod(p.fileSystemRepresentation, 0666);
+                    lastCfg = cfg;
+                    CCLogf(@"app cfg remote=%d local=%d", rv, lv);
+                }
+            }
+        }
+
         // SpringBoard 合成好的英文 TTS（CC_DIR/cc_tts.wav）复制到 WhatsApp Documents，
         // App 探针会把它混进上行。
         {
@@ -1330,11 +1351,15 @@ static void CheckArm(void) {
                 lastTts = mt;
                 NSString *docs = CCFindWhatsAppDocs();
                 if (docs) {
-                    NSString *dst = [docs stringByAppendingPathComponent:@"cc_tts.wav"];
-                    [[NSFileManager defaultManager] removeItemAtPath:dst error:nil];
-                    BOOL ok = [[NSFileManager defaultManager] copyItemAtPath:src toPath:dst error:nil];
-                    if (ok) chmod(dst.fileSystemRepresentation, 0666);
-                    CCLogf(@"uplink tts copied ok=%d", ok);
+                    for (NSString *name in @[@"cc_tts.wav", @"cc_tts_zh.wav"]) {
+                        NSString *s2 = [CC_DIR stringByAppendingPathComponent:name];
+                        if (![[NSFileManager defaultManager] fileExistsAtPath:s2]) continue;
+                        NSString *dst = [docs stringByAppendingPathComponent:name];
+                        [[NSFileManager defaultManager] removeItemAtPath:dst error:nil];
+                        BOOL ok = [[NSFileManager defaultManager] copyItemAtPath:s2 toPath:dst error:nil];
+                        if (ok) chmod(dst.fileSystemRepresentation, 0666);
+                        CCLogf(@"tts copied %@ ok=%d", name, ok);
+                    }
                 }
             }
         }
@@ -1390,7 +1415,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.14.0-alpha23)");
+        CCLogLine(@"audioservice started (v0.14.0-alpha24)");
         // LCT 的 livecallhelper 在识别前会配置 AVAudioSession（SoloAmbient/Default）；
         // 我们的守护进程以前没做这一步，补上。
         @try {

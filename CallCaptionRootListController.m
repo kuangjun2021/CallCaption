@@ -91,7 +91,7 @@ __attribute__((visibility("default")))
                 // 关键：开关/输入框必须挂上默认的 get/set 选择器，否则系统会把行渲染成不可用（灰掉）
                 BOOL needKV = (type == PSSwitchCell || type == PSEditTextCell ||
                                type == PSTitleValueCell || type == PSListItemCell ||
-                               type == PSSecureEditTextCell);
+                               type == PSSecureEditTextCell || type == PSSliderCell);
                 SEL setSel = needKV ? @selector(setPreferenceValue:specifier:) : NULL;
                 SEL getSel = needKV ? @selector(readPreferenceValue:) : NULL;
 

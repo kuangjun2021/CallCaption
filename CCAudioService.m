@@ -679,10 +679,8 @@ static void CheckArm(void) {
                     [ch recogStart];
                 }
             } else if (now - ch->lastFrameChangeAt > 8.0) {
-                if ([ch.tag isEqualToString:@"remote"]) {
-                    ch.tapPID = (ch.tapPID == CC_TAP_PID_SPEAKER)
-                                 ? CC_TAP_PID_SYSTEM : CC_TAP_PID_SPEAKER;
-                }
+                // 只重挂同一个 PID，不再乱换 -2/-1/-3：
+                // 换到 -3 会把麦克风声音当“对方”，还会把通道语言切成中文。
                 CCLogf(@"%@: audio stalled (frames=%llu), restarting tap pid=%d",
                        ch.tag, (unsigned long long)ch->frames, ch.tapPID);
                 [ch stop];
@@ -691,41 +689,15 @@ static void CheckArm(void) {
             }
         }
 
-        // 识别健康看门狗：有真实声音、但 6 秒没有任何识别结果 → 可能 Tap 抓到了静音/ASR 卡住。
-        // 交替 speaker(-2)/system(-1) 重挂一次；local 通道不动。
+        // 识别健康看门狗：有真实声音、但 6 秒没有任何识别结果 → 重挂同一个 Tap。
         for (CCChannel *ch in chans) {
             if (!ch->capturing || ch->ttsPaused) continue;
             if (ch->lastLoudAt > 0 &&
                 now - ch->lastLoudAt < 2.0 &&
                 now - ch->lastResultAt > 6.0) {
-                if ([ch.tag isEqualToString:@"remote"])
-                    ch.tapPID = (ch.tapPID == CC_TAP_PID_SPEAKER)
-                                ? CC_TAP_PID_SYSTEM : CC_TAP_PID_SPEAKER;
-                CCLogf(@"%@: loud(rms=%.3f) but no recognition for %.1fs, restart tap pid=%d",
+                CCLogf(@"%@: loud(rms=%.3f) but no recognition for %.1fs, restarting tap pid=%d",
                        ch.tag, ch->lastRMS, now - ch->lastResultAt, ch.tapPID);
                 ch->lastResultAt = now;
-                [ch stop];
-                ch->lastAttempt = 0;
-                ch->lastFrameChangeAt = now;
-            }
-        }
-
-        // 静音 Tap 探测：远端一直 rms≈0，说明 -2 可能根本没抓到通话音频。
-        // 每 10 秒在 speaker(-2)/system(-1) 之间换一次，直到真正识别出内容。
-        {
-            CCChannel *ch = g_remote;
-            if (ch->capturing && ch->tapProbeCount < 3 &&
-                ch->lastRMS < 0.0005 &&
-                now - ch->lastRealResultAt > 10.0 &&
-                now - ch->lastTapProbeAt > 10.0) {
-                ch->lastTapProbeAt = now;
-                ch->tapProbeCount++;
-                if (ch.tapPID == CC_TAP_PID_SPEAKER) ch.tapPID = CC_TAP_PID_SYSTEM;
-                else if (ch.tapPID == CC_TAP_PID_SYSTEM) ch.tapPID = CC_TAP_PID_MIC;
-                else ch.tapPID = CC_TAP_PID_SPEAKER;
-                CCLogf(@"remote: tap silent for %.0fs (rms=%.4f), probe #%d pid=%d",
-                       now - ch->lastRealResultAt, ch->lastRMS,
-                       ch->tapProbeCount, ch.tapPID);
                 [ch stop];
                 ch->lastAttempt = 0;
                 ch->lastFrameChangeAt = now;
@@ -783,7 +755,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.14.0-alpha3)");
+        CCLogLine(@"audioservice started (v0.14.0-alpha4)");
         {
             NSString *dk = CCPrefStr(CC_K_DEEPL_KEY, @"");
             CCLogf(@"prefs boot: engine=%@ deeplKeyLen=%lu remote=%d local=%d",

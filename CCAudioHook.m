@@ -96,6 +96,10 @@ typedef struct {
 
 static CCSlot g_slots[CC_MAX_SLOTS];
 static uint64_t g_lastCalls[CC_MAX_SLOTS];
+static _Atomic(int) g_mshookFound;
+static _Atomic(int) g_rtInstalled;
+static _Atomic(int) g_rpInstalled;
+static _Atomic(int) g_hookTried;
 
 static inline uint32_t CCFloatBits(float f) {
     union { float f; uint32_t u; } v;
@@ -195,6 +199,25 @@ static void CCReport(void) {
                   (unsigned long)unit, atomic_load(&s->bus), atomic_load(&s->frames),
                   rms, (unsigned long long)calls);
     }
+
+    // 心跳：每 5 秒一次。哪怕 hook 没装上 / 没有任何 render，
+    // 也能证明 dylib 是否真的被注入到了 mediaserverd。
+    static CFAbsoluteTime lastBeat;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - lastBeat >= 5.0) {
+        lastBeat = now;
+        int units = 0;
+        uint64_t calls = 0;
+        for (int i = 0; i < CC_MAX_SLOTS; i++) {
+            if (!atomic_load(&g_slots[i].unit)) continue;
+            units++;
+            calls += atomic_load(&g_slots[i].calls);
+        }
+        CCHookLog(@"alive %@ tried%d msh%d rt%d rp%d units%d calls%llu",
+                  CCProcName(), atomic_load(&g_hookTried), atomic_load(&g_mshookFound),
+                  atomic_load(&g_rtInstalled), atomic_load(&g_rpInstalled),
+                  units, (unsigned long long)calls);
+    }
 }
 
 static dispatch_queue_t g_reportQ;
@@ -225,6 +248,7 @@ static void CCInstallHooks(void) {
               [proc isEqualToString:@"audiomxd"])) {
             return;
         }
+        atomic_store(&g_hookTried, 1);
         if ([[NSFileManager defaultManager] fileExistsAtPath:CC_HOOK_OFF]) {
             CCHookLog(@"hook disabled by audiohook.off");
             return;
@@ -242,10 +266,12 @@ static void CCInstallHooks(void) {
             CCHookLog(@"MSHookFunction not found, hook aborted");
             return;
         }
+        atomic_store(&g_mshookFound, 1);
 
         void *renderSym = dlsym(RTLD_DEFAULT, "AudioUnitRender");
         if (renderSym && CCSymbolInAudioToolbox(renderSym)) {
             g_MSHook(renderSym, (void *)CCHookedRender, (void **)&g_origRender);
+            atomic_store(&g_rtInstalled, g_origRender ? 1 : 0);
             CCHookLog(@"installed AudioUnitRender sym=%p old=%p", renderSym, g_origRender);
         } else {
             CCHookLog(@"AudioUnitRender skipped sym=%p (not AudioToolbox)", renderSym);
@@ -254,6 +280,7 @@ static void CCInstallHooks(void) {
         void *processSym = dlsym(RTLD_DEFAULT, "AudioUnitProcess");
         if (processSym && CCSymbolInAudioToolbox(processSym)) {
             g_MSHook(processSym, (void *)CCHookedProcess, (void **)&g_origProcess);
+            atomic_store(&g_rpInstalled, g_origProcess ? 1 : 0);
             CCHookLog(@"installed AudioUnitProcess sym=%p old=%p", processSym, g_origProcess);
         } else {
             CCHookLog(@"AudioUnitProcess skipped sym=%p (not AudioToolbox)", processSym);
@@ -265,6 +292,7 @@ __attribute__((constructor))
 static void CCAudioHookBoot(void) {
     @autoreleasepool {
         NSString *proc = CCProcName();
+        // SpringBoard 也注入：它只写这一行证明 dylib/日志通道正常，不装任何钩子。
         CCHookLog(@"dylib loaded proc=%@ pid=%d", proc, getpid());
         if (!([proc isEqualToString:@"mediaserverd"] ||
               [proc isEqualToString:@"audiomxd"])) {

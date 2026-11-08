@@ -70,7 +70,7 @@ __attribute__((visibility("default")))
 
 - (NSArray *)specifiers {
     if (!_specifiers) {
-        @try { CCMigrateCFPrefsToFile(); } @catch (NSException *e) { SLog("migrate exc %@", e.reason); }
+        @try { CCMigrateCFPrefsToFile(); } @catch (NSException *e) { SLog(@"migrate exc %@", e.reason); }
         NSBundle *b = self.bundle;
         if (!b) {
             b = [NSBundle bundleWithPath:@"/var/jb/Library/PreferenceBundles/CallCaptionPrefs.bundle"];

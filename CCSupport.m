@@ -19,14 +19,77 @@ void CCProcessInit(void) {
 
 // ============ 设置 ============
 
+static NSDictionary *CCReadGlobalPrefs(void) {
+    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:
+                       @"/var/mobile/Library/Preferences/net.user.callcaption.plist"];
+    return [d isKindOfClass:[NSDictionary class]] ? d : @{};
+}
+
+// Settings.app 在沙盒里通过 CFPreferences 写设置时，可能落在自己的容器而不是
+// /var/mobile/Library/Preferences。守护进程是 root，可以扫描容器把值找回来。
+static NSDictionary *CCFindContainerPrefs(void) {
+    static NSDictionary *cache = nil;
+    static CFAbsoluteTime cacheAt = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (cache && now - cacheAt < 10.0) return cache;
+    cacheAt = now;
+    cache = nil;
+
+    NSString *base = @"/var/mobile/Containers/Data/Application";
+    NSArray *apps = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:base error:nil];
+    NSDate *bestDate = nil;
+    for (NSString *app in apps) {
+        NSString *p = [[base stringByAppendingPathComponent:app]
+                       stringByAppendingPathComponent:@"Library/Preferences/net.user.callcaption.plist"];
+        NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:nil];
+        if (!attrs) continue;
+        NSDate *m = attrs[NSFileModificationDate];
+        if (cache && m && bestDate && [m compare:bestDate] != NSOrderedDescending) continue;
+        NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:p];
+        if ([d isKindOfClass:[NSDictionary class]]) {
+            cache = d;
+            bestDate = m;
+            static NSString *loggedPath = nil;
+            if (![loggedPath isEqualToString:p]) {
+                loggedPath = p;
+                CCLogf(@"prefs: found Settings.app container prefs (%@)", p);
+            }
+        }
+    }
+    return cache;
+}
+
 void CCPrefsReload(void) {
     @try {
-        // v0.10: 守护进程以 root 运行，CFPreferences 的 CurrentUser 会解析到 root 域；
-        // 用户设置实际在 mobile 域，直接读 plist 文件。
+        // v0.13.11: 守护进程(root) 和 SpringBoard(mobile) 统一直接读 mobile plist；
+        // 守护进程额外从 Settings.app 容器里补缺失的 Key/Engine。
         if (CCIsAudioService()) {
-            NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:
-                               @"/var/mobile/Library/Preferences/net.user.callcaption.plist"];
-            g_prefs = [d isKindOfClass:[NSDictionary class]] ? d : @{};
+            NSDictionary *global = CCReadGlobalPrefs();
+            NSMutableDictionary *m = [global mutableCopy] ?: [NSMutableDictionary dictionary];
+            NSDictionary *container = CCFindContainerPrefs();
+            BOOL changed = NO;
+            if (container.count) {
+                for (id k in container) {
+                    id v = container[k];
+                    if (!m[k] || ([m[k] isKindOfClass:[NSString class]] && ![m[k] length])) {
+                        m[k] = v;
+                        changed = YES;
+                    }
+                }
+            }
+            if (changed) {
+                NSString *path = @"/var/mobile/Library/Preferences/net.user.callcaption.plist";
+                BOOL ok = [m writeToFile:path atomically:YES];
+                [[NSFileManager defaultManager] setAttributes:@{NSFilePosixPermissions: @0666}
+                                                 ofItemAtPath:path error:nil];
+                CCLogf(@"prefs: merged Settings.app values into global ok=%d (deeplKeyLen=%lu engine=%@)",
+                       ok, (unsigned long)[(m[@"DeepLKey"] ?: @"") length], m[@"Engine"] ?: @"?");
+            }
+            g_prefs = m;
+            return;
+        }
+        if (CCIsSpringBoard()) {
+            g_prefs = CCReadGlobalPrefs();
             return;
         }
         CFPreferencesAppSynchronize((__bridge CFStringRef)CC_DOMAIN);

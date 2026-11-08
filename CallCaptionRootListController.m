@@ -7,6 +7,7 @@
 
 #define CC_DOMAIN @"net.user.callcaption"
 #define CC_NOTIF  @"net.user.callcaption.prefschanged"
+#define CC_PREF_PATH @"/var/mobile/Library/Preferences/net.user.callcaption.plist"
 
 static void SLog(NSString *fmt, ...) {
     @try {
@@ -21,6 +22,8 @@ static void SLog(NSString *fmt, ...) {
     } @catch (NSException *e) { }
 }
 
+static void CCMigrateCFPrefsToFile(void);
+
 __attribute__((visibility("default")))
 @interface CallCaptionRootListController : PSListController
 @end
@@ -31,6 +34,7 @@ __attribute__((visibility("default")))
 
 - (NSArray *)specifiers {
     if (!_specifiers) {
+        CCMigrateCFPrefsToFile();
         NSBundle *b = self.bundle;
         if (!b) {
             b = [NSBundle bundleWithPath:@"/var/jb/Library/PreferenceBundles/CallCaptionPrefs.bundle"];
@@ -87,12 +91,43 @@ __attribute__((visibility("default")))
 
 // ---------- 设置读写 ----------
 
+static NSDictionary *CCReadPrefsFile(void) {
+    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:CC_PREF_PATH];
+    return [d isKindOfClass:[NSDictionary class]] ? d : @{};
+}
+
 static NSString *CCObjString(NSString *key, NSString *def) {
-    id v = (__bridge_transfer id)CFPreferencesCopyAppValue(
-               (__bridge CFStringRef)key, (__bridge CFStringRef)CC_DOMAIN);
+    id v = CCReadPrefsFile()[key];
+    if (!v) v = (__bridge_transfer id)CFPreferencesCopyAppValue(
+                    (__bridge CFStringRef)key, (__bridge CFStringRef)CC_DOMAIN);
     if ([v isKindOfClass:[NSString class]] && [v length]) return v;
     if ([v isKindOfClass:[NSNumber class]]) return [v stringValue];
     return def;
+}
+
+// 旧版本/CFPreferences 可能把值写进了 Settings.app 的容器，而守护进程读的是
+// /var/mobile/Library/Preferences/net.user.callcaption.plist。这里把旧值迁移到
+// 守护进程真正读取的文件里，避免用户重新填一遍。
+static void CCMigrateCFPrefsToFile(void) {
+    NSArray *keys = @[@"Enabled", @"RemoteEnabled", @"LocalEnabled", @"TTSEnabled",
+                      @"CloudASR", @"ShowRecognized", @"ShowTranslated", @"LargeCaptions",
+                      @"AlwaysShowPanel", @"RemoteLocale", @"LocalLocale", @"Engine",
+                      @"DeepLKey", @"GoogleKey", @"AIURL", @"AIKey", @"AIModel",
+                      @"TTSVoice", @"LocalVoice", @"Diagnostics"];
+    NSMutableDictionary *d = [CCReadPrefsFile() mutableCopy] ?: [NSMutableDictionary dictionary];
+    NSUInteger moved = 0;
+    for (NSString *k in keys) {
+        if (d[k]) continue;
+        id v = (__bridge_transfer id)CFPreferencesCopyAppValue(
+                   (__bridge CFStringRef)k, (__bridge CFStringRef)CC_DOMAIN);
+        if (v) { d[k] = v; moved++; }
+    }
+    if (moved) {
+        BOOL ok = [d writeToFile:CC_PREF_PATH atomically:YES];
+        [[NSFileManager defaultManager] setAttributes:@{NSFilePosixPermissions: @0644}
+                                         ofItemAtPath:CC_PREF_PATH error:nil];
+        SLog(@"migrate CFPreferences -> file keys=%lu ok=%d", (unsigned long)moved, ok);
+    }
 }
 
 - (void)saveValue:(id)value forKey:(NSString *)key {
@@ -103,12 +138,36 @@ static NSString *CCObjString(NSString *key, NSString *def) {
     } else {
         SLog(@"save %@ = %@", key, value);
     }
+    // 直接写守护进程读取的那份 plist，绕开 Settings.app 容器/CFPreferences 缓存。
+    NSMutableDictionary *d = [CCReadPrefsFile() mutableCopy] ?: [NSMutableDictionary dictionary];
+    if (value) d[key] = value;
+    else [d removeObjectForKey:key];
+    BOOL ok = [d writeToFile:CC_PREF_PATH atomically:YES];
+    [[NSFileManager defaultManager] setAttributes:@{NSFilePosixPermissions: @0644}
+                                     ofItemAtPath:CC_PREF_PATH error:nil];
+    if (!ok) SLog(@"save direct FAILED %@", key);
+    // 双写：万一 Settings.app 沙盒不让我写 /var/mobile/Library/Preferences，
+    // 至少 CFPreferences 容器里还有一份，守护进程会扫描容器补回来。
     CFPreferencesSetAppValue((__bridge CFStringRef)key,
                              (__bridge CFPropertyListRef)value,
                              (__bridge CFStringRef)CC_DOMAIN);
     CFPreferencesAppSynchronize((__bridge CFStringRef)CC_DOMAIN);
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
         (__bridge CFStringRef)CC_NOTIF, NULL, NULL, YES);
+}
+
+// 设置页显示/读取也直接走同一个文件，避免界面显示和守护进程看到的值不一致。
+- (id)readPreferenceValue:(PSSpecifier *)specifier {
+    id k = [specifier propertyForKey:@"key"];
+    if ([k isKindOfClass:[NSString class]] && [k length]) {
+        id v = CCReadPrefsFile()[k];
+        if (!v) v = (__bridge_transfer id)CFPreferencesCopyAppValue(
+                        (__bridge CFStringRef)k, (__bridge CFStringRef)CC_DOMAIN);
+        if (v) return v;
+        id def = [specifier propertyForKey:@"default"];
+        return def ?: @"";
+    }
+    return [super readPreferenceValue:specifier];
 }
 
 // 所有带 key 的单元格（开关/输入框）都显式写入 net.user.callcaption 域，
@@ -124,6 +183,7 @@ static NSString *CCObjString(NSString *key, NSString *def) {
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
+    CCMigrateCFPrefsToFile();
     NSString *dk = CCObjString(@"DeepLKey", @"");
     NSString *gk = CCObjString(@"GoogleKey", @"");
     SLog(@"viewWillAppear Engine=%@ DeepLKeyLen=%lu GoogleKeyLen=%lu",

@@ -27,6 +27,7 @@
 + (void)panelButtonTapped:(UIButton *)b;
 + (void)handlePanelPan:(UIPanGestureRecognizer *)p;
 + (void)handleBoxPan:(UIPanGestureRecognizer *)p;
++ (void)boxTapped:(id)sender;
 + (void)collapsePanel;
 + (void)expandPanel;
 + (void)handleGrabberPan:(UIPanGestureRecognizer *)p;
@@ -182,7 +183,7 @@ static UIWindow *CreateOverlayWindow(void) {
 
     BOOL background = (hit == g_root || hit == self.contentView || hit == self);
     if (!background) {
-        CCLogf(@"hitTest: panel");
+        CCLogf(@"hitTest: %@", NSStringFromClass([hit class]));
         return hit;
     }
 
@@ -439,6 +440,11 @@ static UIView *MakeBox(NSString *recogHeader) {
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
         initWithTarget:[CCUIHelper class] action:@selector(handleBoxPan:)];
     [blur addGestureRecognizer:pan];
+
+    // 点字幕框（面板外）也应收起面板；拖动仍走 pan。
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
+        initWithTarget:[CCUIHelper class] action:@selector(boxTapped:)];
+    [blur addGestureRecognizer:tap];
 
     [g_root addSubview:blur];
     return blur;
@@ -832,6 +838,15 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
     }
 }
 
++ (void)boxTapped:(id)sender {
+    if (g_panelExpanded) {
+        CCLogf(@"panel: outside tap (box)");
+        [self collapsePanel];
+    } else if (g_callActive && !g_grabberVisible) {
+        [self showGrabber];
+    }
+}
+
 + (void)handleBoxPan:(UIPanGestureRecognizer *)p {
     UIView *box = p.view;
     if (!box) return;
@@ -986,7 +1001,7 @@ void CCUIBoot(void) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.13.10)");
+        CCLogLine(@"CallCaption UI booted (single window v0.13.11)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

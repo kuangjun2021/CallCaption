@@ -113,6 +113,9 @@ static void CCSpeakEnglish(NSString *text) {
     NSString *lastProvisional;
     CFAbsoluteTime lastTextAt;
     CFAbsoluteTime lastProvTransAt;   // 连续说话时的增量翻译节流
+    CFAbsoluteTime lastLoudAt;        // 最近一次明显有声音的时间（RMS）
+    CFAbsoluteTime lastResultAt;      // 最近一次识别结果/任务启动的时间
+    float lastRMS;                    // 最近一帧的粗略音量
     NSUInteger callGen;          // 通话/采集代际：stop/新采集递增，用于丢弃上一通的结果
     NSUInteger partialGen;       // 临时翻译代际：只接受最新 partial 的译文
 }
@@ -168,6 +171,13 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
                         } else {
                             memcpy(dst, src, nf * sizeof(float));
                         }
+                        // 粗略音量（左声道平均绝对值），用于判断“有声音但识别没结果”
+                        float sum = 0;
+                        for (AVAudioFrameCount i = 0; i < nf; i++) sum += fabsf(src[2 * i]);
+                        float rms = nf ? (sum / (float)nf) : 0;
+                        ch->lastRMS = rms;
+                        if (rms > 0.008f)
+                            ch->lastLoudAt = CFAbsoluteTimeGetCurrent();
                         [r appendAudioPCMBuffer:pcm];
                         __atomic_add_fetch(&ch->frames, nf, __ATOMIC_RELAXED);
                     }
@@ -365,6 +375,7 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
         // 触发 endAudio → final → 新任务 → 再旧句的死循环。
         lastPartialText = nil;
         lastPartialAt = CFAbsoluteTimeGetCurrent();
+        lastResultAt = CFAbsoluteTimeGetCurrent();
         lastProvTransAt = 0;
         endAudioSent = NO;
         lastProvisional = nil;
@@ -417,6 +428,7 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
         BOOL muted = (now < g_muteUntil) || (now < g_ttsUntil);
 
         if (result) {
+            lastResultAt = now;
             NSString *txt = CCTrim(result.bestTranscription.formattedString);
             if (result.isFinal) {
                 if (!muted) {
@@ -648,6 +660,25 @@ static void CheckArm(void) {
             }
         }
 
+        // 识别健康看门狗：有真实声音、但 6 秒没有任何识别结果 → 可能 Tap 抓到了静音/ASR 卡住。
+        // 交替 speaker(-2)/system(-1) 重挂一次；local 通道不动。
+        for (CCChannel *ch in chans) {
+            if (!ch->capturing || ch->ttsPaused) continue;
+            if (ch->lastLoudAt > 0 &&
+                now - ch->lastLoudAt < 2.0 &&
+                now - ch->lastResultAt > 6.0) {
+                if ([ch.tag isEqualToString:@"remote"])
+                    ch.tapPID = (ch.tapPID == CC_TAP_PID_SPEAKER)
+                                ? CC_TAP_PID_SYSTEM : CC_TAP_PID_SPEAKER;
+                CCLogf(@"%@: loud(rms=%.3f) but no recognition for %.1fs, restart tap pid=%d",
+                       ch.tag, ch->lastRMS, now - ch->lastResultAt, ch.tapPID);
+                ch->lastResultAt = now;
+                [ch stop];
+                ch->lastAttempt = 0;
+                ch->lastFrameChangeAt = now;
+            }
+        }
+
         if (g_remote->capturing && now - g_remote->lastStatsAt >= 5.0) {
             g_remote->lastStatsAt = now;
             CCLogf(@"remote: alive, audio=%llu frames=%llu",
@@ -695,7 +726,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.13.10)");
+        CCLogLine(@"audioservice started (v0.13.11)");
         {
             NSString *dk = CCPrefStr(CC_K_DEEPL_KEY, @"");
             CCLogf(@"prefs boot: engine=%@ deeplKeyLen=%lu remote=%d local=%d",

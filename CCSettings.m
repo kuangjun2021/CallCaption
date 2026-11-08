@@ -270,25 +270,30 @@ static void VoiceLists(NSString *prefix,
         MkText(@"AIKey", @"AI API Key", @"", NO, @"sk-..."),
         MkText(@"AIModel", @"AI 模型名", @"deepseek-chat", NO, @"deepseek-chat"),
     ];
+    // 接口测试紧跟 API 设置，改完 Key 直接就能测
+    NSArray *apiTest = @[
+        MkAction(@"testApi", @"测试翻译接口"),
+    ];
     NSArray *voices = @[
         MkChoice(@"TTSVoice", @"中文播报音色", @"", zhV, zhT),
         MkChoice(@"LocalVoice", @"英文播报音色", @"", enV, enT),
     ];
     NSArray *diag = @[
         MkSwitch(@"Diagnostics", @"诊断日志", YES),
-        MkAction(@"testApi", @"测试翻译接口"),
         MkAction(@"openLog", @"打开诊断日志"),
     ];
 
-    self.sections = @[func, lang, volumes, engine, ai, voices, diag];
+    self.sections = @[func, lang, volumes, engine, ai, apiTest, voices, diag];
     self.sectionTitles = @[@"功能开关", @"语言", @"原音音量", @"翻译引擎",
-                           @"AI 自定义接口（OpenAI 兼容）", @"播报音色", @"诊断"];
+                           @"AI 自定义接口（OpenAI 兼容）", @"接口测试",
+                           @"播报音色", @"诊断"];
     self.sectionFooters = @[
         @"通话接通后自动激活，屏幕出现小地球；点地球展开面板，再点面板里的地球可关闭/开启翻译。面板外任意位置点击自动收起。",
         @"识别语言代码（BCP-47）：对方英文 en-US、日文 ja-JP、韩文 ko-KR；我的语言通常 zh-CN。",
         @"TTS 播报时原音保留多少：0 = 原音静音，100 = 不压低。对方原音 = 你听到的英文；我方原音 = 对方听到的你的声音。",
         @"自动 = 已填 Key 优先，失败自动切换。MyMemory 免费接口国内可用；Google 不填 Key 用免费接口，填了走 Cloud Translation。",
         @"填写 chat/completions 完整地址、Key 与模型名，例如 DeepSeek。",
+        @"分别请求 DeepL / Google / AI / MyMemory 一次（Hello 英译中），检查 Key 和网络是否可用。",
         @"列表来自系统已安装语音。中文用于对方字幕播报，英文用于我方双向播报。",
         @"日志：/var/mobile/Library/CallCaption/probe.log",
     ];
@@ -527,6 +532,228 @@ static NSString *CCApiSnippet2(NSData *data) {
     return def;
 }
 
+static NSString *CCApiShort(NSString *s, NSUInteger max) {
+    if (![s isKindOfClass:[NSString class]]) return @"";
+    s = [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    s = [s stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
+    s = [s stringByReplacingOccurrencesOfString:@"\r" withString:@" "];
+    if (s.length > max) s = [[s substringToIndex:max] stringByAppendingString:@"…"];
+    return s;
+}
+
+// 从各引擎返回体里提取译文，取不到返回 nil
+static NSString *CCApiTextFromJSON(NSString *engine, id json) {
+    if (!json) return nil;
+    NSString *out = nil;
+    if ([engine isEqualToString:@"DeepL"] && [json isKindOfClass:[NSDictionary class]]) {
+        NSArray *arr = json[@"translations"];
+        if ([arr isKindOfClass:[NSArray class]] && arr.count &&
+            [arr[0] isKindOfClass:[NSDictionary class]])
+            out = arr[0][@"text"];
+    } else if ([engine isEqualToString:@"Google"]) {
+        if ([json isKindOfClass:[NSDictionary class]]) {
+            id tr = json[@"data"][@"translations"];
+            if ([tr isKindOfClass:[NSArray class]] && [tr count] &&
+                [tr[0] isKindOfClass:[NSDictionary class]])
+                out = tr[0][@"translatedText"];
+        } else if ([json isKindOfClass:[NSArray class]]) {
+            // 免费接口格式：[[["你好","Hello",...],...],...]
+            NSMutableString *ms = [NSMutableString string];
+            id segs = [json count] ? json[0] : nil;
+            if ([segs isKindOfClass:[NSArray class]]) {
+                for (id seg in segs)
+                    if ([seg isKindOfClass:[NSArray class]] && [seg count] &&
+                        [seg[0] isKindOfClass:[NSString class]])
+                        [ms appendString:seg[0]];
+            }
+            if (ms.length) out = ms;
+        }
+    } else if ([engine isEqualToString:@"AI"] && [json isKindOfClass:[NSDictionary class]]) {
+        NSArray *arr = json[@"choices"];
+        if ([arr isKindOfClass:[NSArray class]] && arr.count) {
+            id msg = arr[0][@"message"];
+            out = [msg isKindOfClass:[NSDictionary class]] ? msg[@"content"] : arr[0][@"text"];
+        }
+    } else if ([engine isEqualToString:@"MyMemory"] && [json isKindOfClass:[NSDictionary class]]) {
+        id rd = json[@"responseData"];
+        if ([rd isKindOfClass:[NSDictionary class]]) out = rd[@"translatedText"];
+    }
+    return [out isKindOfClass:[NSString class]] ? out : nil;
+}
+
+// 自绘结果弹窗：每个端点一行，名称 + 结果左对齐
+@interface CCApiResultController : UIViewController <UIGestureRecognizerDelegate>
+@property (nonatomic, copy) NSArray<NSDictionary *> *rows;   // name / ok / detail
+@property (nonatomic, copy) NSString *summary;
+@end
+
+@implementation CCApiResultController {
+    UIView *_card;
+    UIButton *_copyButton;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.45];
+
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self
+                                                                          action:@selector(bgTapped:)];
+    tap.delegate = self;
+    [self.view addGestureRecognizer:tap];
+
+    CGFloat sw = [UIScreen mainScreen].bounds.size.width;
+    CGFloat cardW = MIN(sw - 44.0, 400.0);
+    CGFloat pad = 20.0;
+    CGFloat nameW = 86.0;
+    CGFloat resX = pad + nameW;
+    UIFont *nameFont = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    UIFont *detFont = [UIFont systemFontOfSize:14];
+
+    NSMutableArray<NSNumber *> *heights = [NSMutableArray array];
+    CGFloat bodyH = 0;
+    for (NSDictionary *r in self.rows) {
+        NSString *d = r[@"detail"] ?: @"";
+        CGFloat dh = [d boundingRectWithSize:CGSizeMake(cardW - resX - pad, CGFLOAT_MAX)
+                                     options:NSStringDrawingUsesLineFragmentOrigin
+                                  attributes:@{NSFontAttributeName: detFont}
+                                     context:nil].size.height;
+        CGFloat h = MAX(22.0, ceil(dh)) + 16.0;
+        [heights addObject:@(h)];
+        bodyH += h;
+    }
+
+    CGFloat headH = pad + 22.0 + 14.0;
+    CGFloat footH = 50.0;
+    CGFloat cardH = headH + bodyH + footH + 6.0;
+    CGFloat cardY = (CGRectGetHeight(self.view.bounds) - cardH) / 2.0;
+
+    _card = [[UIView alloc] initWithFrame:CGRectMake((sw - cardW) / 2.0, cardY, cardW, cardH)];
+    _card.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+    _card.layer.cornerRadius = 16.0;
+    _card.layer.cornerCurve = kCACornerCurveContinuous;
+    _card.clipsToBounds = YES;
+    [self.view addSubview:_card];
+
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(pad, pad, cardW - pad * 2, 22)];
+    title.text = @"接口测试结果";
+    title.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    title.textColor = [UIColor labelColor];
+    title.textAlignment = NSTextAlignmentCenter;
+    [_card addSubview:title];
+
+    CGFloat y = headH;
+    for (NSUInteger i = 0; i < self.rows.count; i++) {
+        NSDictionary *r = self.rows[i];
+        CGFloat h = heights[i].doubleValue;
+
+        if (i > 0) {
+            UIView *sep = [[UIView alloc] initWithFrame:
+                CGRectMake(pad, y, cardW - pad * 2, 1.0 / [UIScreen mainScreen].scale)];
+            sep.backgroundColor = [UIColor separatorColor];
+            [_card addSubview:sep];
+        }
+
+        BOOL ok = [r[@"ok"] boolValue];
+
+        UILabel *name = [[UILabel alloc] initWithFrame:CGRectMake(pad, y + 8.0, nameW - 8.0, 20)];
+        name.text = r[@"name"];
+        name.font = nameFont;
+        name.textColor = [UIColor labelColor];
+        [_card addSubview:name];
+
+        UILabel *det = [[UILabel alloc] initWithFrame:
+            CGRectMake(resX, y + 8.0, cardW - resX - pad, h - 16.0)];
+        det.text = r[@"detail"];
+        det.font = detFont;
+        det.numberOfLines = 0;
+        det.textColor = ok ? [UIColor secondaryLabelColor] : [UIColor systemRedColor];
+        [_card addSubview:det];
+
+        y += h;
+    }
+
+    UIView *btnSep = [[UIView alloc] initWithFrame:
+        CGRectMake(0, cardH - footH, cardW, 1.0 / [UIScreen mainScreen].scale)];
+    btnSep.backgroundColor = [UIColor separatorColor];
+    [_card addSubview:btnSep];
+
+    _copyButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    _copyButton.frame = CGRectMake(0, cardH - footH, cardW / 2.0, footH - 1.0);
+    [_copyButton setTitle:@"复制结果" forState:UIControlStateNormal];
+    _copyButton.titleLabel.font = [UIFont systemFontOfSize:16];
+    [_copyButton addTarget:self action:@selector(copyTapped)
+          forControlEvents:UIControlEventTouchUpInside];
+    [_card addSubview:_copyButton];
+
+    UIView *vSep = [[UIView alloc] initWithFrame:
+        CGRectMake(cardW / 2.0, cardH - footH + 10.0,
+                   1.0 / [UIScreen mainScreen].scale, footH - 20.0)];
+    vSep.backgroundColor = [UIColor separatorColor];
+    [_card addSubview:vSep];
+
+    UIButton *done = [UIButton buttonWithType:UIButtonTypeSystem];
+    done.frame = CGRectMake(cardW / 2.0, cardH - footH, cardW / 2.0, footH - 1.0);
+    [done setTitle:@"完成" forState:UIControlStateNormal];
+    done.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+    [done addTarget:self action:@selector(doneTapped) forControlEvents:UIControlEventTouchUpInside];
+    [_card addSubview:done];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    _card.center = CGPointMake(CGRectGetMidX(self.view.bounds), CGRectGetMidY(self.view.bounds));
+}
+
+// 卡片内的点击（按钮）不拦截，只处理点击卡片外关闭
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)g shouldReceiveTouch:(UITouch *)t {
+    return !CGRectContainsPoint(_card.frame, [t locationInView:self.view]);
+}
+
+- (void)bgTapped:(UITapGestureRecognizer *)g {
+    if (!CGRectContainsPoint(_card.frame, [g locationInView:self.view]))
+        [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)copyTapped {
+    [UIPasteboard generalPasteboard].string = self.summary ?: @"";
+    [_copyButton setTitle:@"已复制 ✓" forState:UIControlStateNormal];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [self->_copyButton setTitle:@"复制结果" forState:UIControlStateNormal];
+    });
+}
+
+- (void)doneTapped {
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+@end
+
+- (void)ccRecordResult:(NSMutableDictionary *)res engine:(NSString *)engine
+                  data:(NSData *)data resp:(NSURLResponse *)resp err:(NSError *)err {
+    NSInteger status = [resp isKindOfClass:[NSHTTPURLResponse class]]
+                     ? [(NSHTTPURLResponse *)resp statusCode] : 0;
+    id json = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    NSString *text = CCApiTextFromJSON(engine, json);
+    BOOL httpOK = (status == 0 || (status >= 200 && status < 300));
+    BOOL ok = NO;
+    NSString *detail;
+    if (err) {
+        detail = status
+            ? [NSString stringWithFormat:@"✗ HTTP %ld · %@", (long)status, CCApiShort(err.localizedDescription, 60)]
+            : [NSString stringWithFormat:@"✗ %@", CCApiShort(err.localizedDescription, 60)];
+    } else if (text.length && httpOK) {
+        ok = YES;
+        detail = [NSString stringWithFormat:@"✓ %@", CCApiShort(text, 80)];
+    } else if (httpOK) {
+        ok = YES;   // 接口可达，只是返回格式没解析出来
+        detail = [NSString stringWithFormat:@"✓ HTTP %ld · %@", (long)status, CCApiShort(CCApiSnippet2(data), 60)];
+    } else {
+        detail = [NSString stringWithFormat:@"✗ HTTP %ld · %@", (long)status, CCApiShort(CCApiSnippet2(data), 60)];
+    }
+    @synchronized(res) { res[engine] = @{@"ok": @(ok), @"detail": detail}; }
+}
+
 - (void)runApiTest {
     UIAlertController *loading = [UIAlertController alertControllerWithTitle:@"接口测试"
         message:@"正在请求 DeepL / Google / AI / MyMemory…"
@@ -543,10 +770,10 @@ static NSString *CCApiSnippet2(NSData *data) {
     NSString *aiModel = [self valForKey:@"AIModel" def:@"deepseek-chat"];
 
     if (!dk.length) {
-        res[@"DeepL"] = @"未填 Key";
+        res[@"DeepL"] = @{@"ok": @NO, @"detail": @"未填 Key（上方可填）"};
     } else {
         dispatch_group_enter(group);
-        NSString *body = [NSString stringWithFormat:@"text=Hello&source_lang=EN&target_lang=ZH"];
+        NSString *body = @"text=Hello&source_lang=EN&target_lang=ZH";
         NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:
             [NSURL URLWithString:@"https://api-free.deepl.com/v2/translate"]];
         req.HTTPMethod = @"POST";
@@ -559,17 +786,18 @@ static NSString *CCApiSnippet2(NSData *data) {
             completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
                 NSInteger status = [resp isKindOfClass:[NSHTTPURLResponse class]]
                                  ? [(NSHTTPURLResponse *)resp statusCode] : 0;
-                NSString *line;
-                id json = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
-                NSString *out = nil;
-                if ([json isKindOfClass:[NSDictionary class]]) {
-                    NSArray *arr = json[@"translations"];
-                    if ([arr isKindOfClass:[NSArray class]] && arr.count) out = arr[0][@"text"];
+                // 403 多为免费/付费域名用反了，换 api.deepl.com 再试一次
+                if (!err && status == 403) {
+                    NSMutableURLRequest *req2 = [req mutableCopy];
+                    req2.URL = [NSURL URLWithString:@"https://api.deepl.com/v2/translate"];
+                    [[[NSURLSession sharedSession] dataTaskWithRequest:req2
+                        completionHandler:^(NSData *d2, NSURLResponse *r2, NSError *e2) {
+                            [self ccRecordResult:res engine:@"DeepL" data:d2 resp:r2 err:e2];
+                            dispatch_group_leave(group);
+                        }] resume];
+                    return;
                 }
-                if (err) line = [NSString stringWithFormat:@"HTTP %ld · %@", (long)status, err.localizedDescription];
-                else if (out.length) line = [NSString stringWithFormat:@"HTTP %ld · %@", (long)status, out];
-                else line = [NSString stringWithFormat:@"HTTP %ld · %@", (long)status, CCApiSnippet2(data)];
-                @synchronized(res) { res[@"DeepL"] = line; }
+                [self ccRecordResult:res engine:@"DeepL" data:data resp:resp err:err];
                 dispatch_group_leave(group);
             }] resume];
     }
@@ -588,17 +816,13 @@ static NSString *CCApiSnippet2(NSData *data) {
         req.timeoutInterval = 5.0;
         [[[NSURLSession sharedSession] dataTaskWithRequest:req
             completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-                NSInteger status = [resp isKindOfClass:[NSHTTPURLResponse class]]
-                                 ? [(NSHTTPURLResponse *)resp statusCode] : 0;
-                NSString *line = err ? [NSString stringWithFormat:@"HTTP %ld · %@", (long)status, err.localizedDescription]
-                                     : [NSString stringWithFormat:@"HTTP %ld · %@", (long)status, CCApiSnippet2(data)];
-                @synchronized(res) { res[@"Google"] = line; }
+                [self ccRecordResult:res engine:@"Google" data:data resp:resp err:err];
                 dispatch_group_leave(group);
             }] resume];
     }
 
     if (!aiURL.length || !aiKey.length) {
-        res[@"AI"] = @"未配置 URL/Key";
+        res[@"AI"] = @{@"ok": @NO, @"detail": @"未配置 URL / Key"};
     } else {
         dispatch_group_enter(group);
         NSDictionary *body = @{
@@ -618,11 +842,7 @@ static NSString *CCApiSnippet2(NSData *data) {
         req.timeoutInterval = 7.0;
         [[[NSURLSession sharedSession] dataTaskWithRequest:req
             completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-                NSInteger status = [resp isKindOfClass:[NSHTTPURLResponse class]]
-                                 ? [(NSHTTPURLResponse *)resp statusCode] : 0;
-                NSString *line = err ? [NSString stringWithFormat:@"HTTP %ld · %@", (long)status, err.localizedDescription]
-                                     : [NSString stringWithFormat:@"HTTP %ld · %@", (long)status, CCApiSnippet2(data)];
-                @synchronized(res) { res[@"AI"] = line; }
+                [self ccRecordResult:res engine:@"AI" data:data resp:resp err:err];
                 dispatch_group_leave(group);
             }] resume];
     }
@@ -634,31 +854,28 @@ static NSString *CCApiSnippet2(NSData *data) {
         req.timeoutInterval = 5.0;
         [[[NSURLSession sharedSession] dataTaskWithRequest:req
             completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-                NSInteger status = [resp isKindOfClass:[NSHTTPURLResponse class]]
-                                 ? [(NSHTTPURLResponse *)resp statusCode] : 0;
-                NSString *line = err ? [NSString stringWithFormat:@"HTTP %ld · %@", (long)status, err.localizedDescription]
-                                     : [NSString stringWithFormat:@"HTTP %ld · %@", (long)status, CCApiSnippet2(data)];
-                @synchronized(res) { res[@"MyMemory"] = line; }
+                [self ccRecordResult:res engine:@"MyMemory" data:data resp:resp err:err];
                 dispatch_group_leave(group);
             }] resume];
     }
 
     dispatch_group_notify(group, dispatch_get_main_queue(), ^{
         NSArray *order = @[@"DeepL", @"Google", @"AI", @"MyMemory"];
+        NSMutableArray *rows = [NSMutableArray array];
         NSMutableArray *lines = [NSMutableArray array];
-        for (NSString *k in order)
-            [lines addObject:[NSString stringWithFormat:@"%@：%@", k, res[k] ?: @"未测试"]];
+        for (NSString *k in order) {
+            NSDictionary *r = res[k] ?: @{@"ok": @NO, @"detail": @"未测试"};
+            [rows addObject:@{@"name": k, @"ok": r[@"ok"], @"detail": r[@"detail"]}];
+            [lines addObject:[NSString stringWithFormat:@"%@：%@", k, r[@"detail"]]];
+        }
         NSString *summary = [lines componentsJoinedByString:@"\n"];
         [loading dismissViewControllerAnimated:YES completion:^{
-            UIAlertController *result = [UIAlertController alertControllerWithTitle:@"接口测试结果"
-                message:summary preferredStyle:UIAlertControllerStyleAlert];
-            [result addAction:[UIAlertAction actionWithTitle:@"复制结果"
-                style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
-                [UIPasteboard generalPasteboard].string = summary;
-            }]];
-            [result addAction:[UIAlertAction actionWithTitle:@"确定"
-                style:UIAlertActionStyleCancel handler:nil]];
-            [self presentViewController:result animated:YES completion:nil];
+            CCApiResultController *vc = [[CCApiResultController alloc] init];
+            vc.rows = rows;
+            vc.summary = summary;
+            vc.modalPresentationStyle = UIModalPresentationOverFullScreen;
+            vc.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
+            [self presentViewController:vc animated:YES completion:nil];
         }];
     });
 }

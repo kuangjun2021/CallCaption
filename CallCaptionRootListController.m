@@ -70,7 +70,7 @@ __attribute__((visibility("default")))
 
 - (NSArray *)specifiers {
     if (!_specifiers) {
-        CCMigrateCFPrefsToFile();
+        @try { CCMigrateCFPrefsToFile(); } @catch (NSException *e) { SLog("migrate exc %@", e.reason); }
         NSBundle *b = self.bundle;
         if (!b) {
             b = [NSBundle bundleWithPath:@"/var/jb/Library/PreferenceBundles/CallCaptionPrefs.bundle"];
@@ -81,6 +81,7 @@ __attribute__((visibility("default")))
         SLog(@"manual load path=%@ dicts=%lu", path, (unsigned long)dicts.count);
 
         if (dicts.count) {
+            SLog(@"building specifiers count=%lu", (unsigned long)dicts.count);
             NSMutableArray *arr = [NSMutableArray array];
             for (NSDictionary *d in dicts) {
                 if (![d isKindOfClass:[NSDictionary class]]) continue;
@@ -91,27 +92,32 @@ __attribute__((visibility("default")))
                 // 关键：开关/输入框必须挂上默认的 get/set 选择器，否则系统会把行渲染成不可用（灰掉）
                 BOOL needKV = (type == PSSwitchCell || type == PSEditTextCell ||
                                type == PSTitleValueCell || type == PSListItemCell ||
-                               type == PSSecureEditTextCell || type == PSSliderCell);
+                               type == PSSecureEditTextCell || type == PSSliderCell ||
+                               type == PSLinkListCell);
                 SEL setSel = needKV ? @selector(setPreferenceValue:specifier:) : NULL;
                 SEL getSel = needKV ? @selector(readPreferenceValue:) : NULL;
 
-                PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:label
-                                                                target:self
-                                                                   set:setSel
-                                                                   get:getSel
-                                                                detail:nil
-                                                                  cell:type
-                                                                  edit:nil];
-                for (NSString *k in d) {
-                    if ([k isEqualToString:@"cell"] || [k isEqualToString:@"label"]) continue;
-                    [sp setProperty:d[k] forKey:k];
+                @try {
+                    PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:label
+                                                                    target:self
+                                                                       set:setSel
+                                                                       get:getSel
+                                                                    detail:nil
+                                                                      cell:type
+                                                                      edit:nil];
+                    for (NSString *k in d) {
+                        if ([k isEqualToString:@"cell"] || [k isEqualToString:@"label"]) continue;
+                        [sp setProperty:d[k] forKey:k];
+                    }
+                    NSString *act = d[@"action"];
+                    if ([act isKindOfClass:[NSString class]] && act.length) {
+                        sp.buttonAction = NSSelectorFromString(act);
+                        [sp setProperty:act forKey:@"action"];
+                    }
+                    [arr addObject:sp];
+                } @catch (NSException *e) {
+                    SLog(@"spec exc cell=%@ label=%@: %@", cellStr, label, e.reason);
                 }
-                NSString *act = d[@"action"];
-                if ([act isKindOfClass:[NSString class]] && act.length) {
-                    sp.buttonAction = NSSelectorFromString(act);
-                    [sp setProperty:act forKey:@"action"];
-                }
-                [arr addObject:sp];
             }
             _specifiers = arr;
             SLog(@"manual specs=%lu", (unsigned long)arr.count);

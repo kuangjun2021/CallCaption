@@ -5,320 +5,315 @@
 	<dict>
 		<key>cell</key>
 		<string>PSGroupCell</string>
-		<key>label</key>
-		<string>功能开关</string>
 		<key>footerText</key>
 		<string>通话接通后自动激活，屏幕出现小地球；点地球展开面板，再点面板里的地球可关闭/开启翻译。面板外任意位置点击自动收起。</string>
+		<key>label</key>
+		<string>功能开关</string>
 	</dict>
 	<dict>
+		<key>PostNotification</key>
+		<string>net.user.callcaption.prefschanged</string>
 		<key>cell</key>
 		<string>PSSwitchCell</string>
-		<key>label</key>
-		<string>启用 CallCaption</string>
+		<key>default</key>
+		<true/>
 		<key>defaults</key>
 		<string>net.user.callcaption</string>
 		<key>key</key>
 		<string>Enabled</string>
-		<key>default</key>
-		<true/>
-		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<key>label</key>
+		<string>启用 CallCaption</string>
 	</dict>
 	<dict>
+		<key>PostNotification</key>
+		<string>net.user.callcaption.prefschanged</string>
 		<key>cell</key>
 		<string>PSSwitchCell</string>
-		<key>label</key>
-		<string>对方语音 → 中文字幕</string>
+		<key>default</key>
+		<true/>
 		<key>defaults</key>
 		<string>net.user.callcaption</string>
 		<key>key</key>
 		<string>RemoteEnabled</string>
-		<key>default</key>
-		<true/>
-		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<key>label</key>
+		<string>对方语音 → 中文字幕</string>
 	</dict>
 	<dict>
+		<key>PostNotification</key>
+		<string>net.user.callcaption.prefschanged</string>
 		<key>cell</key>
 		<string>PSSwitchCell</string>
-		<key>label</key>
-		<string>双向模式：我的话 → 英文播报</string>
+		<key>default</key>
+		<false/>
 		<key>defaults</key>
 		<string>net.user.callcaption</string>
 		<key>key</key>
 		<string>LocalEnabled</string>
-		<key>default</key>
-		<false/>
-		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<key>label</key>
+		<string>双向模式：我的话 → 英文播报</string>
 	</dict>
 	<dict>
+		<key>PostNotification</key>
+		<string>net.user.callcaption.prefschanged</string>
 		<key>cell</key>
 		<string>PSSwitchCell</string>
-		<key>label</key>
-		<string>显示识别原文</string>
+		<key>default</key>
+		<true/>
 		<key>defaults</key>
 		<string>net.user.callcaption</string>
 		<key>key</key>
 		<string>ShowRecognized</string>
-		<key>default</key>
-		<true/>
-		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<key>label</key>
+		<string>显示识别原文</string>
 	</dict>
 	<dict>
+		<key>PostNotification</key>
+		<string>net.user.callcaption.prefschanged</string>
 		<key>cell</key>
 		<string>PSSwitchCell</string>
-		<key>label</key>
-		<string>显示译文</string>
+		<key>default</key>
+		<true/>
 		<key>defaults</key>
 		<string>net.user.callcaption</string>
 		<key>key</key>
 		<string>ShowTranslated</string>
-		<key>default</key>
-		<true/>
-		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<key>label</key>
+		<string>显示译文</string>
 	</dict>
 	<dict>
+		<key>PostNotification</key>
+		<string>net.user.callcaption.prefschanged</string>
 		<key>cell</key>
 		<string>PSSwitchCell</string>
-		<key>label</key>
-		<string>中文字幕语音播报</string>
+		<key>default</key>
+		<true/>
 		<key>defaults</key>
 		<string>net.user.callcaption</string>
 		<key>key</key>
 		<string>TTSEnabled</string>
-		<key>default</key>
-		<true/>
-		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<key>label</key>
+		<string>中文字幕语音播报</string>
 	</dict>
 	<dict>
+		<key>PostNotification</key>
+		<string>net.user.callcaption.prefschanged</string>
 		<key>cell</key>
 		<string>PSSwitchCell</string>
-		<key>label</key>
-		<string>云端语音识别（更准，需联网）</string>
+		<key>default</key>
+		<true/>
 		<key>defaults</key>
 		<string>net.user.callcaption</string>
 		<key>key</key>
 		<string>CloudASR</string>
-		<key>default</key>
-		<true/>
-		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<key>label</key>
+		<string>云端语音识别（更准，需联网）</string>
 	</dict>
 	<dict>
+		<key>PostNotification</key>
+		<string>net.user.callcaption.prefschanged</string>
 		<key>cell</key>
 		<string>PSSwitchCell</string>
-		<key>label</key>
-		<string>大字幕</string>
+		<key>default</key>
+		<false/>
 		<key>defaults</key>
 		<string>net.user.callcaption</string>
 		<key>key</key>
 		<string>LargeCaptions</string>
-		<key>default</key>
-		<false/>
-		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<key>label</key>
+		<string>大字幕</string>
 	</dict>
 	<dict>
+		<key>PostNotification</key>
+		<string>net.user.callcaption.prefschanged</string>
 		<key>cell</key>
 		<string>PSSwitchCell</string>
-		<key>label</key>
-		<string>面板常驻显示（非通话也显示）</string>
+		<key>default</key>
+		<false/>
 		<key>defaults</key>
 		<string>net.user.callcaption</string>
 		<key>key</key>
 		<string>AlwaysShowPanel</string>
-		<key>default</key>
-		<false/>
-		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<key>label</key>
+		<string>面板常驻显示（非通话也显示）</string>
 	</dict>
-
 	<dict>
 		<key>cell</key>
 		<string>PSGroupCell</string>
-		<key>label</key>
-		<string>语言</string>
 		<key>footerText</key>
 		<string>识别语言代码（BCP-47）：对方英文 en-US、日文 ja-JP、韩文 ko-KR；我的语言通常 zh-CN。</string>
+		<key>label</key>
+		<string>语言</string>
 	</dict>
 	<dict>
+		<key>PostNotification</key>
+		<string>net.user.callcaption.prefschanged</string>
 		<key>cell</key>
 		<string>PSEditTextCell</string>
-		<key>label</key>
-		<string>对方语言</string>
+		<key>default</key>
+		<string>en-US</string>
 		<key>defaults</key>
 		<string>net.user.callcaption</string>
 		<key>key</key>
 		<string>RemoteLocale</string>
-		<key>default</key>
-		<string>en-US</string>
+		<key>label</key>
+		<string>对方语言</string>
 		<key>placeholder</key>
 		<string>en-US</string>
-		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
 	</dict>
 	<dict>
+		<key>PostNotification</key>
+		<string>net.user.callcaption.prefschanged</string>
 		<key>cell</key>
 		<string>PSEditTextCell</string>
-		<key>label</key>
-		<string>我的语言</string>
+		<key>default</key>
+		<string>zh-CN</string>
 		<key>defaults</key>
 		<string>net.user.callcaption</string>
 		<key>key</key>
 		<string>LocalLocale</string>
-		<key>default</key>
-		<string>zh-CN</string>
+		<key>label</key>
+		<string>我的语言</string>
 		<key>placeholder</key>
 		<string>zh-CN</string>
-		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
 	</dict>
-
 	<dict>
 		<key>cell</key>
 		<string>PSGroupCell</string>
-		<key>label</key>
-		<string>翻译引擎</string>
 		<key>footerText</key>
 		<string>自动 = 已填 Key 优先，失败自动切换。Bing 免费端点已下线，已改用 MyMemory（LCT 同款免费服务）；Google 不填 Key 用免费接口。DeepL Key 留空时，会尝试复用 LiveCallTranslator 已保存的 DEEPL_API_KEY。点“测试翻译接口 / Key”会真实请求各接口并显示 HTTP 状态与返回原因。</string>
+		<key>label</key>
+		<string>翻译引擎</string>
 	</dict>
 	<dict>
 		<key>cell</key>
 		<string>PSTitleValueCell</string>
-		<key>label</key>
-		<string>当前引擎</string>
+		<key>default</key>
+		<string>auto</string>
 		<key>defaults</key>
 		<string>net.user.callcaption</string>
 		<key>key</key>
 		<string>Engine</string>
-		<key>default</key>
-		<string>auto</string>
+		<key>label</key>
+		<string>当前引擎</string>
 	</dict>
 	<dict>
+		<key>action</key>
+		<string>chooseEngine</string>
 		<key>cell</key>
 		<string>PSButtonCell</string>
 		<key>label</key>
 		<string>选择翻译引擎…</string>
-		<key>action</key>
-		<string>chooseEngine</string>
 	</dict>
 	<dict>
+		<key>action</key>
+		<string>testTranslationAPI</string>
 		<key>cell</key>
 		<string>PSButtonCell</string>
 		<key>label</key>
 		<string>测试翻译接口 / Key…</string>
-		<key>action</key>
-		<string>testTranslationAPI</string>
 	</dict>
 	<dict>
+		<key>PostNotification</key>
+		<string>net.user.callcaption.prefschanged</string>
 		<key>cell</key>
 		<string>PSEditTextCell</string>
-		<key>label</key>
-		<string>DeepL API Key</string>
+		<key>default</key>
+		<string></string>
 		<key>defaults</key>
 		<string>net.user.callcaption</string>
 		<key>key</key>
 		<string>DeepLKey</string>
-		<key>default</key>
-		<string></string>
-		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<key>label</key>
+		<string>DeepL API Key</string>
 	</dict>
 	<dict>
+		<key>PostNotification</key>
+		<string>net.user.callcaption.prefschanged</string>
 		<key>cell</key>
 		<string>PSEditTextCell</string>
-		<key>label</key>
-		<string>Google API Key</string>
+		<key>default</key>
+		<string></string>
 		<key>defaults</key>
 		<string>net.user.callcaption</string>
 		<key>key</key>
 		<string>GoogleKey</string>
-		<key>default</key>
-		<string></string>
-		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<key>label</key>
+		<string>Google API Key</string>
 	</dict>
-
 	<dict>
 		<key>cell</key>
 		<string>PSGroupCell</string>
-		<key>label</key>
-		<string>AI 自定义接口（OpenAI 兼容）</string>
 		<key>footerText</key>
 		<string>填写 chat/completions 完整地址、Key 与模型名，例如 DeepSeek。</string>
+		<key>label</key>
+		<string>AI 自定义接口（OpenAI 兼容）</string>
 	</dict>
 	<dict>
+		<key>PostNotification</key>
+		<string>net.user.callcaption.prefschanged</string>
 		<key>cell</key>
 		<string>PSEditTextCell</string>
-		<key>label</key>
-		<string>AI 接口地址</string>
+		<key>default</key>
+		<string>https://api.deepseek.com/v1/chat/completions</string>
 		<key>defaults</key>
 		<string>net.user.callcaption</string>
 		<key>key</key>
 		<string>AIURL</string>
-		<key>default</key>
-		<string>https://api.deepseek.com/v1/chat/completions</string>
-		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<key>label</key>
+		<string>AI 接口地址</string>
 	</dict>
 	<dict>
+		<key>PostNotification</key>
+		<string>net.user.callcaption.prefschanged</string>
 		<key>cell</key>
 		<string>PSEditTextCell</string>
-		<key>label</key>
-		<string>AI API Key</string>
+		<key>default</key>
+		<string></string>
 		<key>defaults</key>
 		<string>net.user.callcaption</string>
 		<key>key</key>
 		<string>AIKey</string>
-		<key>default</key>
-		<string></string>
-		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<key>label</key>
+		<string>AI API Key</string>
 	</dict>
 	<dict>
+		<key>PostNotification</key>
+		<string>net.user.callcaption.prefschanged</string>
 		<key>cell</key>
 		<string>PSEditTextCell</string>
-		<key>label</key>
-		<string>AI 模型名</string>
+		<key>default</key>
+		<string>deepseek-chat</string>
 		<key>defaults</key>
 		<string>net.user.callcaption</string>
 		<key>key</key>
 		<string>AIModel</string>
-		<key>default</key>
-		<string>deepseek-chat</string>
-		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<key>label</key>
+		<string>AI 模型名</string>
 	</dict>
-
 	<dict>
 		<key>cell</key>
 		<string>PSGroupCell</string>
-		<key>label</key>
-		<string>播报音色</string>
 		<key>footerText</key>
 		<string>列表来自系统已安装语音。中文用于对方字幕播报，英文用于我方双向播报。</string>
+		<key>label</key>
+		<string>播报音色</string>
 	</dict>
 	<dict>
+		<key>action</key>
+		<string>chooseZhVoice</string>
 		<key>cell</key>
 		<string>PSButtonCell</string>
 		<key>label</key>
 		<string>选择中文播报音色…</string>
-		<key>action</key>
-		<string>chooseZhVoice</string>
 	</dict>
 	<dict>
+		<key>action</key>
+		<string>chooseEnVoice</string>
 		<key>cell</key>
 		<string>PSButtonCell</string>
 		<key>label</key>
 		<string>选择英文播报音色…</string>
-		<key>action</key>
-		<string>chooseEnVoice</string>
 	</dict>
-
 	<dict>
 		<key>cell</key>
 		<string>PSGroupCell</string>
@@ -326,26 +321,26 @@
 		<string>诊断</string>
 	</dict>
 	<dict>
+		<key>PostNotification</key>
+		<string>net.user.callcaption.prefschanged</string>
 		<key>cell</key>
 		<string>PSSwitchCell</string>
-		<key>label</key>
-		<string>诊断日志</string>
+		<key>default</key>
+		<true/>
 		<key>defaults</key>
 		<string>net.user.callcaption</string>
 		<key>key</key>
 		<string>Diagnostics</string>
-		<key>default</key>
-		<true/>
-		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<key>label</key>
+		<string>诊断日志</string>
 	</dict>
 	<dict>
+		<key>action</key>
+		<string>openLog</string>
 		<key>cell</key>
 		<string>PSButtonCell</string>
 		<key>label</key>
 		<string>打开诊断日志</string>
-		<key>action</key>
-		<string>openLog</string>
 	</dict>
 	<dict>
 		<key>cell</key>
@@ -355,31 +350,59 @@
 	</dict>
 	<dict>
 		<key>cell</key>
-		<string>PSSliderCell</string>
-		<key>label</key>
-		<string>对方原音</string>
-		<key>key</key>
-		<string>RemoteOriginalVolume</string>
+		<string>PSLinkListCell</string>
 		<key>default</key>
 		<integer>30</integer>
-		<key>min</key>
-		<integer>0</integer>
-		<key>max</key>
-		<integer>100</integer>
+		<key>key</key>
+		<string>RemoteOriginalVolume</string>
+		<key>label</key>
+		<string>对方原音</string>
+		<key>titles</key>
+		<array>
+			<string>0%</string>
+			<string>10%</string>
+			<string>30%</string>
+			<string>50%</string>
+			<string>70%</string>
+			<string>100%</string>
+		</array>
+		<key>values</key>
+		<array>
+			<integer>0</integer>
+			<integer>10</integer>
+			<integer>30</integer>
+			<integer>50</integer>
+			<integer>70</integer>
+			<integer>100</integer>
+		</array>
 	</dict>
 	<dict>
 		<key>cell</key>
-		<string>PSSliderCell</string>
-		<key>label</key>
-		<string>我方原音</string>
-		<key>key</key>
-		<string>LocalOriginalVolume</string>
+		<string>PSLinkListCell</string>
 		<key>default</key>
 		<integer>30</integer>
-		<key>min</key>
-		<integer>0</integer>
-		<key>max</key>
-		<integer>100</integer>
+		<key>key</key>
+		<string>LocalOriginalVolume</string>
+		<key>label</key>
+		<string>我方原音</string>
+		<key>titles</key>
+		<array>
+			<string>0%</string>
+			<string>10%</string>
+			<string>30%</string>
+			<string>50%</string>
+			<string>70%</string>
+			<string>100%</string>
+		</array>
+		<key>values</key>
+		<array>
+			<integer>0</integer>
+			<integer>10</integer>
+			<integer>30</integer>
+			<integer>50</integer>
+			<integer>70</integer>
+			<integer>100</integer>
+		</array>
 	</dict>
 </array>
 </plist>

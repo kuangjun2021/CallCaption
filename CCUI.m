@@ -526,15 +526,12 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
         if (!g_panelWin) return;
         EnsureMiniUI();
         g_miniWin.center = g_panelCard.center;
+        // 直接隐藏，绝不做 alpha 动画：通话界面处于非活跃 scene 时动画 completion 会被挂起，
+        // 导致“日志已 collapse 但面板还显示”，直到截图/切前台才补执行。
+        g_panelWin.hidden = YES;
+        g_panelWin.alpha = 1.0;
         g_miniWin.hidden = NO;
-        g_miniWin.alpha = 0.0;
-        [UIView animateWithDuration:0.18 animations:^{
-            g_miniWin.alpha = 1.0;
-            g_panelWin.alpha = 0.0;
-        } completion:^(BOOL finished) {
-            g_panelWin.hidden = YES;
-            g_panelWin.alpha = 1.0;
-        }];
+        g_miniWin.alpha = 1.0;
         g_panelExpanded = NO;
     });
 }

@@ -381,7 +381,7 @@ static void VoiceLists(NSString *prefix,
     NSArray *func = @[
         MkSwitch(@"Enabled", @"启用 CallCaption", YES),
         MkSwitch(@"RemoteEnabled", @"对方语音 → 中文字幕", YES),
-        MkSwitch(@"LocalEnabled", @"双向模式：我的话 → 英文播报", NO),
+        MkSwitch(@"LocalEnabled", @"双向模式：我的话 → 英文播报", YES),
         MkSwitch(@"ShowRecognized", @"显示识别原文", YES),
         MkSwitch(@"ShowTranslated", @"显示译文", YES),
         MkSwitch(@"TTSEnabled", @"中文字幕语音播报", YES),

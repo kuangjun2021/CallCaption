@@ -1116,7 +1116,7 @@ static void CCWriteChunkWav(NSString *path, NSData *pcm) {
 - (void)translateProvisional:(NSString *)text {
     if (text.length < 4) return;
     if (lastProvisional && [lastProvisional isEqualToString:text]) return;
-    if (self.expectCJK && !CCPrefBool(CC_K_LOCAL_ENABLED, NO)) return;
+    if (self.expectCJK && !CCPrefBool(CC_K_LOCAL_ENABLED, YES)) return;
     if (!self.expectCJK && !CCPrefBool(CC_K_REMOTE_ENABLED, YES)) return;
     lastProvisional = text;
     lastProvTransAt = CFAbsoluteTimeGetCurrent();
@@ -1152,7 +1152,7 @@ static void CCWriteChunkWav(NSString *path, NSData *pcm) {
     NSString *ip = self.expectCJK ? @"LI|" : @"I|";
     CCTransportSendLine([ip stringByAppendingString:t]);
 
-    if (self.expectCJK && !CCPrefBool(CC_K_LOCAL_ENABLED, NO)) return;
+    if (self.expectCJK && !CCPrefBool(CC_K_LOCAL_ENABLED, YES)) return;
     if (!self.expectCJK && !CCPrefBool(CC_K_REMOTE_ENABLED, YES)) return;
 
     partialGen++;                 // 取消还没回来的 provisional，final 优先
@@ -1234,7 +1234,7 @@ static void CheckArm(void) {
             [g_remote flushChunk];
 
         // 我方通道（双向模式）
-        BOOL localOn = CCPrefBool(CC_K_LOCAL_ENABLED, NO);
+        BOOL localOn = CCPrefBool(CC_K_LOCAL_ENABLED, YES);
         if (localOn) {
             NSString *oldLocalLocale = g_local.locale;
             [g_local configure];
@@ -1340,25 +1340,44 @@ static void CheckArm(void) {
             }
         }
 
-        // SpringBoard 合成好的英文 TTS（CC_DIR/cc_tts.wav）复制到 WhatsApp Documents，
-        // App 探针会把它混进上行。
+        // SpringBoard 合成好的 TTS 复制到 WhatsApp Documents：
+        //   cc_tts.wav    = 英文（我方说话 → 对方听），App 探针混进上行
+        //   cc_tts_zh.wav = 中文（对方说话 → 我方听），App 探针混进下行
+        // 两个文件必须各自独立监视：以前只看 cc_tts.wav，双向模式没开时中文 TTS
+        // 永远不会被复制，用户就一直只听到英文原音。
         {
-            static NSTimeInterval lastTts = 0;
-            NSString *src = [CC_DIR stringByAppendingPathComponent:@"cc_tts.wav"];
-            NSDictionary *at = [[NSFileManager defaultManager] attributesOfItemAtPath:src error:nil];
-            NSTimeInterval mt = [at[NSFileModificationDate] timeIntervalSince1970];
-            if (at && mt > lastTts) {
-                lastTts = mt;
+            static NSTimeInterval lastEn = 0, lastZh = 0;
+            static BOOL primed = NO;
+            NSFileManager *fm = [NSFileManager defaultManager];
+            NSString *pEn = [CC_DIR stringByAppendingPathComponent:@"cc_tts.wav"];
+            NSString *pZh = [CC_DIR stringByAppendingPathComponent:@"cc_tts_zh.wav"];
+            NSDictionary *atEn = [fm attributesOfItemAtPath:pEn error:nil];
+            NSDictionary *atZh = [fm attributesOfItemAtPath:pZh error:nil];
+            NSTimeInterval mtEn = atEn ? [atEn[NSFileModificationDate] timeIntervalSince1970] : 0;
+            NSTimeInterval mtZh = atZh ? [atZh[NSFileModificationDate] timeIntervalSince1970] : 0;
+            if (!primed) {
+                // 守护进程刚起：旧文件只记时间，不再复制，避免上一通的 TTS 被重播
+                primed = YES;
+                lastEn = mtEn;
+                lastZh = mtZh;
+            } else if ((mtEn > lastEn) || (mtZh > lastZh)) {
                 NSString *docs = CCFindWhatsAppDocs();
                 if (docs) {
-                    for (NSString *name in @[@"cc_tts.wav", @"cc_tts_zh.wav"]) {
-                        NSString *s2 = [CC_DIR stringByAppendingPathComponent:name];
-                        if (![[NSFileManager defaultManager] fileExistsAtPath:s2]) continue;
-                        NSString *dst = [docs stringByAppendingPathComponent:name];
-                        [[NSFileManager defaultManager] removeItemAtPath:dst error:nil];
-                        BOOL ok = [[NSFileManager defaultManager] copyItemAtPath:s2 toPath:dst error:nil];
+                    if (mtEn > lastEn) {
+                        lastEn = mtEn;
+                        NSString *dst = [docs stringByAppendingPathComponent:@"cc_tts.wav"];
+                        [fm removeItemAtPath:dst error:nil];
+                        BOOL ok = [fm copyItemAtPath:pEn toPath:dst error:nil];
                         if (ok) chmod(dst.fileSystemRepresentation, 0666);
-                        CCLogf(@"tts copied %@ ok=%d", name, ok);
+                        CCLogf(@"tts copied cc_tts.wav ok=%d", ok);
+                    }
+                    if (mtZh > lastZh) {
+                        lastZh = mtZh;
+                        NSString *dst = [docs stringByAppendingPathComponent:@"cc_tts_zh.wav"];
+                        [fm removeItemAtPath:dst error:nil];
+                        BOOL ok = [fm copyItemAtPath:pZh toPath:dst error:nil];
+                        if (ok) chmod(dst.fileSystemRepresentation, 0666);
+                        CCLogf(@"tts copied cc_tts_zh.wav ok=%d", ok);
                     }
                 }
             }
@@ -1397,7 +1416,7 @@ static void CCDaemonNotifCB(CFNotificationCenterRef center, void *observer,
             CCLogf(@"prefs changed: engine=%@ deeplKeyLen=%lu remote=%d local=%d",
                    CCPrefStr(CC_K_ENGINE, @"auto"), (unsigned long)dk.length,
                    CCPrefBool(CC_K_REMOTE_ENABLED, YES),
-                   CCPrefBool(CC_K_LOCAL_ENABLED, NO));
+                   CCPrefBool(CC_K_LOCAL_ENABLED, YES));
         } else if ([suffix isEqualToString:@"arm"] || [suffix isEqualToString:@"disarm"]) {
             dispatch_async(g_stateQ, ^{ CheckArm(); });
         }
@@ -1415,7 +1434,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.14.0-alpha40)");
+        CCLogLine(@"audioservice started (v0.14.0-alpha41)");
         // LCT 的 livecallhelper 在识别前会配置 AVAudioSession（SoloAmbient/Default）；
         // 我们的守护进程以前没做这一步，补上。
         @try {
@@ -1434,7 +1453,7 @@ int main(int argc, char *argv[]) {
             CCLogf(@"prefs boot: engine=%@ deeplKeyLen=%lu remote=%d local=%d",
                    CCPrefStr(CC_K_ENGINE, @"auto"), (unsigned long)dk.length,
                    CCPrefBool(CC_K_REMOTE_ENABLED, YES),
-                   CCPrefBool(CC_K_LOCAL_ENABLED, NO));
+                   CCPrefBool(CC_K_LOCAL_ENABLED, YES));
         }
 
         g_stateQ = dispatch_queue_create("net.user.callcaption.audio", DISPATCH_QUEUE_SERIAL);

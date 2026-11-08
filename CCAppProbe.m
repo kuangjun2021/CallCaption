@@ -21,8 +21,6 @@
 #import <dlfcn.h>
 #import <stdatomic.h>
 
-static void CCMixZhDownlink(AudioBufferList *ioData, UInt32 frames, UInt32 bpf);
-
 typedef void (*CCMSHookFunction)(void *symbol, void *hook, void **old);
 static CCMSHookFunction g_MSHook = NULL;
 static os_log_t g_oslog = NULL;
@@ -124,7 +122,7 @@ static CCFmt *CCFindFmt(AudioUnit unit) {
 
 // ---------- 包装 render callback + WAV 录制 ----------
 
-#define CC_CAP_SECONDS 120
+#define CC_CAP_SECONDS 1800
 
 typedef struct {
     AURenderCallback proc;
@@ -149,6 +147,8 @@ typedef struct {
 
 static CCCB *g_cbs[16];
 static _Atomic(int) g_cbCount;
+
+static void CCMixZhDownlink(CCCB *c, AudioBufferList *ioData, UInt32 frames);
 
 static float CCReadSample(const void *data, UInt32 idx, UInt32 bits, UInt32 flags) {
     if (flags & kAudioFormatFlagIsFloat) {
@@ -209,10 +209,7 @@ static OSStatus CCWrappedRender(void *refCon, AudioUnitRenderActionFlags *flags,
         ? c->proc(c->refcon, flags, ts, bus, frames, ioData) : -1;
     if (st == noErr) {
         CCRecordCB(c, ioData, frames);
-        if (ioData && frames && ioData->mNumberBuffers > 0) {
-            UInt32 bpf = ioData->mBuffers[0].mDataByteSize / frames;
-            CCMixZhDownlink(ioData, frames, bpf);
-        }
+        CCMixZhDownlink(c, ioData, frames);
     }
     return st;
 }
@@ -396,6 +393,8 @@ static void CCLoadTTSIfNeeded(void) {
         NSTimeInterval mt = [at[NSFileModificationDate] timeIntervalSince1970];
         if (mt <= g_ttsMtime) return;
         g_ttsMtime = mt;
+        // 上一通电话遗留的旧 TTS 不播（避免新通话一接通就冒出昨天的话）
+        if ([[NSDate date] timeIntervalSince1970] - mt > 120.0) return;
         NSData *d = [NSData dataWithContentsOfFile:p];
         if (d.length <= 44) return;
         if (!g_ttsRing) {
@@ -429,6 +428,7 @@ static void CCLoadZhTTSIfNeeded(void) {
         NSTimeInterval mt = [at[NSFileModificationDate] timeIntervalSince1970];
         if (mt <= g_ttsZhMtime) return;
         g_ttsZhMtime = mt;
+        if ([[NSDate date] timeIntervalSince1970] - mt > 120.0) return;
         NSData *d = [NSData dataWithContentsOfFile:p];
         if (d.length <= 44) return;
         if (!g_ttsZhRing) {
@@ -476,44 +476,120 @@ static void CCLoadConfigIfNeeded(void) {
     } @catch (NSException *e) { }
 }
 
-static void CCMixZhDownlink(AudioBufferList *ioData, UInt32 frames, UInt32 bpf) {
-    if (!g_ttsZhRing || !ioData || frames == 0 || bpf != 4) return;
-    uint32_t head = atomic_load(&g_ttsZhHead);
-    uint32_t tail = atomic_load(&g_ttsZhTail);
-    if (head == tail) return;
-    float *f = (float *)ioData->mBuffers[0].mData;
-    if (!f) return;
-    UInt32 n = MIN(frames, ioData->mBuffers[0].mDataByteSize / 4);
-    for (UInt32 i = 0; i < n; i++) {
-        if (tail == head) break;
-        float t = g_ttsZhRing[tail % g_ttsZhCap];
-        f[i] = f[i] * (float)g_duckRemote + t;
-        tail++;
+// ---------- 格式无关的 TTS 混音 ----------
+// 关键：通话 buffer 不一定是 float32 单声道（可能是 int16 / 双声道 / 24k），
+// 以前 bpf==4 才混音，格式一不符就完全听不到 TTS。下面按真实格式读改写，
+// 目标采样率与 48k 不一致时做零阶保持重采样。
+static _Atomic(uint64_t) g_zhMixCalls;
+
+static float CCReadAt(const void *data, UInt32 idx, UInt32 bits, UInt32 flags) {
+    if (flags & kAudioFormatFlagIsFloat) {
+        if (bits == 32) return ((const float *)data)[idx];
+        if (bits == 64) return (float)((const double *)data)[idx];
+        return 0;
     }
-    atomic_store(&g_ttsZhTail, tail);
+    if (bits == 16) return (float)(((const int16_t *)data)[idx]) / 32768.0f;
+    if (bits == 32) return (float)((double)((const int32_t *)data)[idx] / 2147483648.0);
+    return 0;
 }
 
-static void CCMaybeMixUplink(AudioBufferList *ioData, UInt32 frames) {
-    if (!g_ttsRing || !ioData || !frames) return;
-    AudioBuffer *b = &ioData->mBuffers[0];
-    if (!b->mData || b->mDataByteSize < 4) return;
-    UInt32 bpf = b->mDataByteSize / frames;
-    if (bpf != 4) return;                 // 只处理 float32 单声道
-    uint32_t head = atomic_load(&g_ttsHead);
-    uint32_t tail = atomic_load(&g_ttsTail);
-    UInt32 avail = head - tail;
-    if (!avail) return;
-    float *f = (float *)b->mData;
-    UInt32 n = b->mDataByteSize / 4;
-    if (n > frames) n = frames;
-    UInt32 m = MIN(n, avail);
-    for (UInt32 i = 0; i < m; i++) {
-        float t = g_ttsRing[tail % g_ttsCap];
-        f[i] = f[i] * (float)g_duckLocal + t;   // 原声按设置压低，混入英文 TTS
-        tail++;
+static void CCWriteAt(void *data, UInt32 idx, UInt32 bits, UInt32 flags, float val) {
+    if (flags & kAudioFormatFlagIsFloat) {
+        if (bits == 32) { ((float *)data)[idx] = val; return; }
+        if (bits == 64) { ((double *)data)[idx] = (double)val; return; }
+        return;
     }
-    atomic_store(&g_ttsTail, tail);
-    atomic_fetch_add(&g_mixCalls, 1);
+    if (bits == 16) {
+        int v = (int)lrintf(val * 32767.0f);
+        if (v > 32767) v = 32767;
+        if (v < -32768) v = -32768;
+        ((int16_t *)data)[idx] = (int16_t)v;
+    } else if (bits == 32) {
+        double d = (double)val * 2147483647.0;
+        if (d > 2147483647.0) d = 2147483647.0;
+        if (d < -2147483648.0) d = -2147483648.0;
+        ((int32_t *)data)[idx] = (int32_t)llrint(d);
+    }
+}
+
+// 每帧字节数 + 记录到的 ASBD 对齐，推断实际格式
+static BOOL CCResolveFmt(UInt32 bpf, UInt32 fmtCh, UInt32 fmtBits, UInt32 fmtFlags,
+                         UInt32 *outCh, UInt32 *outBits, UInt32 *outFlags) {
+    if (bpf == 0) return NO;
+    UInt32 ch = fmtCh ? fmtCh : 1;
+    UInt32 bits = fmtBits ? fmtBits : 32;
+    UInt32 flags = fmtBits ? fmtFlags : kAudioFormatFlagIsFloat;
+    if ((bits / 8) * ch != bpf) {
+        if (bpf == 2) { ch = 1; bits = 16; flags = 0; }
+        else if (bpf == 4) { ch = 1; bits = 32; flags = kAudioFormatFlagIsFloat; }
+        else if (bpf == 8) { ch = 2; bits = 32; flags = kAudioFormatFlagIsFloat; }
+        else if (bpf == 12) { ch = 3; bits = 32; flags = kAudioFormatFlagIsFloat; }
+        else return NO;
+    }
+    *outCh = ch; *outBits = bits; *outFlags = flags;
+    return YES;
+}
+
+static void CCMixRingInto(float *ring, uint32_t cap,
+                          _Atomic(uint32_t) *headp, _Atomic(uint32_t) *tailp,
+                          void *data, UInt32 frames, UInt32 ch,
+                          UInt32 bits, UInt32 flags, UInt32 rate,
+                          double duck, double *phase,
+                          _Atomic(uint64_t) *counter) {
+    if (!ring || !data || frames == 0 || ch == 0) return;
+    uint32_t head = atomic_load(headp);
+    uint32_t tail = atomic_load(tailp);
+    if (head == tail) return;
+    double step = 48000.0 / (double)(rate ? rate : 48000);
+    double pos = *phase;
+    BOOL mixed = NO;
+    for (UInt32 i = 0; i < frames && tail != head; i++) {
+        while (pos >= 1.0 && tail != head) {
+            tail++;
+            pos -= 1.0;
+        }
+        if (tail == head) break;
+        float t = ring[tail % cap];
+        for (UInt32 c = 0; c < ch; c++) {
+            UInt32 idx = i * ch + c;
+            float v = CCReadAt(data, idx, bits, flags);
+            CCWriteAt(data, idx, bits, flags, v * (float)duck + t);
+        }
+        mixed = YES;
+        pos += step;
+    }
+    *phase = (pos >= 0 && pos < 64.0) ? pos : 0;
+    atomic_store(tailp, tail);
+    if (mixed && counter) atomic_fetch_add(counter, 1);
+}
+
+static void CCMixZhDownlink(CCCB *c, AudioBufferList *ioData, UInt32 frames) {
+    if (!g_ttsZhRing || !c || !ioData || frames == 0 || ioData->mNumberBuffers == 0) return;
+    AudioBuffer *b = &ioData->mBuffers[0];
+    if (!b->mData || b->mDataByteSize < 2) return;
+    UInt32 ch, bits, flags;
+    if (!CCResolveFmt(b->mDataByteSize / frames, c->fmt.ch, c->fmt.bits, c->fmt.flags,
+                      &ch, &bits, &flags)) return;
+    UInt32 rate = c->fmt.rate > 0 ? (UInt32)c->fmt.rate : 48000;
+    static double phase;
+    CCMixRingInto(g_ttsZhRing, g_ttsZhCap, &g_ttsZhHead, &g_ttsZhTail,
+                  b->mData, frames, ch, bits, flags, rate,
+                  g_duckRemote, &phase, &g_zhMixCalls);
+}
+
+static void CCMixEnUplink(AudioUnit unit, AudioBufferList *ioData, UInt32 frames) {
+    if (!g_ttsRing || !ioData || frames == 0 || ioData->mNumberBuffers == 0) return;
+    AudioBuffer *b = &ioData->mBuffers[0];
+    if (!b->mData || b->mDataByteSize < 2) return;
+    CCFmt *f = CCFindFmt(unit);
+    UInt32 ch, bits, flags;
+    if (!CCResolveFmt(b->mDataByteSize / frames, f ? f->ch : 0, f ? f->bits : 0,
+                      f ? f->flags : 0, &ch, &bits, &flags)) return;
+    UInt32 rate = (f && f->rate > 0) ? (UInt32)f->rate : 48000;
+    static double phase;
+    CCMixRingInto(g_ttsRing, g_ttsCap, &g_ttsHead, &g_ttsTail,
+                  b->mData, frames, ch, bits, flags, rate,
+                  g_duckLocal, &phase, &g_mixCalls);
 }
 
 static OSStatus CCHookedRender(AudioUnit unit, AudioUnitRenderActionFlags *flags,
@@ -532,7 +608,7 @@ static OSStatus CCHookedRender(AudioUnit unit, AudioUnitRenderActionFlags *flags
             if (!isfinite(rms)) rms = 0;
             atomic_store(&g_renderRmsBits, CCFloatBits(rms));
         }
-        CCMaybeMixUplink(ioData, frames);
+        CCMixEnUplink(unit, ioData, frames);
         atomic_fetch_add(&g_renderCalls, 1);
     }
     return st;
@@ -562,8 +638,19 @@ static void CCReport(void) {
                  (unsigned long long)calls);
     }
 
-    static CFAbsoluteTime lastBeat;
+    static CFAbsoluteTime lastTtsLog;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - lastTtsLog >= 5.0) {
+        lastTtsLog = now;
+        uint32_t eh = atomic_load(&g_ttsHead), et = atomic_load(&g_ttsTail);
+        uint32_t zh = atomic_load(&g_ttsZhHead), zt = atomic_load(&g_ttsZhTail);
+        uint64_t mc = atomic_load(&g_mixCalls), zc = atomic_load(&g_zhMixCalls);
+        if (eh != et || zh != zt || mc || zc)
+            CCAppLog(@"tts en(%u) zh(%u) mix up%llu down%llu duck %.2f/%.2f",
+                     (unsigned)(eh - et), (unsigned)(zh - zt),
+                     (unsigned long long)mc, (unsigned long long)zc,
+                     g_duckLocal, g_duckRemote);
+    }
     if (now - lastBeat >= 30.0) {
         lastBeat = now;
         CCAppLog(@"alive %@ ctx%d rt%llu rtrms%.4f mix%llu setprop%p msh%p",

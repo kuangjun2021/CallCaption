@@ -632,7 +632,7 @@ static void RefreshBoxes(void) {
     BOOL showR = CCPrefBool(CC_K_SHOW_RECOGNIZED, YES);
     BOOL showT = CCPrefBool(CC_K_SHOW_TRANSLATED, YES);
     BOOL remoteOn = CCPrefBool(CC_K_REMOTE_ENABLED, YES);
-    BOOL localOn = CCPrefBool(CC_K_LOCAL_ENABLED, NO);
+    BOOL localOn = CCPrefBool(CC_K_LOCAL_ENABLED, YES);
 
     LayoutBox(g_remoteBox, g_texts[0], g_texts[1], g_engines[0], showR, showT);
     if (!remoteOn) g_remoteBox.hidden = YES;
@@ -767,7 +767,7 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
         }
         BOOL st[5] = {
             g_sessionActive,
-            CCPrefBool(CC_K_LOCAL_ENABLED, NO),
+            CCPrefBool(CC_K_LOCAL_ENABLED, YES),
             CCPrefBool(CC_K_REMOTE_ENABLED, YES),
             CCPrefBool(CC_K_SHOW_RECOGNIZED, YES),
             CCPrefBool(CC_K_SHOW_TRANSLATED, YES),
@@ -804,7 +804,7 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
             [self toggleSession];
             break;
         case 1:
-            CCSetPrefBool(CC_K_LOCAL_ENABLED, !CCPrefBool(CC_K_LOCAL_ENABLED, NO));
+            CCSetPrefBool(CC_K_LOCAL_ENABLED, !CCPrefBool(CC_K_LOCAL_ENABLED, YES));
             g_texts[2] = g_texts[3] = @"";
             g_engines[1] = nil;
             break;
@@ -1318,6 +1318,8 @@ static void CCWriteWav48kFile(NSString *path, NSData *pcm) {
 // TTS 合成成 48k PCM，写到 CC_DIR/<fileName>；守护进程再复制给 App 探针做混音
 static void CCTTSBuffer(NSString *text, NSString *lang, NSString *fileName) {
     if (!text.length) return;
+    CCLogf(@"tts synth start %@ [%lu chars] %@", lang, (unsigned long)text.length,
+           text.length > 40 ? [text substringToIndex:40] : text);
     AVSpeechSynthesizer *synth = [[AVSpeechSynthesizer alloc] init];
     AVSpeechUtterance *u = [[AVSpeechUtterance alloc] initWithString:text];
     NSString *vid = [lang hasPrefix:@"zh"] ? CCPrefStr(CC_K_TTS_VOICE, @"")
@@ -1336,8 +1338,10 @@ static void CCTTSBuffer(NSString *text, NSString *lang, NSString *fileName) {
             if (n == 0) {
                 if (!done) {
                     done = YES;
-                    NSString *p = [CC_DIR stringByAppendingPathComponent:fileName];
-                    CCWriteWav48kFile(p, out);
+                    if (out.length) {
+                        NSString *p = [CC_DIR stringByAppendingPathComponent:fileName];
+                        CCWriteWav48kFile(p, out);
+                    }
                     CCLogf(@"tts %@ -> %@ %lu bytes", lang, fileName,
                            (unsigned long)out.length);
                     keep = nil;
@@ -1380,8 +1384,11 @@ static void CCTTSBuffer(NSString *text, NSString *lang, NSString *fileName) {
                    dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         if (!done) {
             done = YES;
-            NSString *p = [CC_DIR stringByAppendingPathComponent:fileName];
-            CCWriteWav48kFile(p, out);
+            if (out.length) {
+                NSString *p = [CC_DIR stringByAppendingPathComponent:fileName];
+                CCWriteWav48kFile(p, out);
+            }
+            CCLogf(@"tts timeout %@ %lu bytes", fileName, (unsigned long)out.length);
             keep = nil;
         }
     });
@@ -1606,7 +1613,7 @@ void CCUIBoot(void) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.14.0-alpha40)");
+        CCLogLine(@"CallCaption UI booted (single window v0.14.0-alpha41)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

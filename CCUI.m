@@ -344,7 +344,8 @@ static void EnsurePanelUI(void) {
     if (g_panelCard) return;
     CGFloat w = CardWidth();
     CGFloat h = 150.0;
-    CGFloat y = ScreenH() - h - 100.0;
+    // LCT 风格：面板放在屏幕中间偏上，不再贴底
+    CGFloat y = (ScreenH() - h) / 2.0 - 40.0;
 
     UIVisualEffectView *blur = [[UIVisualEffectView alloc]
         initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark]];
@@ -656,7 +657,12 @@ static void DeliverText(int idx, NSString *text) {
 
     g_texts[idx] = text;
     g_textAt[idx] = now;
-    RefreshBoxes();
+    // 只要字幕出现，小面板必须处于收回状态
+    if (g_panelExpanded) {
+        [CCUIHelper collapsePanel];   // collapsePanel 里会 RefreshBoxes
+    } else {
+        RefreshBoxes();
+    }
 }
 
 void CCUIDeliverRemoteOriginal(NSString *text)  { DeliverText(0, text); }
@@ -828,6 +834,7 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
             if (!g_panelExpanded) { g_panelCard.hidden = YES; g_panelCard.alpha = 1.0; }
         });
         [self showGrabber];
+        RefreshBoxes();   // 面板收起后按现有内容恢复字幕框（没有内容就保持隐藏）
     });
 }
 
@@ -838,6 +845,9 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
         CCLogf(@"panel: expand");
         g_panelExpanded = YES;
         [self hideGrabberNow];
+        // 面板打开时先收起字幕框，避免面板和字幕重叠
+        if (g_remoteBox) g_remoteBox.hidden = YES;
+        if (g_localBox) g_localBox.hidden = YES;
         g_panelCard.hidden = NO;
         g_panelCard.alpha = 0;
         [UIView animateWithDuration:0.20 animations:^{ g_panelCard.alpha = 1.0; }];
@@ -902,7 +912,8 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
     if (f.origin.x < 0) f.origin.x = 0;
     if (f.origin.x > ScreenW() - f.size.width) f.origin.x = ScreenW() - f.size.width;
     if (f.origin.y < 60) f.origin.y = 60;
-    if (f.origin.y > ScreenH() - 120) f.origin.y = ScreenH() - 120;
+    if (f.origin.y > ScreenH() - f.size.height - 60)
+        f.origin.y = ScreenH() - f.size.height - 60;
     card.frame = f;
     [p setTranslation:CGPointZero inView:g_root];
 }
@@ -1595,7 +1606,7 @@ void CCUIBoot(void) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.14.0-alpha26)");
+        CCLogLine(@"CallCaption UI booted (single window v0.14.0-alpha27)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

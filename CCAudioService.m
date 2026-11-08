@@ -673,6 +673,11 @@ static void CCDaemonNotifCB(CFNotificationCenterRef center, void *observer,
         NSString *suffix = [n substringFromIndex:CC_NOTIF_PREFIX.length];
         if ([suffix isEqualToString:@"prefschanged"]) {
             CCPrefsReload();
+            NSString *dk = CCPrefStr(CC_K_DEEPL_KEY, @"");
+            CCLogf(@"prefs changed: engine=%@ deeplKeyLen=%lu remote=%d local=%d",
+                   CCPrefStr(CC_K_ENGINE, @"auto"), (unsigned long)dk.length,
+                   CCPrefBool(CC_K_REMOTE_ENABLED, YES),
+                   CCPrefBool(CC_K_LOCAL_ENABLED, NO));
         } else if ([suffix isEqualToString:@"arm"] || [suffix isEqualToString:@"disarm"]) {
             dispatch_async(g_stateQ, ^{ CheckArm(); });
         }
@@ -690,7 +695,14 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.13.9)");
+        CCLogLine(@"audioservice started (v0.13.10)");
+        {
+            NSString *dk = CCPrefStr(CC_K_DEEPL_KEY, @"");
+            CCLogf(@"prefs boot: engine=%@ deeplKeyLen=%lu remote=%d local=%d",
+                   CCPrefStr(CC_K_ENGINE, @"auto"), (unsigned long)dk.length,
+                   CCPrefBool(CC_K_REMOTE_ENABLED, YES),
+                   CCPrefBool(CC_K_LOCAL_ENABLED, NO));
+        }
 
         g_stateQ = dispatch_queue_create("net.user.callcaption.audio", DISPATCH_QUEUE_SERIAL);
 

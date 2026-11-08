@@ -111,6 +111,26 @@ static NSString *CCObjString(NSString *key, NSString *def) {
         (__bridge CFStringRef)CC_NOTIF, NULL, NULL, YES);
 }
 
+// 所有带 key 的单元格（开关/输入框）都显式写入 net.user.callcaption 域，
+// 避免 Preferences 默认 setter 在 rootless 环境把值写到别的域或没同步。
+- (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
+    id k = [specifier propertyForKey:@"key"];
+    if ([k isKindOfClass:[NSString class]] && [k length]) {
+        [self saveValue:value forKey:(NSString *)k];
+    } else {
+        [super setPreferenceValue:value specifier:specifier];
+    }
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    NSString *dk = CCObjString(@"DeepLKey", @"");
+    NSString *gk = CCObjString(@"GoogleKey", @"");
+    SLog(@"viewWillAppear Engine=%@ DeepLKeyLen=%lu GoogleKeyLen=%lu",
+         CCObjString(@"Engine", @"auto"),
+         (unsigned long)dk.length, (unsigned long)gk.length);
+}
+
 - (void)presentSheet:(UIAlertController *)sheet {
     if (sheet.popoverPresentationController) {
         sheet.popoverPresentationController.sourceView = self.view;

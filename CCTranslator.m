@@ -54,8 +54,17 @@ static NSString *LangName(NSString *code) {
 // 自己的 DeepLKey 为空时，复用 LiveCallTranslator 已保存的 DEEPL_API_KEY。
 // 这样用户不用在两个插件里重复填同一个 Key；不会把 Key 写进日志。
 static NSString *DeepLKey(void) {
-    NSString *k = CCPrefStr(CC_K_DEEPL_KEY, @"");
-    if (k.length) return k;
+    NSString *k = [CCPrefStr(CC_K_DEEPL_KEY, @"")
+                   stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    static NSUInteger g_lastOwnLen = 0;
+    if (k.length) {
+        if (k.length != g_lastOwnLen) {
+            g_lastOwnLen = k.length;
+            CCLogf(@"deepl key: own key present (len=%lu)", (unsigned long)k.length);
+        }
+        return k;
+    }
+    g_lastOwnLen = 0;
 
     static NSString *g_lctKey = nil;
     static CFAbsoluteTime g_lctAt = 0;
@@ -63,13 +72,22 @@ static NSString *DeepLKey(void) {
     if (now - g_lctAt > 60.0) {
         g_lctAt = now;
         g_lctKey = nil;
-        NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:
-            @"/var/mobile/Library/Preferences/net.limneos.livecalltranslator.plist"];
+        NSString *path = @"/var/mobile/Library/Preferences/net.limneos.livecalltranslator.plist";
+        BOOL exists = [[NSFileManager defaultManager] fileExistsAtPath:path];
+        NSDictionary *d = exists ? [NSDictionary dictionaryWithContentsOfFile:path] : nil;
         id v = d[@"DEEPL_API_KEY"];
+        if ([v isKindOfClass:[NSString class]]) {
+            v = [(NSString *)v stringByTrimmingCharactersInSet:
+                 [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        }
         if ([v isKindOfClass:[NSString class]] && [v length]) {
             g_lctKey = v;
             CCLogf(@"deepl key: using LiveCallTranslator key (len=%lu)",
                    (unsigned long)[v length]);
+        } else if (exists) {
+            CCLogf(@"deepl key: LCT prefs exists but DEEPL_API_KEY empty");
+        } else {
+            CCLogf(@"deepl key: LCT prefs not found (%@)", path);
         }
     }
     return g_lctKey ?: @"";

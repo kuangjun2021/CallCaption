@@ -15,4 +15,9 @@ launchctl bootstrap system "$JB/Library/LaunchDaemons/net.user.callcaption.audio
   || launchctl load "$JB/Library/LaunchDaemons/net.user.callcaption.audioservice.plist" >/dev/null 2>&1 \
   || true
 
+
+# 阶段 1：让新的 mediaserverd/audiomxd 注入 dylib 立即加载（LCT 也是这么做的）
+killall -9 mediaserverd 2>/dev/null || true
+killall -9 audiomxd 2>/dev/null || true
+
 exit 0

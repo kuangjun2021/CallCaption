@@ -5,11 +5,17 @@ INSTALL_TARGET_PROCESSES = SpringBoard mediaserverd
 
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME = CallCaption
+TWEAK_NAME = CallCaption CallCaptionAudioHook
 CallCaption_FILES = Tweak.x CCSupport.m CCTranslator.m CCEngine.m CCUI.m CCMicCapture.m CCSettings.m
 CallCaption_FRAMEWORKS = Foundation UIKit AudioToolbox CoreTelephony AVFoundation Speech CoreFoundation CallKit
 CallCaption_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-command-line-argument -Wno-unused-function -fno-objc-msgsend-selector-stubs -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
 CallCaption_LDFLAGS = -Wl,-fixup_chains
+
+# 阶段 1：LCT 同款 AudioUnitRender/AudioUnitProcess 观察（只打 RMS，不改音频）
+CallCaptionAudioHook_FILES = CCAudioHook.m
+CallCaptionAudioHook_FRAMEWORKS = Foundation AudioToolbox
+CallCaptionAudioHook_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function -fno-objc-msgsend-selector-stubs -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
+CallCaptionAudioHook_LDFLAGS = -Wl,-fixup_chains
 
 BUNDLE_NAME = CallCaptionPrefs
 CallCaptionPrefs_FILES = CallCaptionRootListController.m

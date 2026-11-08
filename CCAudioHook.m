@@ -1,10 +1,14 @@
-// CCAudioHook.m — LCT 同款音频验证（阶段 1）
-// 注入 mediaserverd / audiomxd，只观察 AudioUnitRender / AudioUnitProcess 的音频，
-// 打印格式与 RMS，不修改音频、不接 UI。用于验证“远端/本地声音到底有没有经过系统音频单元”。
+// CCAudioHook.m — LCT 同款音频验证（阶段 1，alpha3 安全版）
+// 注入 mediaserverd / audiomxd，观察 AudioUnitRender / AudioUnitProcess。
 //
-// 日志通道：mediaserverd 是沙盒进程，不能直接写 /var/mobile/...，
-// 所以主通道是 Darwin 通知 "net.user.callcaption.log hook: ..."，
-// 由 SpringBoard 侧的 Tweak.x 收到后写进 probe.log；os_log/文件只是兜底。
+// alpha2 教训：渲染线程里绝不能调 AudioUnitGetProperty / ObjC / 文件 / 通知，
+// 会和音频单元锁自死锁，把 mediaserverd 卡死（通话拨不出去、看门狗 0x8BADF00D）。
+// 现在渲染线程只做纯 C 的 RMS 统计 + 原子写；格式查询、字符串、日志全部挪到
+// 后台 1 秒定时器里做。
+//
+// 日志通道：mediaserverd 是沙盒进程，写不了 /var/mobile/...，
+// 主通道是 Darwin 通知 "net.user.callcaption.log hook: ..."，
+// 由 SpringBoard 侧 Tweak.x 收到后写进 probe.log；os_log/文件只是兜底。
 #import <Foundation/Foundation.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <AudioUnit/AudioUnit.h>
@@ -15,12 +19,15 @@
 #import <unistd.h>
 #import <sys/stat.h>
 #import <dlfcn.h>
+#import <stdatomic.h>
+#import <mach/mach_time.h>
 
 typedef void (*CCMSHookFunction)(void *symbol, void *hook, void **old);
 static CCMSHookFunction g_MSHook = NULL;
 static os_log_t g_oslog = NULL;
 
 #define CC_HOOK_LOG @"/var/mobile/Library/CallCaption/probe.log"
+#define CC_HOOK_OFF @"/var/mobile/Library/CallCaption/audiohook.off"
 
 typedef OSStatus (*AURenderFn)(AudioUnit, AudioUnitRenderActionFlags *,
                                const AudioTimeStamp *, UInt32, UInt32,
@@ -32,6 +39,8 @@ typedef OSStatus (*AUProcessFn)(AudioUnit, AudioUnitRenderActionFlags *,
 static AURenderFn g_origRender = NULL;
 static AUProcessFn g_origProcess = NULL;
 
+#pragma mark - 日志（只在后台线程调用）
+
 static void CCHookLog(NSString *fmt, ...) {
     @autoreleasepool {
         va_list ap;
@@ -39,35 +48,30 @@ static void CCHookLog(NSString *fmt, ...) {
         NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
         va_end(ap);
 
-        // 统一日志（Console/log show 可见）
         if (!g_oslog) g_oslog = os_log_create("net.user.callcaption", "audiohook");
         os_log_with_type(g_oslog, OS_LOG_TYPE_DEFAULT, "%{public}s", msg.UTF8String);
 
-        // 主通道：Darwin 通知 → SpringBoard 落盘（沙盒进程无文件权限）
-        // 通知名别太长，压缩到 90 字符以内，确保各版本 notifyd 都收得下。
+        // Darwin 通知 → SpringBoard 落盘。通知名压到 90 字符以内。
         NSString *shortMsg = msg.length > 90 ? [msg substringToIndex:90] : msg;
         NSString *name = [NSString stringWithFormat:@"net.user.callcaption.log hook: %@", shortMsg];
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                              (__bridge CFStringRef)name,
                                              NULL, NULL, true);
 
-        // 兜底：万一进程有权限就直接写文件
-        NSString *line = [NSString stringWithFormat:@"[%@] hook: %@\n",
-                          [NSDate date], msg];
-        NSFileManager *fm = [NSFileManager defaultManager];
-        [fm createDirectoryAtPath:@"/var/mobile/Library/CallCaption"
-      withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0777} error:nil];
-        const char *paths[] = {
-            CC_HOOK_LOG.UTF8String,
-            "/tmp/ccaudiohook.log",
-            NULL
-        };
-        for (int i = 0; paths[i]; i++) {
-            FILE *fp = fopen(paths[i], "a");
-            if (!fp) continue;
-            fputs(line.UTF8String, fp);
-            fclose(fp);
-            chmod(paths[i], 0666);
+        NSString *line = [NSString stringWithFormat:@"[%@] hook: %@\n", [NSDate date], msg];
+        NSMutableArray<NSString *> *paths = [NSMutableArray array];
+        [paths addObject:CC_HOOK_LOG];
+        [paths addObject:@"/tmp/ccaudiohook.log"];
+        NSString *tmp = NSTemporaryDirectory();
+        if (tmp.length) [paths addObject:[tmp stringByAppendingPathComponent:@"ccaudiohook.log"]];
+        for (NSString *p in paths) {
+            @try {
+                FILE *fp = fopen(p.fileSystemRepresentation, "a");
+                if (!fp) continue;
+                fputs(line.UTF8String, fp);
+                fclose(fp);
+                chmod(p.fileSystemRepresentation, 0666);
+            } @catch (NSException *e) { }
         }
     }
 }
@@ -76,92 +80,91 @@ static NSString *CCProcName(void) {
     return [[NSProcessInfo processInfo] processName] ?: @"?";
 }
 
-static NSString *CCFourCC(UInt32 v) {
-    char c[5] = { (char)((v >> 24) & 0xff), (char)((v >> 16) & 0xff),
-                  (char)((v >> 8) & 0xff), (char)(v & 0xff), 0 };
-    for (int i = 0; i < 4; i++) if (c[i] < 32 || c[i] > 126) c[i] = '?';
-    return [NSString stringWithUTF8String:c];
-}
+#pragma mark - 渲染线程：只做纯 C 统计
 
-// 每个 unit/bus 每秒最多一条，避免刷屏
+#define CC_MAX_SLOTS 16
+
 typedef struct {
-    AudioUnit unit;
-    UInt32 bus;
-    CFAbsoluteTime last;
+    _Atomic(uintptr_t) unit;
+    _Atomic(uint32_t) bus;
+    _Atomic(uint32_t) frames;
+    _Atomic(uint64_t) calls;       // 渲染次数
+    _Atomic(uint64_t) lastTick;
+    _Atomic(uint32_t) rmsBits;     // float 的位模式
+    _Atomic(uint32_t) isProcess;
 } CCSlot;
-static CCSlot g_slots[32];
 
-static BOOL CCShouldLog(AudioUnit unit, UInt32 bus) {
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    for (int i = 0; i < 32; i++) {
-        if (g_slots[i].unit == unit && g_slots[i].bus == bus) {
-            if (now - g_slots[i].last < 1.0) return NO;
-            g_slots[i].last = now;
-            return YES;
-        }
-    }
-    for (int i = 0; i < 32; i++) {
-        if (g_slots[i].unit == NULL) {
-            g_slots[i].unit = unit;
-            g_slots[i].bus = bus;
-            g_slots[i].last = now;
-            return YES;
-        }
-    }
-    return NO;
+static CCSlot g_slots[CC_MAX_SLOTS];
+static uint64_t g_lastCalls[CC_MAX_SLOTS];
+
+static inline uint32_t CCFloatBits(float f) {
+    union { float f; uint32_t u; } v;
+    v.f = f;
+    return v.u;
+}
+static inline float CCBitsFloat(uint32_t u) {
+    union { float f; uint32_t u; } v;
+    v.u = u;
+    return v.f;
 }
 
-static void CCInspect(AudioUnit unit, UInt32 bus, UInt32 frames,
-                      AudioBufferList *ioData, const char *source) {
-    if (!unit || !ioData || frames == 0) return;
-    if (!CCShouldLog(unit, bus)) return;
-
-    AudioStreamBasicDescription asbd;
-    memset(&asbd, 0, sizeof(asbd));
-    UInt32 size = sizeof(asbd);
-    OSStatus st = AudioUnitGetProperty(unit, kAudioUnitProperty_StreamFormat,
-                                       kAudioUnitScope_Output, bus, &asbd, &size);
-    if (st != noErr || asbd.mSampleRate <= 0) {
-        size = sizeof(asbd);
-        st = AudioUnitGetProperty(unit, kAudioUnitProperty_StreamFormat,
-                                  kAudioUnitScope_Input, bus, &asbd, &size);
+// 渲染线程安全：只在空槽上用 CAS 占位，不分配内存、不调用音频单元 API。
+static CCSlot *CCSlotFor(uintptr_t unit, uint32_t bus) {
+    for (int i = 0; i < CC_MAX_SLOTS; i++) {
+        if (atomic_load_explicit(&g_slots[i].unit, memory_order_relaxed) == unit &&
+            atomic_load_explicit(&g_slots[i].bus, memory_order_relaxed) == bus) {
+            return &g_slots[i];
+        }
     }
+    for (int i = 0; i < CC_MAX_SLOTS; i++) {
+        uintptr_t expected = 0;
+        if (atomic_compare_exchange_strong(&g_slots[i].unit, &expected, unit)) {
+            atomic_store(&g_slots[i].bus, bus);
+            return &g_slots[i];
+        }
+        if (expected == unit) {
+            atomic_store(&g_slots[i].bus, bus);
+            return &g_slots[i];
+        }
+    }
+    return NULL;
+}
 
-    AudioComponentDescription desc;
-    memset(&desc, 0, sizeof(desc));
-    AudioComponent comp = AudioComponentInstanceGetComponent(unit);
-    if (comp) AudioComponentGetDescription(comp, &desc);
+static void CCRecord(AudioUnit unit, UInt32 bus, UInt32 frames,
+                     AudioBufferList *abl, BOOL isProcess) {
+    if (!unit || !abl || frames == 0) return;
+    CCSlot *s = CCSlotFor((uintptr_t)unit, bus);
+    if (!s) return;
+    atomic_store_explicit(&s->isProcess, isProcess ? 1 : 0, memory_order_relaxed);
 
-    BOOL isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) &&
-                   asbd.mBitsPerChannel == 32;
     double sum = 0;
     UInt64 count = 0;
-    if (isFloat) {
-        for (UInt32 i = 0; i < ioData->mNumberBuffers; i++) {
-            AudioBuffer *b = &ioData->mBuffers[i];
-            if (!b->mData || b->mDataByteSize == 0) continue;
-            float *f = (float *)b->mData;
-            UInt32 n = b->mDataByteSize / sizeof(float);
-            for (UInt32 j = 0; j < n; j++) sum += fabsf(f[j]);
-            count += n;
-        }
+    UInt32 nb = abl->mNumberBuffers;
+    if (nb > 8) nb = 8;
+    for (UInt32 i = 0; i < nb; i++) {
+        AudioBuffer *b = &abl->mBuffers[i];
+        if (!b->mData || b->mDataByteSize < 4) continue;
+        float *f = (float *)b->mData;
+        UInt32 n = b->mDataByteSize / 4;
+        if (n > 4096) n = 4096;          // 实时线程里限定工作量
+        for (UInt32 j = 0; j < n; j++) sum += fabsf(f[j]);
+        count += n;
     }
-    double rms = count ? (sum / (double)count) : 0;
-
-    CCHookLog(@"%@ u%lx b%u f%u sr%.0f c%u fl%d rms%.5f %@/%@",
-              source, (unsigned long)((uintptr_t)unit & 0xffff), bus, frames,
-              asbd.mSampleRate, asbd.mChannelsPerFrame, isFloat, rms,
-              CCFourCC(desc.componentSubType), CCFourCC(desc.componentManufacturer));
+    if (count) {
+        float rms = (float)(sum / (double)count);
+        if (!isfinite(rms)) rms = 0;
+        atomic_store_explicit(&s->rmsBits, CCFloatBits(rms), memory_order_relaxed);
+    }
+    atomic_store_explicit(&s->frames, frames, memory_order_relaxed);
+    atomic_store_explicit(&s->lastTick, mach_absolute_time(), memory_order_relaxed);
+    atomic_fetch_add_explicit(&s->calls, 1, memory_order_relaxed);
 }
 
 static OSStatus CCHookedRender(AudioUnit unit, AudioUnitRenderActionFlags *flags,
                                const AudioTimeStamp *ts, UInt32 bus,
                                UInt32 frames, AudioBufferList *ioData) {
     OSStatus st = g_origRender ? g_origRender(unit, flags, ts, bus, frames, ioData) : -1;
-    @try {
-        if (st == noErr && ioData && frames)
-            CCInspect(unit, bus, frames, ioData, "render");
-    } @catch (NSException *e) { }
+    if (st == noErr && ioData && frames) CCRecord(unit, bus, frames, ioData, NO);
     return st;
 }
 
@@ -169,22 +172,61 @@ static OSStatus CCHookedProcess(AudioUnit unit, AudioUnitRenderActionFlags *flag
                                 const AudioTimeStamp *ts, UInt32 frames,
                                 AudioBufferList *ioData) {
     OSStatus st = g_origProcess ? g_origProcess(unit, flags, ts, frames, ioData) : -1;
-    @try {
-        if (st == noErr && ioData && frames)
-            CCInspect(unit, 0, frames, ioData, "process");
-    } @catch (NSException *e) { }
+    if (st == noErr && ioData && frames) CCRecord(unit, 0, frames, ioData, YES);
     return st;
 }
 
-__attribute__((constructor))
-static void CCAudioHookBoot(void) {
+#pragma mark - 后台线程：每秒汇报一次
+
+static void CCReport(void) {
+    for (int i = 0; i < CC_MAX_SLOTS; i++) {
+        CCSlot *s = &g_slots[i];
+        uintptr_t unit = atomic_load(&s->unit);
+        if (!unit) continue;
+        uint64_t calls = atomic_load(&s->calls);
+        if (calls == 0 || calls == g_lastCalls[i]) continue;
+        g_lastCalls[i] = calls;
+
+        // 不在这里碰 AudioComponent/unit 指针：音频单元可能已被销毁，
+        // 后台线程解引用会崩 mediaserverd。只读我们自己的原子字段。
+        float rms = CCBitsFloat(atomic_load(&s->rmsBits));
+        CCHookLog(@"%@ u%lx b%u f%u rms%.5f n%llu",
+                  atomic_load(&s->isProcess) ? @"process" : @"render",
+                  (unsigned long)unit, atomic_load(&s->bus), atomic_load(&s->frames),
+                  rms, (unsigned long long)calls);
+    }
+}
+
+static dispatch_queue_t g_reportQ;
+static dispatch_source_t g_reportTimer;
+
+static void CCStartReporter(void) {
+    g_reportQ = dispatch_queue_create("cc.audiohook.report", DISPATCH_QUEUE_SERIAL);
+    g_reportTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, g_reportQ);
+    dispatch_source_set_timer(g_reportTimer, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
+                              NSEC_PER_SEC, 200 * NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(g_reportTimer, ^{ @autoreleasepool { CCReport(); } });
+    dispatch_resume(g_reportTimer);
+}
+
+#pragma mark - 安装
+
+static BOOL CCSymbolInAudioToolbox(void *sym) {
+    Dl_info info;
+    memset(&info, 0, sizeof(info));
+    if (!dladdr(sym, &info) || !info.dli_fname) return NO;
+    return strstr(info.dli_fname, "AudioToolbox") != NULL;
+}
+
+static void CCInstallHooks(void) {
     @autoreleasepool {
         NSString *proc = CCProcName();
-        // 先报一声，确认 dylib 到底有没有被注入
-        CCHookLog(@"dylib loaded proc=%@ pid=%d", proc, getpid());
-
         if (!([proc isEqualToString:@"mediaserverd"] ||
               [proc isEqualToString:@"audiomxd"])) {
+            return;
+        }
+        if ([[NSFileManager defaultManager] fileExistsAtPath:CC_HOOK_OFF]) {
+            CCHookLog(@"hook disabled by audiohook.off");
             return;
         }
 
@@ -194,9 +236,7 @@ static void CCAudioHookBoot(void) {
             if (!h) h = dlopen("/var/jb/usr/lib/libellekit.dylib", RTLD_NOW);
             if (!h) h = dlopen("libsubstrate.dylib", RTLD_NOW);
             if (h) g_MSHook = (CCMSHookFunction)dlsym(h, "MSHookFunction");
-            CCHookLog(@"MSHookFunction dlsym=%p from dlopen=%p", g_MSHook, h);
-        } else {
-            CCHookLog(@"MSHookFunction dlsym=%p", g_MSHook);
+            CCHookLog(@"MSHookFunction dlsym=%p dlopen=%p", g_MSHook, h);
         }
         if (!g_MSHook) {
             CCHookLog(@"MSHookFunction not found, hook aborted");
@@ -204,19 +244,37 @@ static void CCAudioHookBoot(void) {
         }
 
         void *renderSym = dlsym(RTLD_DEFAULT, "AudioUnitRender");
-        if (renderSym) {
+        if (renderSym && CCSymbolInAudioToolbox(renderSym)) {
             g_MSHook(renderSym, (void *)CCHookedRender, (void **)&g_origRender);
             CCHookLog(@"installed AudioUnitRender sym=%p old=%p", renderSym, g_origRender);
         } else {
-            CCHookLog(@"AudioUnitRender symbol not found");
+            CCHookLog(@"AudioUnitRender skipped sym=%p (not AudioToolbox)", renderSym);
         }
 
         void *processSym = dlsym(RTLD_DEFAULT, "AudioUnitProcess");
-        if (processSym) {
+        if (processSym && CCSymbolInAudioToolbox(processSym)) {
             g_MSHook(processSym, (void *)CCHookedProcess, (void **)&g_origProcess);
             CCHookLog(@"installed AudioUnitProcess sym=%p old=%p", processSym, g_origProcess);
         } else {
-            CCHookLog(@"AudioUnitProcess symbol not found");
+            CCHookLog(@"AudioUnitProcess skipped sym=%p (not AudioToolbox)", processSym);
         }
+    }
+}
+
+__attribute__((constructor))
+static void CCAudioHookBoot(void) {
+    @autoreleasepool {
+        NSString *proc = CCProcName();
+        CCHookLog(@"dylib loaded proc=%@ pid=%d", proc, getpid());
+        if (!([proc isEqualToString:@"mediaserverd"] ||
+              [proc isEqualToString:@"audiomxd"])) {
+            return;
+        }
+        CCStartReporter();
+        // 等进程/音频栈稳定后再装钩子，避免启动阶段碰到半初始化的音频单元
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
+                       dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            CCInstallHooks();
+        });
     }
 }

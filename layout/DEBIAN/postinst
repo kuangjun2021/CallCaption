@@ -16,13 +16,12 @@ launchctl bootstrap system "$JB/Library/LaunchDaemons/net.user.callcaption.audio
   || true
 
 
-# 阶段 1：让新的 mediaserverd/audiomxd 注入 dylib 立即加载（LCT 也是这么做的）
-# 根less 环境 PATH 里可能没有 killall，用绝对路径
+# alpha3：不再在安装时强杀 mediaserverd/audiomxd。
+# alpha2 这么干之后，通话建立阶段 mediaserverd 被看门狗判定卡死（0x8BADF00D），
+# 拨号直接拨不出去。新钩子只在“重启用户空间”后自然加载，安装脚本不碰音频栈。
 KILLALL=/var/jb/usr/bin/killall
 [ -x "$KILLALL" ] || KILLALL=/usr/bin/killall
 [ -x "$KILLALL" ] || KILLALL=killall
 "$KILLALL" -9 CallCaptionAudioService 2>/dev/null || true
-"$KILLALL" -9 mediaserverd 2>/dev/null || true
-"$KILLALL" -9 audiomxd 2>/dev/null || true
 
 exit 0

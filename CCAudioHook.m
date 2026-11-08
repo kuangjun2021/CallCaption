@@ -247,6 +247,43 @@ static void CCNoteProperty(AudioUnit unit, AudioUnitPropertyID prop,
     CCHookLog(@"setprop u%x p%u s%u e%u sz%u", u, prop, scope, elem, size);
 }
 
+static NSString *CCFourCC(UInt32 v) {
+    char c[5] = { (char)((v >> 24) & 0xff), (char)((v >> 16) & 0xff),
+                  (char)((v >> 8) & 0xff), (char)(v & 0xff), 0 };
+    for (int i = 0; i < 4; i++) if (c[i] < 32 || c[i] > 126) c[i] = '?';
+    return [NSString stringWithUTF8String:c];
+}
+
+// 记录每个 unit/scope/element 的音频格式 + 组件类型，用来区分对方/我方音频单元
+static void CCNoteFormat(AudioUnit unit, AudioUnitScope scope, AudioUnitElement elem,
+                         const AudioStreamBasicDescription *a) {
+    static uint32_t seen[64][3];
+    static int seenCount;
+    uint32_t u = (uint32_t)((uintptr_t)unit & 0xffff);
+    for (int i = 0; i < seenCount; i++) {
+        if (seen[i][0] == u && seen[i][1] == scope && seen[i][2] == elem) return;
+    }
+    if (seenCount < 64) {
+        seen[seenCount][0] = u; seen[seenCount][1] = scope; seen[seenCount][2] = elem;
+        seenCount++;
+    }
+
+    UInt32 sub = 0, man = 0;
+    @try {
+        AudioComponent comp = AudioComponentInstanceGetComponent(unit);
+        AudioComponentDescription desc;
+        memset(&desc, 0, sizeof(desc));
+        if (comp) AudioComponentGetDescription(comp, &desc);
+        sub = desc.componentSubType;
+        man = desc.componentManufacturer;
+    } @catch (NSException *e) { }
+
+    CCHookLog(@"fmt u%x s%u e%u rate%.0f ch%u bpf%u bits%u fl0x%x sub%@ man%@",
+              u, scope, elem, a->mSampleRate, a->mChannelsPerFrame,
+              a->mBytesPerFrame, a->mBitsPerChannel, a->mFormatFlags,
+              CCFourCC(sub), CCFourCC(man));
+}
+
 static OSStatus CCHookedSetProp(AudioUnit unit, AudioUnitPropertyID prop,
                                 AudioUnitScope scope, AudioUnitElement elem,
                                 const void *inData, UInt32 inDataSize) {
@@ -277,8 +314,10 @@ static OSStatus CCHookedSetProp(AudioUnit unit, AudioUnitPropertyID prop,
     }
     if (prop == kAudioOutputUnitProperty_SetInputCallback) {
         CCNoteProperty(unit, prop, scope, elem, inDataSize);
-    } else if (prop == kAudioUnitProperty_StreamFormat ||
-               prop == kAudioOutputUnitProperty_EnableIO ||
+    } else if (prop == kAudioUnitProperty_StreamFormat) {
+        if (inData && inDataSize >= sizeof(AudioStreamBasicDescription))
+            CCNoteFormat(unit, scope, elem, (const AudioStreamBasicDescription *)inData);
+    } else if (prop == kAudioOutputUnitProperty_EnableIO ||
                prop == kAudioUnitProperty_MaximumFramesPerSlice) {
         CCNoteProperty(unit, prop, scope, elem, inDataSize);
     }

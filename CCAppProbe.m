@@ -454,7 +454,11 @@ static void CCReport(void) {
         CCFlushWav(c);
         uint64_t calls = atomic_load(&c->calls);
         static uint64_t last[16];
+        static CFAbsoluteTime lastLog[16];
+        CFAbsoluteTime nowCb = CFAbsoluteTimeGetCurrent();
         if (calls == 0 || calls == last[i]) continue;
+        if (nowCb - lastLog[i] < 5.0) continue;
+        lastLog[i] = nowCb;
         last[i] = calls;
         CCAppLog(@"cb u%x b%u f%u rms%.5f n%llu",
                  (unsigned)((uintptr_t)c->unit & 0xffff), c->bus,
@@ -464,7 +468,7 @@ static void CCReport(void) {
 
     static CFAbsoluteTime lastBeat;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - lastBeat >= 5.0) {
+    if (now - lastBeat >= 30.0) {
         lastBeat = now;
         CCAppLog(@"alive %@ ctx%d rt%llu rtrms%.4f mix%llu setprop%p msh%p",
                  CCProcName(), cbCount,

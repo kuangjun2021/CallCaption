@@ -566,36 +566,37 @@ static NSString *CCFindRemoteWav(NSString *preferred, double *mtimeOut) {
     if (g_waDocsDir) [dirs addObject:g_waDocsDir];
     if (dirs.count == 0) {
         NSString *base = @"/var/mobile/Containers/Data/Application";
-        NSArray *apps = [fm contentsOfDirectoryAtPath:base error:nil];
-        for (NSString *a in apps) {
+        for (NSString *a in [fm contentsOfDirectoryAtPath:base error:nil]) {
             NSString *docs = [[base stringByAppendingPathComponent:a]
                               stringByAppendingPathComponent:@"Documents"];
-            if (!docs) continue;
-            [dirs addObject:docs];
+            if (docs) [dirs addObject:docs];
         }
     }
-    NSString *best = nil, *newest = nil;
-    double bestE = 0, bestT = 0, newestT = 0, preferredE = -1;
+    NSString *largest = nil, *newest = nil;
+    unsigned long long largestSize = 0, preferredSize = 0;
+    double largestT = 0, newestT = 0;
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
     for (NSString *d in dirs) {
-        NSArray *files = [fm contentsOfDirectoryAtPath:d error:nil];
-        for (NSString *f in files) {
+        for (NSString *f in [fm contentsOfDirectoryAtPath:d error:nil]) {
             if (![f hasPrefix:@"cc_remote_"] || ![f hasSuffix:@".wav"]) continue;
             NSString *p = [d stringByAppendingPathComponent:f];
-            double t = 0;
-            double e = CCFileTailEnergy(p, &t);
-            if (preferred && [p isEqualToString:preferred]) preferredE = e;
+            NSDictionary *at = [fm attributesOfItemAtPath:p error:nil];
+            double t = [at[NSFileModificationDate] timeIntervalSince1970];
+            unsigned long long sz = [at[NSFileSize] unsignedLongLongValue];
             if (t > newestT) { newestT = t; newest = p; }
-            if (now - t < 20.0 && e > bestE) { bestE = e; best = p; }
+            if (preferred && [p isEqualToString:preferred]) preferredSize = sz;
+            if (now - t < 20.0 && sz > largestSize) { largestSize = sz; largest = p; largestT = t; }
         }
     }
-    // 迟滞：当前文件还有点声音就不乱切，避免把两路音频混进同一个识别任务
+    // 通话中真正的人声文件会持续增长，是最大的那个；铃声/提示音文件短且会停止增长。
+    // 迟滞：当前文件还占最大文件 70% 以上就不切换。
     NSString *pick = nil;
-    if (preferred && preferredE > 0.0008) pick = preferred;
-    else if (best && bestE > 0.0015) pick = best;
-    else pick = newest;
+    if (preferred && preferredSize > 0 && preferredSize * 10 >= largestSize * 7)
+        pick = preferred;
+    else
+        pick = largest ?: newest;
     if (pick) g_waDocsDir = [pick stringByDeletingLastPathComponent];
-    if (mtimeOut) *mtimeOut = bestT;
+    if (mtimeOut) *mtimeOut = largestT;
     return pick;
 }
 
@@ -1304,7 +1305,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.14.0-alpha20)");
+        CCLogLine(@"audioservice started (v0.14.0-alpha22)");
         // LCT 的 livecallhelper 在识别前会配置 AVAudioSession（SoloAmbient/Default）；
         // 我们的守护进程以前没做这一步，补上。
         @try {

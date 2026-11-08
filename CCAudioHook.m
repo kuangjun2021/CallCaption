@@ -327,54 +327,21 @@ static OSStatus CCHookedSetProp(AudioUnit unit, AudioUnitPropertyID prop,
 #pragma mark - 后台线程：每秒汇报一次
 
 static void CCReport(void) {
-    for (int i = 0; i < CC_MAX_SLOTS; i++) {
-        CCSlot *s = &g_slots[i];
-        uintptr_t unit = atomic_load(&s->unit);
-        if (!unit) continue;
-        uint64_t calls = atomic_load(&s->calls);
-        if (calls == 0 || calls == g_lastCalls[i]) continue;
-        g_lastCalls[i] = calls;
-
-        // 不在这里碰 AudioComponent/unit 指针：音频单元可能已被销毁，
-        // 后台线程解引用会崩 mediaserverd。只读我们自己的原子字段。
-        float rms = CCBitsFloat(atomic_load(&s->rmsBits));
-        CCHookLog(@"%@ u%lx b%u f%u rms%.5f n%llu",
-                  atomic_load(&s->isProcess) ? @"process" : @"render",
-                  (unsigned long)unit, atomic_load(&s->bus), atomic_load(&s->frames),
-                  rms, (unsigned long long)calls);
-    }
-
-    int cbCount = atomic_load(&g_cbCount);
-    for (int i = 0; i < cbCount; i++) {
-        CCCB *c = g_cbs[i];
-        if (!c) continue;
-        uint64_t calls = atomic_load(&c->calls);
-        if (calls == 0 || calls == g_lastCbCalls[i]) continue;
-        g_lastCbCalls[i] = calls;
-        CCHookLog(@"cb u%lx b%u f%u rms%.5f n%llu",
-                  (unsigned long)((uintptr_t)c->unit & 0xffff), c->bus,
-                  atomic_load(&c->frames), CCBitsFloat(atomic_load(&c->rmsBits)),
-                  (unsigned long long)calls);
-    }
-
-    // 心跳：每 5 秒一次，证明 dylib 注入/钩子安装状态
     static CFAbsoluteTime lastBeat;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - lastBeat >= 5.0) {
-        lastBeat = now;
-        int units = 0;
-        uint64_t calls = 0;
-        for (int i = 0; i < CC_MAX_SLOTS; i++) {
-            if (!atomic_load(&g_slots[i].unit)) continue;
-            units++;
-            calls += atomic_load(&g_slots[i].calls);
-        }
-        CCHookLog(@"alive %@ tried%d msh%d rt%d rp%d sp%d units%d cb%d calls%llu",
-                  CCProcName(), atomic_load(&g_hookTried), atomic_load(&g_mshookFound),
-                  atomic_load(&g_rtInstalled), atomic_load(&g_rpInstalled),
-                  g_origSetProp ? 1 : 0, units, cbCount,
-                  (unsigned long long)calls);
+    if (now - lastBeat < 30.0) return;
+    lastBeat = now;
+    int units = 0;
+    uint64_t calls = 0;
+    for (int i = 0; i < CC_MAX_SLOTS; i++) {
+        if (!atomic_load(&g_slots[i].unit)) continue;
+        units++;
+        calls += atomic_load(&g_slots[i].calls);
     }
+    CCHookLog(@"alive %@ tried%d msh%d rt%d rp%d sp%d units%d calls%llu",
+              CCProcName(), atomic_load(&g_hookTried), atomic_load(&g_mshookFound),
+              atomic_load(&g_rtInstalled), atomic_load(&g_rpInstalled),
+              g_origSetProp ? 1 : 0, units, (unsigned long long)calls);
 }
 
 static dispatch_queue_t g_reportQ;

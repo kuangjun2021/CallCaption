@@ -1099,6 +1099,8 @@ static NSString *g_sbLastText;
 static SFSpeechRecognizer *g_sbRecog;
 static SFSpeechRecognitionTask *g_sbTask;
 static NSTimer *g_sbTimer;
+static CFAbsoluteTime g_sbLastVoiceAt;
+static BOOL g_sbHadVoice;
 
 static void CCWriteWav16kFile(NSString *path, NSData *pcm) {
     FILE *fp = fopen(path.fileSystemRepresentation, "wb");
@@ -1158,6 +1160,7 @@ static void CCRemoteFileTick(void) {
     @try {
         if (!g_callActive) {
             g_sbOffset = 0; g_sbPath = nil; g_sbChunk = nil; g_sbLastText = nil;
+            g_sbHadVoice = NO; g_sbLastVoiceAt = 0;
             return;
         }
         NSString *p = [CC_DIR stringByAppendingPathComponent:@"remote16k.wav"];
@@ -1179,17 +1182,61 @@ static void CCRemoteFileTick(void) {
         g_sbOffset += n;
         if (!g_sbChunk) g_sbChunk = [NSMutableData data];
         [g_sbChunk appendData:[d subdataWithRange:NSMakeRange(0, n)]];
-        if (g_sbBusy) return;
-        if (g_sbChunk.length < 16000 * 2 * 4) return;      // 4 秒一块
+
+        // 新到音频的瞬时音量
+        {
+            const int16_t *np = (const int16_t *)d.bytes;
+            NSUInteger nn = n / 2;
+            double ns = 0;
+            for (NSUInteger i = 0; i < nn; i++) ns += fabs((double)np[i]);
+            double nrms = nn ? ns / (double)nn / 32768.0 : 0;
+            if (nrms > 0.006) {
+                g_sbHadVoice = YES;
+                g_sbLastVoiceAt = CFAbsoluteTimeGetCurrent();
+            }
+        }
+
+        // 识别任务在跑时不让块无限增长（之前出现过 54 秒的巨型块 → 301 取消）
+        if (g_sbBusy) {
+            NSUInteger maxBytes = 16000 * 2 * 6;
+            if (g_sbChunk.length > maxBytes)
+                g_sbChunk = [[g_sbChunk subdataWithRange:
+                              NSMakeRange(g_sbChunk.length - maxBytes, maxBytes)] mutableCopy];
+            return;
+        }
+
+        double dur = (double)g_sbChunk.length / 32000.0;
+        double silence = g_sbLastVoiceAt > 0
+            ? CFAbsoluteTimeGetCurrent() - g_sbLastVoiceAt : 0;
+        BOOL voiceEnded = g_sbHadVoice && silence > 0.6;
+        if (!(dur >= 6.0 || (dur >= 2.0 && voiceEnded))) return;
+
         NSData *pcm = [g_sbChunk copy];
         NSUInteger keep = 16000 * 2;                        // 1 秒重叠
         g_sbChunk = [[pcm subdataWithRange:NSMakeRange(pcm.length - keep, keep)] mutableCopy];
+        g_sbHadVoice = NO;
+        g_sbLastVoiceAt = 0;
+
         const int16_t *sp = pcm.bytes;
         NSUInteger cnt = pcm.length / 2;
         double sum = 0;
         for (NSUInteger i = 0; i < cnt; i++) sum += fabs((double)sp[i]);
         double avg = cnt ? sum / (double)cnt / 32768.0 : 0;
-        if (avg < 0.003) return;                            // 静音块跳过
+        if (avg < 0.0015) return;                           // 静音块跳过
+
+        // 音量归一：远端流经常只有 0.01 左右，SFSpeech 容易判成没说话
+        double gain = avg > 0.0001 ? 0.06 / avg : 1.0;
+        if (gain > 8.0) gain = 8.0;
+        if (gain < 1.0) gain = 1.0;
+        NSMutableData *ampl = [NSMutableData dataWithLength:pcm.length];
+        int16_t *ap = (int16_t *)ampl.mutableBytes;
+        for (NSUInteger i = 0; i < cnt; i++) {
+            int v = (int)((double)sp[i] * gain);
+            if (v > 32767) v = 32767;
+            if (v < -32768) v = -32768;
+            ap[i] = (int16_t)v;
+        }
+        pcm = ampl;
         NSString *tmp = [NSTemporaryDirectory() stringByAppendingPathComponent:@"cc_sb_chunk.wav"];
         CCWriteWav16kFile(tmp, pcm);
         if (!g_sbRecog) {
@@ -1314,7 +1361,7 @@ void CCUIBoot(void) {
                        dispatch_get_main_queue(), ^{
             CCRunSpeechSelfTest(YES);
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.14.0-alpha20)");
+        CCLogLine(@"CallCaption UI booted (single window v0.14.0-alpha21)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

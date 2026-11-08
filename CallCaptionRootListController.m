@@ -69,12 +69,27 @@ __attribute__((visibility("default")))
 + (void)load { SLog(@"bundle loaded"); }
 
 - (NSArray *)specifiers {
+    SLog(@"specifiers enter bundle=%@", self.bundle);
     if (!_specifiers) {
         @try { CCMigrateCFPrefsToFile(); } @catch (NSException *e) { SLog(@"migrate exc %@", e.reason); }
         NSBundle *b = self.bundle;
         if (!b) {
             b = [NSBundle bundleWithPath:@"/var/jb/Library/PreferenceBundles/CallCaptionPrefs.bundle"];
             if (b) self.bundle = b;
+        }
+        // 先走系统原生加载（对 PSLinkListCell 等类型最稳），失败再退回手工构建
+        if (b) {
+            @try {
+                NSArray *native = [self loadSpecifiersFromPlistName:@"Root" target:self bundle:b];
+                if (native.count) {
+                    SLog(@"native specs=%lu", (unsigned long)native.count);
+                    _specifiers = [native mutableCopy];
+                    return _specifiers;
+                }
+                SLog(@"native specs empty");
+            } @catch (NSException *e) {
+                SLog(@"native load exc: %@", e.reason);
+            }
         }
         NSString *path = [b pathForResource:@"Root" ofType:@"plist"];
         NSArray *dicts = [NSArray arrayWithContentsOfFile:path];

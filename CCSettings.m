@@ -130,6 +130,154 @@ __attribute__((visibility("default")))
 @property (nonatomic, assign) BOOL embedded;   // YES: 作为 Settings.app 子控制器，不显示“完成”
 @end
 
+// 自绘结果弹窗：每个端点一行，名称 + 结果左对齐
+@interface CCApiResultController : UIViewController <UIGestureRecognizerDelegate>
+@property (nonatomic, copy) NSArray<NSDictionary *> *rows;   // name / ok / detail
+@property (nonatomic, copy) NSString *summary;
+@end
+
+@implementation CCApiResultController {
+    UIView *_card;
+    UIButton *_copyButton;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.45];
+
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self
+                                                                          action:@selector(bgTapped:)];
+    tap.delegate = self;
+    [self.view addGestureRecognizer:tap];
+
+    CGFloat sw = [UIScreen mainScreen].bounds.size.width;
+    CGFloat cardW = MIN(sw - 44.0, 400.0);
+    CGFloat pad = 20.0;
+    CGFloat nameW = 86.0;
+    CGFloat resX = pad + nameW;
+    UIFont *nameFont = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    UIFont *detFont = [UIFont systemFontOfSize:14];
+
+    NSMutableArray<NSNumber *> *heights = [NSMutableArray array];
+    CGFloat bodyH = 0;
+    for (NSDictionary *r in self.rows) {
+        NSString *d = r[@"detail"] ?: @"";
+        CGFloat dh = [d boundingRectWithSize:CGSizeMake(cardW - resX - pad, CGFLOAT_MAX)
+                                     options:NSStringDrawingUsesLineFragmentOrigin
+                                  attributes:@{NSFontAttributeName: detFont}
+                                     context:nil].size.height;
+        CGFloat h = MAX(22.0, ceil(dh)) + 16.0;
+        [heights addObject:@(h)];
+        bodyH += h;
+    }
+
+    CGFloat headH = pad + 22.0 + 14.0;
+    CGFloat footH = 50.0;
+    CGFloat cardH = headH + bodyH + footH + 6.0;
+    CGFloat cardY = (CGRectGetHeight(self.view.bounds) - cardH) / 2.0;
+
+    _card = [[UIView alloc] initWithFrame:CGRectMake((sw - cardW) / 2.0, cardY, cardW, cardH)];
+    _card.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+    _card.layer.cornerRadius = 16.0;
+    _card.layer.cornerCurve = kCACornerCurveContinuous;
+    _card.clipsToBounds = YES;
+    [self.view addSubview:_card];
+
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(pad, pad, cardW - pad * 2, 22)];
+    title.text = @"接口测试结果";
+    title.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    title.textColor = [UIColor labelColor];
+    title.textAlignment = NSTextAlignmentCenter;
+    [_card addSubview:title];
+
+    CGFloat y = headH;
+    for (NSUInteger i = 0; i < self.rows.count; i++) {
+        NSDictionary *r = self.rows[i];
+        CGFloat h = heights[i].doubleValue;
+
+        if (i > 0) {
+            UIView *sep = [[UIView alloc] initWithFrame:
+                CGRectMake(pad, y, cardW - pad * 2, 1.0 / [UIScreen mainScreen].scale)];
+            sep.backgroundColor = [UIColor separatorColor];
+            [_card addSubview:sep];
+        }
+
+        BOOL ok = [r[@"ok"] boolValue];
+
+        UILabel *name = [[UILabel alloc] initWithFrame:CGRectMake(pad, y + 8.0, nameW - 8.0, 20)];
+        name.text = r[@"name"];
+        name.font = nameFont;
+        name.textColor = [UIColor labelColor];
+        [_card addSubview:name];
+
+        UILabel *det = [[UILabel alloc] initWithFrame:
+            CGRectMake(resX, y + 8.0, cardW - resX - pad, h - 16.0)];
+        det.text = r[@"detail"];
+        det.font = detFont;
+        det.numberOfLines = 0;
+        det.textColor = ok ? [UIColor secondaryLabelColor] : [UIColor systemRedColor];
+        [_card addSubview:det];
+
+        y += h;
+    }
+
+    UIView *btnSep = [[UIView alloc] initWithFrame:
+        CGRectMake(0, cardH - footH, cardW, 1.0 / [UIScreen mainScreen].scale)];
+    btnSep.backgroundColor = [UIColor separatorColor];
+    [_card addSubview:btnSep];
+
+    _copyButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    _copyButton.frame = CGRectMake(0, cardH - footH, cardW / 2.0, footH - 1.0);
+    [_copyButton setTitle:@"复制结果" forState:UIControlStateNormal];
+    _copyButton.titleLabel.font = [UIFont systemFontOfSize:16];
+    [_copyButton addTarget:self action:@selector(copyTapped)
+          forControlEvents:UIControlEventTouchUpInside];
+    [_card addSubview:_copyButton];
+
+    UIView *vSep = [[UIView alloc] initWithFrame:
+        CGRectMake(cardW / 2.0, cardH - footH + 10.0,
+                   1.0 / [UIScreen mainScreen].scale, footH - 20.0)];
+    vSep.backgroundColor = [UIColor separatorColor];
+    [_card addSubview:vSep];
+
+    UIButton *done = [UIButton buttonWithType:UIButtonTypeSystem];
+    done.frame = CGRectMake(cardW / 2.0, cardH - footH, cardW / 2.0, footH - 1.0);
+    [done setTitle:@"完成" forState:UIControlStateNormal];
+    done.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+    [done addTarget:self action:@selector(doneTapped) forControlEvents:UIControlEventTouchUpInside];
+    [_card addSubview:done];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    _card.center = CGPointMake(CGRectGetMidX(self.view.bounds), CGRectGetMidY(self.view.bounds));
+}
+
+// 卡片内的点击（按钮）不拦截，只处理点击卡片外关闭
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)g shouldReceiveTouch:(UITouch *)t {
+    return !CGRectContainsPoint(_card.frame, [t locationInView:self.view]);
+}
+
+- (void)bgTapped:(UITapGestureRecognizer *)g {
+    if (!CGRectContainsPoint(_card.frame, [g locationInView:self.view]))
+        [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)copyTapped {
+    [UIPasteboard generalPasteboard].string = self.summary ?: @"";
+    [_copyButton setTitle:@"已复制 ✓" forState:UIControlStateNormal];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [self->_copyButton setTitle:@"复制结果" forState:UIControlStateNormal];
+    });
+}
+
+- (void)doneTapped {
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+@end
+
 @implementation CCSettingsController
 
 // 关键：返回空 specifiers，阻止 PSListController 自动加载同名 plist（那会导致进页面闪退）
@@ -581,153 +729,7 @@ static NSString *CCApiTextFromJSON(NSString *engine, id json) {
     return [out isKindOfClass:[NSString class]] ? out : nil;
 }
 
-// 自绘结果弹窗：每个端点一行，名称 + 结果左对齐
-@interface CCApiResultController : UIViewController <UIGestureRecognizerDelegate>
-@property (nonatomic, copy) NSArray<NSDictionary *> *rows;   // name / ok / detail
-@property (nonatomic, copy) NSString *summary;
-@end
 
-@implementation CCApiResultController {
-    UIView *_card;
-    UIButton *_copyButton;
-}
-
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    self.view.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.45];
-
-    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self
-                                                                          action:@selector(bgTapped:)];
-    tap.delegate = self;
-    [self.view addGestureRecognizer:tap];
-
-    CGFloat sw = [UIScreen mainScreen].bounds.size.width;
-    CGFloat cardW = MIN(sw - 44.0, 400.0);
-    CGFloat pad = 20.0;
-    CGFloat nameW = 86.0;
-    CGFloat resX = pad + nameW;
-    UIFont *nameFont = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
-    UIFont *detFont = [UIFont systemFontOfSize:14];
-
-    NSMutableArray<NSNumber *> *heights = [NSMutableArray array];
-    CGFloat bodyH = 0;
-    for (NSDictionary *r in self.rows) {
-        NSString *d = r[@"detail"] ?: @"";
-        CGFloat dh = [d boundingRectWithSize:CGSizeMake(cardW - resX - pad, CGFLOAT_MAX)
-                                     options:NSStringDrawingUsesLineFragmentOrigin
-                                  attributes:@{NSFontAttributeName: detFont}
-                                     context:nil].size.height;
-        CGFloat h = MAX(22.0, ceil(dh)) + 16.0;
-        [heights addObject:@(h)];
-        bodyH += h;
-    }
-
-    CGFloat headH = pad + 22.0 + 14.0;
-    CGFloat footH = 50.0;
-    CGFloat cardH = headH + bodyH + footH + 6.0;
-    CGFloat cardY = (CGRectGetHeight(self.view.bounds) - cardH) / 2.0;
-
-    _card = [[UIView alloc] initWithFrame:CGRectMake((sw - cardW) / 2.0, cardY, cardW, cardH)];
-    _card.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
-    _card.layer.cornerRadius = 16.0;
-    _card.layer.cornerCurve = kCACornerCurveContinuous;
-    _card.clipsToBounds = YES;
-    [self.view addSubview:_card];
-
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(pad, pad, cardW - pad * 2, 22)];
-    title.text = @"接口测试结果";
-    title.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    title.textColor = [UIColor labelColor];
-    title.textAlignment = NSTextAlignmentCenter;
-    [_card addSubview:title];
-
-    CGFloat y = headH;
-    for (NSUInteger i = 0; i < self.rows.count; i++) {
-        NSDictionary *r = self.rows[i];
-        CGFloat h = heights[i].doubleValue;
-
-        if (i > 0) {
-            UIView *sep = [[UIView alloc] initWithFrame:
-                CGRectMake(pad, y, cardW - pad * 2, 1.0 / [UIScreen mainScreen].scale)];
-            sep.backgroundColor = [UIColor separatorColor];
-            [_card addSubview:sep];
-        }
-
-        BOOL ok = [r[@"ok"] boolValue];
-
-        UILabel *name = [[UILabel alloc] initWithFrame:CGRectMake(pad, y + 8.0, nameW - 8.0, 20)];
-        name.text = r[@"name"];
-        name.font = nameFont;
-        name.textColor = [UIColor labelColor];
-        [_card addSubview:name];
-
-        UILabel *det = [[UILabel alloc] initWithFrame:
-            CGRectMake(resX, y + 8.0, cardW - resX - pad, h - 16.0)];
-        det.text = r[@"detail"];
-        det.font = detFont;
-        det.numberOfLines = 0;
-        det.textColor = ok ? [UIColor secondaryLabelColor] : [UIColor systemRedColor];
-        [_card addSubview:det];
-
-        y += h;
-    }
-
-    UIView *btnSep = [[UIView alloc] initWithFrame:
-        CGRectMake(0, cardH - footH, cardW, 1.0 / [UIScreen mainScreen].scale)];
-    btnSep.backgroundColor = [UIColor separatorColor];
-    [_card addSubview:btnSep];
-
-    _copyButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    _copyButton.frame = CGRectMake(0, cardH - footH, cardW / 2.0, footH - 1.0);
-    [_copyButton setTitle:@"复制结果" forState:UIControlStateNormal];
-    _copyButton.titleLabel.font = [UIFont systemFontOfSize:16];
-    [_copyButton addTarget:self action:@selector(copyTapped)
-          forControlEvents:UIControlEventTouchUpInside];
-    [_card addSubview:_copyButton];
-
-    UIView *vSep = [[UIView alloc] initWithFrame:
-        CGRectMake(cardW / 2.0, cardH - footH + 10.0,
-                   1.0 / [UIScreen mainScreen].scale, footH - 20.0)];
-    vSep.backgroundColor = [UIColor separatorColor];
-    [_card addSubview:vSep];
-
-    UIButton *done = [UIButton buttonWithType:UIButtonTypeSystem];
-    done.frame = CGRectMake(cardW / 2.0, cardH - footH, cardW / 2.0, footH - 1.0);
-    [done setTitle:@"完成" forState:UIControlStateNormal];
-    done.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
-    [done addTarget:self action:@selector(doneTapped) forControlEvents:UIControlEventTouchUpInside];
-    [_card addSubview:done];
-}
-
-- (void)viewDidLayoutSubviews {
-    [super viewDidLayoutSubviews];
-    _card.center = CGPointMake(CGRectGetMidX(self.view.bounds), CGRectGetMidY(self.view.bounds));
-}
-
-// 卡片内的点击（按钮）不拦截，只处理点击卡片外关闭
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)g shouldReceiveTouch:(UITouch *)t {
-    return !CGRectContainsPoint(_card.frame, [t locationInView:self.view]);
-}
-
-- (void)bgTapped:(UITapGestureRecognizer *)g {
-    if (!CGRectContainsPoint(_card.frame, [g locationInView:self.view]))
-        [self dismissViewControllerAnimated:YES completion:nil];
-}
-
-- (void)copyTapped {
-    [UIPasteboard generalPasteboard].string = self.summary ?: @"";
-    [_copyButton setTitle:@"已复制 ✓" forState:UIControlStateNormal];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        [self->_copyButton setTitle:@"复制结果" forState:UIControlStateNormal];
-    });
-}
-
-- (void)doneTapped {
-    [self dismissViewControllerAnimated:YES completion:nil];
-}
-
-@end
 
 - (void)ccRecordResult:(NSMutableDictionary *)res engine:(NSString *)engine
                   data:(NSData *)data resp:(NSURLResponse *)resp err:(NSError *)err {

@@ -47,10 +47,18 @@ __attribute__((visibility("default")))
                 NSString *cellStr = d[@"cell"] ?: @"PSGroupCell";
                 PSCellType type = [PSTableCell cellTypeFromString:cellStr];
                 NSString *label = d[@"label"] ?: @"";
+
+                // 关键：开关/输入框必须挂上默认的 get/set 选择器，否则系统会把行渲染成不可用（灰掉）
+                BOOL needKV = (type == PSSwitchCell || type == PSEditTextCell ||
+                               type == PSTitleValueCell || type == PSListItemsCell ||
+                               type == PSSecureEditTextCell);
+                SEL setSel = needKV ? @selector(setPreferenceValue:specifier:) : NULL;
+                SEL getSel = needKV ? @selector(readPreferenceValue:) : NULL;
+
                 PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:label
                                                                 target:self
-                                                                   set:NULL
-                                                                   get:NULL
+                                                                   set:setSel
+                                                                   get:getSel
                                                                 detail:nil
                                                                   cell:type
                                                                   edit:nil];

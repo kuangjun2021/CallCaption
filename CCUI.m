@@ -1174,7 +1174,7 @@ void CCUIBoot(void) {
                        dispatch_get_main_queue(), ^{
             CCRunSpeechSelfTest(YES);
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.14.0-alpha18)");
+        CCLogLine(@"CallCaption UI booted (single window v0.14.0-alpha19)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

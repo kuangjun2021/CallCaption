@@ -291,7 +291,7 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
             AVAudioFormat *srcFmt = ch->fmt;
             if (buf->mAudioData && buf->mAudioDataByteSize > 0)
                 __atomic_add_fetch(&ch->audioBytes, buf->mAudioDataByteSize, __ATOMIC_RELAXED);
-            if (r && monoFmt && srcFmt && buf->mAudioData && buf->mAudioDataByteSize > 0) {
+            if (monoFmt && srcFmt && buf->mAudioData && buf->mAudioDataByteSize > 0) {
                 const AudioStreamBasicDescription *sa = srcFmt.streamDescription;
                 UInt32 bpf = sa->mBytesPerFrame ? sa->mBytesPerFrame : 8;
                 AVAudioFrameCount nf = buf->mAudioDataByteSize / bpf;
@@ -596,6 +596,32 @@ static NSString *CCFindRemoteWav(NSString *preferred, double *mtimeOut) {
     if (pick) g_waDocsDir = [pick stringByDeletingLastPathComponent];
     if (mtimeOut) *mtimeOut = bestT;
     return pick;
+}
+
+static NSString *CCLargestRemoteWav(void) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableArray<NSString *> *dirs = [NSMutableArray array];
+    if (g_waDocsDir) [dirs addObject:g_waDocsDir];
+    if (dirs.count == 0) {
+        NSString *base = @"/var/mobile/Containers/Data/Application";
+        for (NSString *a in [fm contentsOfDirectoryAtPath:base error:nil]) {
+            NSString *docs = [[base stringByAppendingPathComponent:a]
+                              stringByAppendingPathComponent:@"Documents"];
+            if (docs) [dirs addObject:docs];
+        }
+    }
+    NSString *best = nil;
+    unsigned long long bestSize = 0;
+    for (NSString *d in dirs) {
+        for (NSString *f in [fm contentsOfDirectoryAtPath:d error:nil]) {
+            if (![f hasPrefix:@"cc_remote_"] || ![f hasSuffix:@".wav"]) continue;
+            NSString *p = [d stringByAppendingPathComponent:f];
+            unsigned long long sz = [[fm attributesOfItemAtPath:p error:nil][NSFileSize] unsignedLongLongValue];
+            if (sz > bestSize) { bestSize = sz; best = p; }
+        }
+    }
+    if (best) g_waDocsDir = [best stringByDeletingLastPathComponent];
+    return best;
 }
 
 static NSString *CCMergeOverlap(NSString *prev, NSString *next) {
@@ -1244,7 +1270,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.14.0-alpha18)");
+        CCLogLine(@"audioservice started (v0.14.0-alpha19)");
         // LCT 的 livecallhelper 在识别前会配置 AVAudioSession（SoloAmbient/Default）；
         // 我们的守护进程以前没做这一步，补上。
         @try {
@@ -1275,9 +1301,7 @@ int main(int argc, char *argv[]) {
                        g_stateQ, ^{
             @try {
                 NSString *dst = [CC_DIR stringByAppendingPathComponent:@"selftest.wav"];
-                if ([[NSFileManager defaultManager] fileExistsAtPath:dst]) return;
-                double mt = 0;
-                NSString *src = CCFindRemoteWav(nil, &mt);
+                NSString *src = CCLargestRemoteWav();
                 if (!src) { CCLogf(@"selftest: no source wav"); return; }
                 NSData *d = [NSData dataWithContentsOfFile:src];
                 if (d.length < 44 + 48000 * 2) {

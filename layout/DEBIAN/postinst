@@ -10,6 +10,20 @@ chmod 0644 "$JB/Library/LaunchDaemons/net.user.callcaption.audioservice.plist" 2
 # 清掉旧版本遗留在错误路径的 Prefs bundle（Preferences 可能优先加载旧副本 → 一直闪退）
 rm -rf "$JB/CallCaptionPrefs.bundle" 2>/dev/null || true
 
+# 清掉 bundle 里遗留的“类名 plist”（PSListController 会自动加载同名 plist → 已知闪退源）
+B="$JB/Library/PreferenceBundles/CallCaptionPrefs.bundle"
+if [ -d "$B" ]; then
+  find "$B" -maxdepth 1 -name "*.plist" ! -name "Root.plist" ! -name "Info.plist" -delete 2>/dev/null || true
+fi
+
+# 清掉重复的 PreferenceLoader 入口（只保留 callcaption.plist）
+PL="$JB/Library/PreferenceLoader/Preferences"
+if [ -d "$PL" ]; then
+  grep -l "net.user.callcaption" "$PL"/*.plist 2>/dev/null | while read f; do
+    case "$f" in */callcaption.plist) ;; *) rm -f "$f" ;; esac
+  done
+fi
+
 # 升级时让新二进制立即生效（launchd KeepAlive 会自动拉起新版）
 killall -9 CallCaptionAudioService 2>/dev/null || true
 

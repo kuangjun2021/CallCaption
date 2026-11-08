@@ -66,11 +66,12 @@ __attribute__((visibility("default")))
 
 @implementation CallCaptionRootListController
 
-+ (void)load { SLog(@"bundle loaded"); }
++ (void)load { SLog(@"bundle loaded v0.14.0-alpha36"); }
 
 - (NSArray *)specifiers {
+    SLog(@"specifiers enter v36");
     if (!_specifiers) {
-        CCMigrateCFPrefsToFile();
+        @try { CCMigrateCFPrefsToFile(); } @catch (NSException *e) { SLog(@"migrate exc %@", e.reason); }
         NSBundle *b = self.bundle;
         if (!b) {
             b = [NSBundle bundleWithPath:@"/var/jb/Library/PreferenceBundles/CallCaptionPrefs.bundle"];

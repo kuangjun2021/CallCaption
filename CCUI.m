@@ -134,18 +134,35 @@ static void ShowWindow(void) {
     if (!g_win) return;
     CGRect scr = [UIScreen mainScreen].bounds;
     g_win.frame = scr;
-    if (g_rootVC) g_rootVC.view.frame = scr;
+    UIView *cv = g_win.contentView;
+    if (cv) {
+        cv.frame = scr;
+        cv.userInteractionEnabled = YES;
+        cv.backgroundColor = [UIColor clearColor];
+    }
     if (g_root) g_root.frame = scr;
     if (g_bgCatcher) g_bgCatcher.frame = scr;
     g_win.hidden = NO;
     if ([g_win respondsToSelector:@selector(orderFront:)]) {
         @try { [g_win orderFront:nil]; } @catch (NSException *e) { }
     }
-    CCLogf(@"window: orderFront class=%@ scene=%@ hidden=%d frame=%@ bounds=%@ root=%@ rvc=%@",
+    CCLogf(@"window: orderFront class=%@ scene=%@ hidden=%d frame=%@ content=%@ root=%@",
            NSStringFromClass([g_win class]), g_win.windowScene, g_win.hidden,
-           NSStringFromCGRect(g_win.frame), NSStringFromCGRect(g_win.bounds),
-           NSStringFromCGRect(g_root ? g_root.frame : CGRectZero),
-           NSStringFromCGRect(g_rootVC ? g_rootVC.view.frame : CGRectZero));
+           NSStringFromCGRect(g_win.frame),
+           NSStringFromCGRect(cv ? cv.frame : CGRectZero),
+           NSStringFromCGRect(g_root ? g_root.frame : CGRectZero));
+    // _UIRootWindow 可能在 orderFront/layout 时把 contentView 重置成 0x0，
+    // 延迟再设一次，保证命中区域是全屏。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (!g_win) return;
+        UIView *c2 = g_win.contentView;
+        if (c2) {
+            c2.frame = [UIScreen mainScreen].bounds;
+            c2.userInteractionEnabled = YES;
+            CCLogf(@"ui: contentView re-layout frame=%@", NSStringFromCGRect(c2.frame));
+        }
+    });
 }
 
 static void HideWindow(void) {
@@ -721,6 +738,7 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
 }
 
 + (void)panelButtonTapped:(UIButton *)b {
+    CCLogf(@"panel button tag=%ld", (long)b.tag);
     switch (b.tag) {
         case 0:
             [self toggleSession];
@@ -974,13 +992,19 @@ static void EnsureUI(void) {
         CGRect scr = [UIScreen mainScreen].bounds;
         g_win.frame = scr;
 
-        // 给 _UIRootWindow 一个全屏 rootViewController：
-        // 保证窗口的 contentView 真正覆盖全屏，空白区域也能进入 hitTest。
-        g_rootVC = [[UIViewController alloc] init];
-        g_rootVC.view.frame = scr;
-        g_rootVC.view.backgroundColor = [UIColor clearColor];
-        g_rootVC.view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        g_win.rootViewController = g_rootVC;
+        // 关键：直接用 window.contentView 作为全屏容器。
+        // 0.13.15 日志里 contentView 是 {{0,0},{0,0}}，窗口命中区域为 0，
+        // 所以满屏点击都进不了 hitTest；按钮因为渲染在窗口子视图里还能点到。
+        g_win.rootViewController = nil;
+        UIView *cv = g_win.contentView;
+        if (!cv) {
+            cv = [[UIView alloc] initWithFrame:scr];
+            [g_win addSubview:cv];
+        }
+        cv.frame = scr;
+        cv.backgroundColor = [UIColor clearColor];
+        cv.userInteractionEnabled = YES;
+        cv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 
         // 全屏兜底点击层：放在 g_root 下面，g_root 不接管空白区域时由它接。
         g_bgCatcher = [[UIControl alloc] initWithFrame:scr];
@@ -988,17 +1012,16 @@ static void EnsureUI(void) {
         g_bgCatcher.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         [g_bgCatcher addTarget:[CCUIHelper class] action:@selector(bgCatcherTapped:)
               forControlEvents:UIControlEventTouchUpInside];
-        [g_rootVC.view addSubview:g_bgCatcher];
+        [cv addSubview:g_bgCatcher];
 
         g_root = [[UIView alloc] initWithFrame:scr];
         g_root.backgroundColor = [UIColor clearColor];
         g_root.userInteractionEnabled = YES;
         g_root.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        [g_rootVC.view addSubview:g_root];
-        CCLogf(@"ui: windowFrame=%@ rootFrame=%@ catcherFrame=%@ rvcFrame=%@ contentFrame=%@",
+        [cv addSubview:g_root];
+        CCLogf(@"ui: windowFrame=%@ rootFrame=%@ catcherFrame=%@ contentFrame=%@",
                NSStringFromCGRect(g_win.frame), NSStringFromCGRect(g_root.frame),
-               NSStringFromCGRect(g_bgCatcher.frame), NSStringFromCGRect(g_rootVC.view.frame),
-               NSStringFromCGRect(g_win.contentView ? g_win.contentView.frame : CGRectZero));
+               NSStringFromCGRect(g_bgCatcher.frame), NSStringFromCGRect(cv.frame));
 
         EnsurePanelUI();
         EnsureGrabberUI();
@@ -1047,7 +1070,7 @@ void CCUIBoot(void) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.13.15)");
+        CCLogLine(@"CallCaption UI booted (single window v0.13.16)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

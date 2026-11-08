@@ -231,11 +231,21 @@ void CCSetArmed(BOOL armed) {
 
 void CCSetPrefBool(NSString *key, BOOL value) {
     @try {
+        // v0.13.16: 面板按钮也直接写守护进程读取的 mobile plist。
+        // 之前只写 CFPreferences，而 CCPrefsReload 已改成读文件，导致面板开关“点了没反应”。
+        NSString *path = @"/var/mobile/Library/Preferences/net.user.callcaption.plist";
+        NSMutableDictionary *d = [[NSDictionary dictionaryWithContentsOfFile:path] mutableCopy]
+                                 ?: [NSMutableDictionary dictionary];
+        d[key] = @(value);
+        BOOL ok = [d writeToFile:path atomically:YES];
+        [[NSFileManager defaultManager] setAttributes:@{NSFilePosixPermissions: @0666}
+                                         ofItemAtPath:path error:nil];
         CFPreferencesSetAppValue((__bridge CFStringRef)key,
                                  (__bridge CFPropertyListRef)@(value),
                                  (__bridge CFStringRef)CC_DOMAIN);
         CFPreferencesAppSynchronize((__bridge CFStringRef)CC_DOMAIN);
         CCPostNotif(@"prefschanged");
+        CCLogf(@"pref set %@=%d file=%d", key, value, ok);
     } @catch (NSException *e) { }
 }
 

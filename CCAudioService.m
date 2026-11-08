@@ -116,6 +116,9 @@ static void CCSpeakEnglish(NSString *text) {
     CFAbsoluteTime lastLoudAt;        // 最近一次明显有声音的时间（RMS）
     CFAbsoluteTime lastResultAt;      // 最近一次识别结果/任务启动的时间
     float lastRMS;                    // 最近一帧的粗略音量
+    int noSpeechCount;                // 连续 1110 次数（用于 on-device → cloud 回退）
+    CFAbsoluteTime lastRealResultAt; // 最近一次真正识别出内容
+    CFAbsoluteTime lastTapProbeAt;   // 最近一次静音 Tap 探测
     NSUInteger callGen;          // 通话/采集代际：stop/新采集递增，用于丢弃上一通的结果
     NSUInteger partialGen;       // 临时翻译代际：只接受最新 partial 的译文
 }
@@ -288,6 +291,13 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
     lastFrameChangeAt = CFAbsoluteTimeGetCurrent();
     lastRecogTry = 0;
     lastStatsAt = CFAbsoluteTimeGetCurrent();
+    lastProvTransAt = 0;
+    lastLoudAt = 0;
+    lastResultAt = CFAbsoluteTimeGetCurrent();
+    lastRMS = 0;
+    noSpeechCount = 0;
+    lastRealResultAt = CFAbsoluteTimeGetCurrent();
+    lastTapProbeAt = CFAbsoluteTimeGetCurrent();
     callGen++;                 // 新采集：旧通话的 final 译文一律丢弃
     lastText = nil;
     lastPartialText = nil;
@@ -319,6 +329,9 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
     lastPartialAt = 0;
     lastTextAt = 0;
     lastProvTransAt = 0;
+    noSpeechCount = 0;
+    lastRealResultAt = 0;
+    lastTapProbeAt = 0;
     endAudioSent = NO;
     callGen++;
     partialGen++;
@@ -435,6 +448,8 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
 
         if (result) {
             lastResultAt = now;
+            lastRealResultAt = now;
+            noSpeechCount = 0;
             NSString *txt = CCTrim(result.bestTranscription.formattedString);
             if (result.isFinal) {
                 if (!muted && txt.length) {
@@ -479,6 +494,14 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
             BOOL benign = (code == 216 /* cancelled */ || code == 1110 /* no speech */);
             CCLogf(@"%@ recog end: code=%ld benign=%d onDevice=%d %@",
                    self.tag, (long)code, benign, onDevice, error.localizedDescription);
+            if (code == 1110) {
+                noSpeechCount++;
+                if (onDevice && noSpeechCount >= 2) {
+                    onDevice = NO;
+                    CCLogf(@"%@: on-device ASR says no speech x%d, fallback to cloud",
+                           self.tag, noSpeechCount);
+                }
+            }
             if (!benign) {
                 if (onDevice) {
                     onDevice = NO;
@@ -687,6 +710,24 @@ static void CheckArm(void) {
             }
         }
 
+        // 静音 Tap 探测：远端一直 rms≈0，说明 -2 可能根本没抓到通话音频。
+        // 每 10 秒在 speaker(-2)/system(-1) 之间换一次，直到真正识别出内容。
+        {
+            CCChannel *ch = g_remote;
+            if (ch->capturing && ch->lastRMS < 0.0005 &&
+                now - ch->lastRealResultAt > 10.0 &&
+                now - ch->lastTapProbeAt > 10.0) {
+                ch->lastTapProbeAt = now;
+                ch.tapPID = (ch.tapPID == CC_TAP_PID_SPEAKER)
+                            ? CC_TAP_PID_SYSTEM : CC_TAP_PID_SPEAKER;
+                CCLogf(@"remote: tap silent for %.0fs (rms=%.4f), probe pid=%d",
+                       now - ch->lastRealResultAt, ch->lastRMS, ch.tapPID);
+                [ch stop];
+                ch->lastAttempt = 0;
+                ch->lastFrameChangeAt = now;
+            }
+        }
+
         if (g_remote->capturing && now - g_remote->lastStatsAt >= 5.0) {
             g_remote->lastStatsAt = now;
             CCLogf(@"remote: alive, audio=%llu frames=%llu rms=%.4f noResult=%.1fs",
@@ -738,7 +779,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.13.15)");
+        CCLogLine(@"audioservice started (v0.13.16)");
         {
             NSString *dk = CCPrefStr(CC_K_DEEPL_KEY, @"");
             CCLogf(@"prefs boot: engine=%@ deeplKeyLen=%lu remote=%d local=%d",

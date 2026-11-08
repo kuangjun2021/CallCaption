@@ -295,10 +295,12 @@ static NSString *CCApiSnippet(NSData *data) {
 - (void)deeplTestKey:(NSString *)key endpoint:(NSString *)endpoint
           completion:(void (^)(NSInteger status, NSString *summary))done {
     NSMutableString *body = [NSMutableString stringWithFormat:
-        @"auth_key=%@&text=Hello&source_lang=EN&target_lang=ZH", CCApiEsc(key)];
+        @"text=Hello&source_lang=EN&target_lang=ZH"];
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:endpoint]];
     req.HTTPMethod = @"POST";
     [req setValue:@"application/x-www-form-urlencoded" forHTTPHeaderField:@"Content-Type"];
+    [req setValue:[NSString stringWithFormat:@"DeepL-Auth-Key %@", key]
+       forHTTPHeaderField:@"Authorization"];
     req.HTTPBody = [body dataUsingEncoding:NSUTF8StringEncoding];
     req.timeoutInterval = 4.0;
     [[[NSURLSession sharedSession] dataTaskWithRequest:req
@@ -327,7 +329,7 @@ static NSString *CCApiSnippet(NSData *data) {
     NSString *engine = CCObjString(@"Engine", @"auto");
     NSString *dk = CCObjString(@"DeepLKey", @"");
     NSString *gk = CCObjString(@"GoogleKey", @"");
-    NSString *aiURL = CCObjString(@"AIURL", @"");
+    NSString *aiURL = CCObjString(@"AIURL", @"https://api.deepseek.com/v1/chat/completions");
     NSString *aiKey = CCObjString(@"AIKey", @"");
     NSString *aiModel = CCObjString(@"AIModel", @"deepseek-chat");
 

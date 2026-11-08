@@ -97,8 +97,10 @@ static NSString *DeepLKey(void) {
 static void DeepLRequest(NSString *text, NSString *from, NSString *to, NSString *key,
                          NSString *endpoint,
                          void (^done)(NSString *, NSError *, NSInteger status)) {
-    NSMutableString *body = [NSMutableString stringWithFormat:@"auth_key=%@&text=%@&target_lang=%@",
-                             CCEscape(key), CCEscape(text), to.uppercaseString];
+    // DeepL 新版要求 Authorization 头，旧的 auth_key 表单参数会返回
+    // 403 "Missing Authorization header"。
+    NSMutableString *body = [NSMutableString stringWithFormat:@"text=%@&target_lang=%@",
+                             CCEscape(text), to.uppercaseString];
     if (![[from lowercaseString] isEqualToString:@"auto"]) {
         [body appendFormat:@"&source_lang=%@", from.uppercaseString];
     }
@@ -106,6 +108,8 @@ static void DeepLRequest(NSString *text, NSString *from, NSString *to, NSString 
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
     req.HTTPMethod = @"POST";
     [req setValue:@"application/x-www-form-urlencoded" forHTTPHeaderField:@"Content-Type"];
+    [req setValue:[NSString stringWithFormat:@"DeepL-Auth-Key %@", key]
+       forHTTPHeaderField:@"Authorization"];
     req.HTTPBody = [body dataUsingEncoding:NSUTF8StringEncoding];
     req.timeoutInterval = 3.0;
 
@@ -176,7 +180,7 @@ NSString *CCEscape(NSString *s) {
 // ---------- AI（OpenAI 兼容 chat/completions） ----------
 static void TranslateAI(NSString *text, NSString *from, NSString *to,
                         void (^done)(NSString *, NSError *)) {
-    NSString *urlStr = CCPrefStr(CC_K_AI_URL, @"");
+    NSString *urlStr = CCPrefStr(CC_K_AI_URL, @"https://api.deepseek.com/v1/chat/completions");
     NSString *key = CCPrefStr(CC_K_AI_KEY, @"");
     NSString *model = CCPrefStr(CC_K_AI_MODEL, @"deepseek-chat");
     if (urlStr.length == 0) {
@@ -495,7 +499,7 @@ void CCTranslateEx(NSString *text, NSString *fromLang, NSString *toLang,
 
         NSString *engine = CCPrefStr(CC_K_ENGINE, @"auto").lowercaseString;
         NSString *dk = DeepLKey();
-        BOOL aiReady = CCPrefStr(CC_K_AI_URL, @"").length > 0 &&
+        BOOL aiReady = CCPrefStr(CC_K_AI_URL, @"https://api.deepseek.com/v1/chat/completions").length > 0 &&
                        CCPrefStr(CC_K_AI_KEY, @"").length > 0;
 
         // 引擎优先级：选中的排第一；Google 免费接口当前可用，排在 Bing 前；

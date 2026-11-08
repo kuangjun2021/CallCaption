@@ -624,6 +624,14 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
 
 + (void)toggleSession {
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (!g_sessionActive && !g_callActive) {
+            CCLogf(@"session: no active call, ignore arm");
+            return;
+        }
+        if (!g_sessionActive && !CCPrefBool(CC_K_ENABLED, YES)) {
+            CCLogf(@"session: master disabled, ignore arm");
+            return;
+        }
         g_sessionActive = !g_sessionActive;
         CCSetArmed(g_sessionActive);
         [self refreshPanel];

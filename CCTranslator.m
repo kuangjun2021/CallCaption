@@ -50,10 +50,35 @@ static NSString *LangName(NSString *code) {
     return n ?: code;
 }
 
+// ---------- DeepL Key ----------
+// 自己的 DeepLKey 为空时，复用 LiveCallTranslator 已保存的 DEEPL_API_KEY。
+// 这样用户不用在两个插件里重复填同一个 Key；不会把 Key 写进日志。
+static NSString *DeepLKey(void) {
+    NSString *k = CCPrefStr(CC_K_DEEPL_KEY, @"");
+    if (k.length) return k;
+
+    static NSString *g_lctKey = nil;
+    static CFAbsoluteTime g_lctAt = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - g_lctAt > 60.0) {
+        g_lctAt = now;
+        g_lctKey = nil;
+        NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:
+            @"/var/mobile/Library/Preferences/net.limneos.livecalltranslator.plist"];
+        id v = d[@"DEEPL_API_KEY"];
+        if ([v isKindOfClass:[NSString class]] && [v length]) {
+            g_lctKey = v;
+            CCLogf(@"deepl key: using LiveCallTranslator key (len=%lu)",
+                   (unsigned long)[v length]);
+        }
+    }
+    return g_lctKey ?: @"";
+}
+
 // ---------- DeepL ----------
 static void TranslateDeepL(NSString *text, NSString *from, NSString *to,
                            void (^done)(NSString *, NSError *)) {
-    NSString *key = CCPrefStr(CC_K_DEEPL_KEY, @"");
+    NSString *key = DeepLKey();
     if (key.length == 0) {
         done(nil, [NSError errorWithDomain:CC_DOMAIN code:1 userInfo:@{NSLocalizedDescriptionKey: @"DeepL key not set"}]);
         return;
@@ -418,7 +443,7 @@ void CCTranslateEx(NSString *text, NSString *fromLang, NSString *toLang,
         }
 
         NSString *engine = CCPrefStr(CC_K_ENGINE, @"auto").lowercaseString;
-        NSString *dk = CCPrefStr(CC_K_DEEPL_KEY, @"");
+        NSString *dk = DeepLKey();
         BOOL aiReady = CCPrefStr(CC_K_AI_URL, @"").length > 0 &&
                        CCPrefStr(CC_K_AI_KEY, @"").length > 0;
 
@@ -452,6 +477,16 @@ void CCTranslateEx(NSString *text, NSString *fromLang, NSString *toLang,
             [order addObject:@"google"];
             if (bingReady) [order addObject:@"bing"];
         }
+
+        NSString *orderStr = [order componentsJoinedByString:@","];
+        static NSString *g_lastOrder = nil;
+        if (![g_lastOrder isEqualToString:orderStr]) {
+            g_lastOrder = orderStr;
+            CCLogf(@"translate order=%@ (engine=%@ deeplKey=%d aiReady=%d bingReady=%d)",
+                   orderStr, engine, dk.length > 0, aiReady, bingReady);
+        }
+        if ([engine isEqualToString:@"deepl"] && !dk.length)
+            CCLogf(@"deepl selected but key missing (own + LiveCallTranslator), fallback");
 
         CCTranslateTry(order, 0, text, fromLang, toLang, done);
     });

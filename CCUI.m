@@ -48,6 +48,7 @@
 static UIWindow *g_win;                 // 唯一全屏窗口
 static UIView *g_root;                  // 全屏透明容器
 static UIVisualEffectView *g_panelCard; // 底部控制面板
+static UILabel *g_titleLabel;
 static UIButton *g_btns[5];
 static UIButton *g_grabber;             // 收起后的 60x60 地球
 static UIView *g_remoteBox;             // 对方双行字幕框
@@ -95,6 +96,14 @@ static CGFloat TextHeight(NSString *s, UIFont *f, CGFloat w) {
                               options:NSStringDrawingUsesLineFragmentOrigin
                            attributes:@{NSFontAttributeName: f} context:nil];
     return ceil(r.size.height);
+}
+
+static BOOL DeepLKeyAvailable(void) {
+    if (CCPrefStr(CC_K_DEEPL_KEY, @"").length) return YES;
+    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:
+        @"/var/mobile/Library/Preferences/net.limneos.livecalltranslator.plist"];
+    id v = d[@"DEEPL_API_KEY"];
+    return [v isKindOfClass:[NSString class]] && [v length] > 0;
 }
 
 static NSString *CCEngineName(NSString *eng) {
@@ -285,7 +294,10 @@ static void EnsurePanelUI(void) {
     title.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
     title.textColor = [UIColor colorWithWhite:1 alpha:0.85];
     title.textAlignment = NSTextAlignmentCenter;
+    title.adjustsFontSizeToFitWidth = YES;
+    title.minimumScaleFactor = 0.8;
     [blur.contentView addSubview:title];
+    g_titleLabel = title;
 
     NSArray *symbols = @[@"globe", @"mic.fill", @"speaker.wave.2.fill",
                          @"eye.fill", @"character.bubble.fill"];
@@ -338,6 +350,8 @@ static void EnsureGrabberUI(void) {
     b.frame = CGRectMake(0, 0, s, s);
     b.layer.cornerRadius = s / 2.0;
     b.layer.masksToBounds = YES;
+    b.layer.borderWidth = 1.0;
+    b.layer.borderColor = [UIColor colorWithWhite:0 alpha:0.18].CGColor;
     b.backgroundColor = [UIColor colorWithWhite:1 alpha:0.95];
     UIImage *img = [UIImage systemImageNamed:@"globe"
                        withConfiguration:[UIImageSymbolConfiguration
@@ -363,6 +377,7 @@ static void EnsureGrabberUI(void) {
     b.hidden = YES;
     [g_root addSubview:b];
     g_grabber = b;
+    CCLogf(@"grabber: created center=%.0f,%.0f size=%.0f", b.center.x, b.center.y, s);
 }
 
 #pragma mark - 字幕框
@@ -503,14 +518,14 @@ static void LayoutBox(UIView *box, NSString *recog, NSString *trans, NSString *e
 
 static void ResetRemoteTimer(void) {
     [g_remoteHide invalidate];
-    g_remoteHide = [NSTimer timerWithTimeInterval:8.0 target:[CCUIHelper class]
+    g_remoteHide = [NSTimer timerWithTimeInterval:60.0 target:[CCUIHelper class]
                                           selector:@selector(hideCaption)
                                           userInfo:nil repeats:NO];
     [[NSRunLoop mainRunLoop] addTimer:g_remoteHide forMode:NSRunLoopCommonModes];
 }
 static void ResetLocalTimer(void) {
     [g_localHide invalidate];
-    g_localHide = [NSTimer timerWithTimeInterval:8.0 target:[CCUIHelper class]
+    g_localHide = [NSTimer timerWithTimeInterval:60.0 target:[CCUIHelper class]
                                          selector:@selector(hideCaption)
                                          userInfo:nil repeats:NO];
     [[NSRunLoop mainRunLoop] addTimer:g_localHide forMode:NSRunLoopCommonModes];
@@ -669,6 +684,16 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
                 b.tintColor = [UIColor colorWithWhite:1 alpha:0.55];
             }
         }
+        if (g_titleLabel) {
+            NSString *eng = [CCPrefStr(CC_K_ENGINE, @"auto") lowercaseString];
+            if ([eng isEqualToString:@"deepl"] && !DeepLKeyAvailable()) {
+                g_titleLabel.text = @"CallCaption · DeepL Key 未填";
+                g_titleLabel.textColor = [UIColor colorWithRed:1.0 green:0.76 blue:0.30 alpha:1];
+            } else {
+                g_titleLabel.text = @"CallCaption";
+                g_titleLabel.textColor = [UIColor colorWithWhite:1 alpha:0.85];
+            }
+        }
         RefreshBoxes();
     });
 }
@@ -734,10 +759,8 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
         g_grabber.hidden = NO;
         g_grabber.alpha = 1.0;
         g_grabberVisible = YES;
-        g_grabberHide = [NSTimer timerWithTimeInterval:4.0 target:[CCUIHelper class]
-                                                selector:@selector(hideGrabber)
-                                                userInfo:nil repeats:NO];
-        [[NSRunLoop mainRunLoop] addTimer:g_grabberHide forMode:NSRunLoopCommonModes];
+        CCLogf(@"grabber: show persistent center=%.0f,%.0f alpha=%.2f",
+               g_grabber.center.x, g_grabber.center.y, g_grabber.alpha);
     });
 }
 
@@ -963,7 +986,7 @@ void CCUIBoot(void) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.13.8)");
+        CCLogLine(@"CallCaption UI booted (single window v0.13.9)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

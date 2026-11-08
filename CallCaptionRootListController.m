@@ -96,6 +96,13 @@ static NSString *CCObjString(NSString *key, NSString *def) {
 }
 
 - (void)saveValue:(id)value forKey:(NSString *)key {
+    // 只记录非敏感值；API Key 只记长度，避免日志泄露
+    if ([key isEqualToString:@"DeepLKey"] || [key isEqualToString:@"GoogleKey"] ||
+        [key isEqualToString:@"AIKey"]) {
+        SLog(@"save %@ len=%lu", key, (unsigned long)[[value description] length]);
+    } else {
+        SLog(@"save %@ = %@", key, value);
+    }
     CFPreferencesSetAppValue((__bridge CFStringRef)key,
                              (__bridge CFPropertyListRef)value,
                              (__bridge CFStringRef)CC_DOMAIN);

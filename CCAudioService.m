@@ -119,6 +119,7 @@ static void CCSpeakEnglish(NSString *text) {
     int noSpeechCount;                // 连续 1110 次数（用于 on-device → cloud 回退）
     CFAbsoluteTime lastRealResultAt; // 最近一次真正识别出内容
     CFAbsoluteTime lastTapProbeAt;   // 最近一次静音 Tap 探测
+    int tapProbeCount;               // 静音 Tap 探测次数（-2→-1→-3，最多 3 次）
     NSUInteger callGen;          // 通话/采集代际：stop/新采集递增，用于丢弃上一通的结果
     NSUInteger partialGen;       // 临时翻译代际：只接受最新 partial 的译文
 }
@@ -494,14 +495,6 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
             BOOL benign = (code == 216 /* cancelled */ || code == 1110 /* no speech */);
             CCLogf(@"%@ recog end: code=%ld benign=%d onDevice=%d %@",
                    self.tag, (long)code, benign, onDevice, error.localizedDescription);
-            if (code == 1110) {
-                noSpeechCount++;
-                if (onDevice && noSpeechCount >= 2) {
-                    onDevice = NO;
-                    CCLogf(@"%@: on-device ASR says no speech x%d, fallback to cloud",
-                           self.tag, noSpeechCount);
-                }
-            }
             if (!benign) {
                 if (onDevice) {
                     onDevice = NO;
@@ -601,7 +594,14 @@ static void CheckArm(void) {
             g_ttsUntil = s.length ? ([s doubleValue] - 978307200.0) : 0;
         } @catch (NSException *e) { }
 
+        static BOOL lastArmed = NO;
         BOOL armed = [[NSFileManager defaultManager] fileExistsAtPath:CC_ARM_PATH];
+        if (armed && !lastArmed) {
+            // 新通话：重置 Tap 探测，从 speaker(-2) 开始，最多试 -1 / -3。
+            g_remote->tapProbeCount = 0;
+            g_remote.tapPID = CC_TAP_PID_SPEAKER;
+        }
+        lastArmed = armed;
         if (!armed) {
             [g_remote stop];
             [g_local stop];
@@ -714,14 +714,18 @@ static void CheckArm(void) {
         // 每 10 秒在 speaker(-2)/system(-1) 之间换一次，直到真正识别出内容。
         {
             CCChannel *ch = g_remote;
-            if (ch->capturing && ch->lastRMS < 0.0005 &&
+            if (ch->capturing && ch->tapProbeCount < 3 &&
+                ch->lastRMS < 0.0005 &&
                 now - ch->lastRealResultAt > 10.0 &&
                 now - ch->lastTapProbeAt > 10.0) {
                 ch->lastTapProbeAt = now;
-                ch.tapPID = (ch.tapPID == CC_TAP_PID_SPEAKER)
-                            ? CC_TAP_PID_SYSTEM : CC_TAP_PID_SPEAKER;
-                CCLogf(@"remote: tap silent for %.0fs (rms=%.4f), probe pid=%d",
-                       now - ch->lastRealResultAt, ch->lastRMS, ch.tapPID);
+                ch->tapProbeCount++;
+                if (ch.tapPID == CC_TAP_PID_SPEAKER) ch.tapPID = CC_TAP_PID_SYSTEM;
+                else if (ch.tapPID == CC_TAP_PID_SYSTEM) ch.tapPID = CC_TAP_PID_MIC;
+                else ch.tapPID = CC_TAP_PID_SPEAKER;
+                CCLogf(@"remote: tap silent for %.0fs (rms=%.4f), probe #%d pid=%d",
+                       now - ch->lastRealResultAt, ch->lastRMS,
+                       ch->tapProbeCount, ch.tapPID);
                 [ch stop];
                 ch->lastAttempt = 0;
                 ch->lastFrameChangeAt = now;
@@ -779,7 +783,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.13.18)");
+        CCLogLine(@"audioservice started (v0.13.19)");
         {
             NSString *dk = CCPrefStr(CC_K_DEEPL_KEY, @"");
             CCLogf(@"prefs boot: engine=%@ deeplKeyLen=%lu remote=%d local=%d",

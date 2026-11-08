@@ -8,6 +8,7 @@
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <CallKit/CallKit.h>
+#import <objc/runtime.h>
 
 #pragma mark - 私有窗口类
 
@@ -77,6 +78,39 @@ static CXCallObserver *g_callObs;
 static id g_callWatcher;
 static UIWindow *g_settingsWin;
 static NSString *g_stateText;
+
+#pragma mark - 其他窗口点击兜底
+
+// 我们的 _UIRootWindow 在窗口服务器层面收不到空白区域的触摸；
+// 面板展开时，只要触摸落在“别的窗口”上，就收起面板。
+// 这是 ObjC 方法 swizzle，不是函数钩子，不会碰音频。
+@interface UIWindow (CCOutsideTap)
+- (UIView *)cc_outsideHitTest:(CGPoint)point withEvent:(UIEvent *)event;
+@end
+
+@implementation UIWindow (CCOutsideTap)
+- (UIView *)cc_outsideHitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [self cc_outsideHitTest:point withEvent:event];
+    if (g_panelExpanded && g_win && self != g_win) {
+        CCLogf(@"panel: outside tap (other window %@)", NSStringFromClass([self class]));
+        dispatch_async(dispatch_get_main_queue(), ^{ [CCUIHelper collapsePanel]; });
+        return nil;   // 吞掉这一下，避免误触通话界面的静音/挂断
+    }
+    return hit;
+}
+@end
+
+static BOOL g_swizzledOutsideTap;
+static void InstallOutsideTapSwizzle(void) {
+    if (g_swizzledOutsideTap) return;
+    g_swizzledOutsideTap = YES;
+    Method a = class_getInstanceMethod([UIWindow class], @selector(hitTest:withEvent:));
+    Method b = class_getInstanceMethod([UIWindow class], @selector(cc_outsideHitTest:withEvent:));
+    if (a && b) {
+        method_exchangeImplementations(a, b);
+        CCLogf(@"ui: outside tap swizzle installed");
+    }
+}
 
 static CGFloat ScreenW(void) { return [UIScreen mainScreen].bounds.size.width; }
 static CGFloat ScreenH(void) { return [UIScreen mainScreen].bounds.size.height; }
@@ -992,6 +1026,7 @@ void CCUICallStateChanged(NSString *state) {
 static void EnsureUI(void) {
     if (g_win) return;
     @try {
+        InstallOutsideTapSwizzle();
         g_win = CreateOverlayWindow();
         CGRect scr = [UIScreen mainScreen].bounds;
         g_win.frame = scr;
@@ -1074,7 +1109,7 @@ void CCUIBoot(void) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.13.18)");
+        CCLogLine(@"CallCaption UI booted (single window v0.13.19)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

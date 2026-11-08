@@ -24,6 +24,42 @@ static void SLog(NSString *fmt, ...) {
 
 static void CCMigrateCFPrefsToFile(void);
 
+@interface CCApiResultController : UIViewController
+@property (nonatomic, copy) NSString *resultText;
+@end
+
+@implementation CCApiResultController
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"接口测试结果";
+    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+
+    UITextView *tv = [[UITextView alloc] initWithFrame:CGRectInset(self.view.bounds, 12, 12)];
+    tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    tv.editable = NO;
+    tv.selectable = YES;
+    tv.font = [UIFont monospacedSystemFontOfSize:14 weight:UIFontWeightRegular];
+    tv.text = self.resultText ?: @"";
+    tv.textAlignment = NSTextAlignmentLeft;
+    tv.textContainerInset = UIEdgeInsetsMake(16, 16, 16, 16);
+    tv.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+    tv.layer.cornerRadius = 12;
+    tv.layer.masksToBounds = YES;
+    [self.view addSubview:tv];
+
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
+        initWithTitle:@"复制" style:UIBarButtonItemStylePlain target:self action:@selector(copyResult)];
+    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc]
+        initWithTitle:@"完成" style:UIBarButtonItemStyleDone target:self action:@selector(done)];
+}
+- (void)copyResult {
+    [UIPasteboard generalPasteboard].string = self.resultText ?: @"";
+}
+- (void)done {
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+@end
+
 __attribute__((visibility("default")))
 @interface CallCaptionRootListController : PSListController
 @end
@@ -387,8 +423,37 @@ static NSString *CCApiSnippet(NSData *data) {
                     line = [NSString stringWithFormat:@"%@ HTTP %ld · 网络错误：%@",
                             gk.length ? @"Cloud" : @"免费", (long)status, err.localizedDescription];
                 } else {
-                    line = [NSString stringWithFormat:@"%@ HTTP %ld · %@",
-                            gk.length ? @"Cloud" : @"免费", (long)status, CCApiSnippet(data)];
+                    id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                    NSString *out = nil;
+                    if ([json isKindOfClass:[NSDictionary class]]) {
+                        id d = json[@"data"];
+                        if ([d isKindOfClass:[NSDictionary class]]) {
+                            id tr = d[@"translations"];
+                            if ([tr isKindOfClass:[NSArray class]] && [tr count] > 0) {
+                                id first = tr[0];
+                                if ([first isKindOfClass:[NSDictionary class]])
+                                    out = first[@"translatedText"];
+                            }
+                        }
+                    } else if ([json isKindOfClass:[NSArray class]] && [json count] > 0) {
+                        id segs = json[0];
+                        if ([segs isKindOfClass:[NSArray class]]) {
+                            NSMutableString *m = [NSMutableString string];
+                            for (id seg in segs) {
+                                if ([seg isKindOfClass:[NSArray class]] && [seg count] > 0) {
+                                    id piece = seg[0];
+                                    if ([piece isKindOfClass:[NSString class]]) [m appendString:piece];
+                                }
+                            }
+                            out = m;
+                        }
+                    }
+                    if ([out isKindOfClass:[NSString class]] && out.length)
+                        line = [NSString stringWithFormat:@"%@ HTTP %ld · %@",
+                                gk.length ? @"Cloud" : @"免费", (long)status, out];
+                    else
+                        line = [NSString stringWithFormat:@"%@ HTTP %ld · %@",
+                                gk.length ? @"Cloud" : @"免费", (long)status, CCApiSnippet(data)];
                 }
                 @synchronized(res) { res[@"Google"] = line; }
                 dispatch_group_leave(group);
@@ -423,8 +488,24 @@ static NSString *CCApiSnippet(NSData *data) {
                     line = [NSString stringWithFormat:@"HTTP %ld · 网络错误：%@",
                             (long)status, err.localizedDescription];
                 } else {
-                    line = [NSString stringWithFormat:@"HTTP %ld · %@",
-                            (long)status, CCApiSnippet(data)];
+                    id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                    NSString *out = nil;
+                    if ([json isKindOfClass:[NSDictionary class]]) {
+                        NSArray *choices = json[@"choices"];
+                        if ([choices isKindOfClass:[NSArray class]] && [choices count] > 0) {
+                            id c0 = choices[0];
+                            if ([c0 isKindOfClass:[NSDictionary class]]) {
+                                id msg = c0[@"message"];
+                                if ([msg isKindOfClass:[NSDictionary class]]) out = msg[@"content"];
+                                if (!out) out = c0[@"text"];
+                            }
+                        }
+                        if (!out) out = json[@"model"];
+                    }
+                    if ([out isKindOfClass:[NSString class]] && out.length)
+                        line = [NSString stringWithFormat:@"HTTP %ld · %@", (long)status, out];
+                    else
+                        line = [NSString stringWithFormat:@"HTTP %ld · %@", (long)status, CCApiSnippet(data)];
                 }
                 @synchronized(res) { res[@"AI"] = line; }
                 dispatch_group_leave(group);
@@ -446,8 +527,16 @@ static NSString *CCApiSnippet(NSData *data) {
                     line = [NSString stringWithFormat:@"HTTP %ld · 网络错误：%@",
                             (long)status, err.localizedDescription];
                 } else {
-                    line = [NSString stringWithFormat:@"HTTP %ld · %@",
-                            (long)status, CCApiSnippet(data)];
+                    id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                    NSString *out = nil;
+                    if ([json isKindOfClass:[NSDictionary class]]) {
+                        id rd = json[@"responseData"];
+                        if ([rd isKindOfClass:[NSDictionary class]]) out = rd[@"translatedText"];
+                    }
+                    if ([out isKindOfClass:[NSString class]] && out.length)
+                        line = [NSString stringWithFormat:@"HTTP %ld · %@", (long)status, out];
+                    else
+                        line = [NSString stringWithFormat:@"HTTP %ld · %@", (long)status, CCApiSnippet(data)];
                 }
                 @synchronized(res) { res[@"MyMemory"] = line; }
                 dispatch_group_leave(group);
@@ -464,15 +553,11 @@ static NSString *CCApiSnippet(NSData *data) {
         }
         NSString *summary = [lines componentsJoinedByString:@"\n"];
         [loading dismissViewControllerAnimated:YES completion:^{
-            UIAlertController *result = [UIAlertController alertControllerWithTitle:@"接口测试结果"
-                message:summary preferredStyle:UIAlertControllerStyleAlert];
-            [result addAction:[UIAlertAction actionWithTitle:@"复制结果"
-                style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
-                [UIPasteboard generalPasteboard].string = summary;
-            }]];
-            [result addAction:[UIAlertAction actionWithTitle:@"确定"
-                style:UIAlertActionStyleCancel handler:nil]];
-            [self presentViewController:result animated:YES completion:nil];
+            CCApiResultController *vc = [[CCApiResultController alloc] init];
+            vc.resultText = summary;
+            UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+            nav.modalPresentationStyle = UIModalPresentationPageSheet;
+            [self presentViewController:nav animated:YES completion:nil];
         }];
     });
 }

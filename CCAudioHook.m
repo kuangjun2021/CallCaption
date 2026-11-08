@@ -1,14 +1,14 @@
-// CCAudioHook.m — LCT 同款音频验证（阶段 1，alpha3 安全版）
-// 注入 mediaserverd / audiomxd，观察 AudioUnitRender / AudioUnitProcess。
+// CCAudioHook.m — LCT 同款音频验证（alpha6）
+// 注入 mediaserverd / audiomxd，两条抓音路径：
+//   1) AudioUnitRender / AudioUnitProcess 直钩（只覆盖主动调用，实测很稀疏）
+//   2) AudioUnitSetProperty 钩子：包住通话引擎设置给 AudioUnit 的 render callback，
+//      这是实时通话音频真正流经的地方（alpha4 的 /tmp 日志证明钩子本身能注入成功）。
 //
-// alpha2 教训：渲染线程里绝不能调 AudioUnitGetProperty / ObjC / 文件 / 通知，
-// 会和音频单元锁自死锁，把 mediaserverd 卡死（通话拨不出去、看门狗 0x8BADF00D）。
-// 现在渲染线程只做纯 C 的 RMS 统计 + 原子写；格式查询、字符串、日志全部挪到
-// 后台 1 秒定时器里做。
+// 渲染线程里只做纯 C 的 RMS 统计；日志走后台 1 秒定时器。
 //
-// 日志通道：mediaserverd 是沙盒进程，写不了 /var/mobile/...，
-// 主通道是 Darwin 通知 "net.user.callcaption.log hook: ..."，
-// 由 SpringBoard 侧 Tweak.x 收到后写进 probe.log；os_log/文件只是兜底。
+// 日志通道：mediaserverd 沙盒写不了 /var/mobile/...，但 /tmp 可以写！
+// alpha4 的 /tmp/ccaudiohook.log 证明了注入和文件日志都正常，
+// 只有 Darwin 通知会被沙盒挡掉，所以这里以 /tmp 文件为主。
 #import <Foundation/Foundation.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <AudioUnit/AudioUnit.h>
@@ -27,6 +27,7 @@ static CCMSHookFunction g_MSHook = NULL;
 static os_log_t g_oslog = NULL;
 
 #define CC_HOOK_LOG @"/var/mobile/Library/CallCaption/probe.log"
+#define CC_HOOK_TMP @"/tmp/ccaudiohook.log"
 #define CC_HOOK_OFF @"/var/mobile/Library/CallCaption/audiohook.off"
 
 typedef OSStatus (*AURenderFn)(AudioUnit, AudioUnitRenderActionFlags *,
@@ -35,9 +36,12 @@ typedef OSStatus (*AURenderFn)(AudioUnit, AudioUnitRenderActionFlags *,
 typedef OSStatus (*AUProcessFn)(AudioUnit, AudioUnitRenderActionFlags *,
                                 const AudioTimeStamp *, UInt32,
                                 AudioBufferList *);
+typedef OSStatus (*SetPropFn)(AudioUnit, AudioUnitPropertyID, AudioUnitScope,
+                              AudioUnitElement, const void *, UInt32);
 
 static AURenderFn g_origRender = NULL;
 static AUProcessFn g_origProcess = NULL;
+static SetPropFn g_origSetProp = NULL;
 
 #pragma mark - 日志（只在后台线程调用）
 
@@ -59,12 +63,7 @@ static void CCHookLog(NSString *fmt, ...) {
                                              NULL, NULL, true);
 
         NSString *line = [NSString stringWithFormat:@"[%@] hook: %@\n", [NSDate date], msg];
-        NSMutableArray<NSString *> *paths = [NSMutableArray array];
-        [paths addObject:CC_HOOK_LOG];
-        [paths addObject:@"/tmp/ccaudiohook.log"];
-        NSString *tmp = NSTemporaryDirectory();
-        if (tmp.length) [paths addObject:[tmp stringByAppendingPathComponent:@"ccaudiohook.log"]];
-        for (NSString *p in paths) {
+        for (NSString *p in @[CC_HOOK_TMP, CC_HOOK_LOG]) {
             @try {
                 FILE *fp = fopen(p.fileSystemRepresentation, "a");
                 if (!fp) continue;
@@ -180,6 +179,112 @@ static OSStatus CCHookedProcess(AudioUnit unit, AudioUnitRenderActionFlags *flag
     return st;
 }
 
+#pragma mark - 通话引擎的 render callback（对方语音真正流经的地方）
+
+typedef struct {
+    AURenderCallback proc;
+    void *refcon;
+    AudioUnit unit;
+    UInt32 bus;
+    _Atomic(uint64_t) calls;
+    _Atomic(uint32_t) frames;
+    _Atomic(uint32_t) rmsBits;
+} CCCB;
+
+static CCCB *g_cbs[16];
+static _Atomic(int) g_cbCount;
+static uint64_t g_lastCbCalls[16];
+
+static void CCRecordCB(CCCB *c, AudioBufferList *ioData, UInt32 frames) {
+    if (!c || !ioData || frames == 0) return;
+    double sum = 0;
+    UInt64 count = 0;
+    UInt32 nb = ioData->mNumberBuffers;
+    if (nb > 8) nb = 8;
+    for (UInt32 i = 0; i < nb; i++) {
+        AudioBuffer *b = &ioData->mBuffers[i];
+        if (!b->mData || b->mDataByteSize < 4) continue;
+        float *f = (float *)b->mData;
+        UInt32 n = b->mDataByteSize / 4;
+        if (n > 4096) n = 4096;
+        for (UInt32 j = 0; j < n; j++) sum += fabsf(f[j]);
+        count += n;
+    }
+    if (count) {
+        float rms = (float)(sum / (double)count);
+        if (!isfinite(rms)) rms = 0;
+        atomic_store_explicit(&c->rmsBits, CCFloatBits(rms), memory_order_relaxed);
+    }
+    atomic_store_explicit(&c->frames, frames, memory_order_relaxed);
+    atomic_fetch_add_explicit(&c->calls, 1, memory_order_relaxed);
+}
+
+static OSStatus CCHookedRenderCB(void *refCon, AudioUnitRenderActionFlags *flags,
+                                 const AudioTimeStamp *ts, UInt32 bus,
+                                 UInt32 frames, AudioBufferList *ioData) {
+    CCCB *c = (CCCB *)refCon;
+    OSStatus st = (c && c->proc)
+        ? c->proc(c->refcon, flags, ts, bus, frames, ioData) : -1;
+    if (st == noErr) CCRecordCB(c, ioData, frames);
+    return st;
+}
+
+// 只记录每个 unit/property 一次，避免刷屏
+static void CCNoteProperty(AudioUnit unit, AudioUnitPropertyID prop,
+                           AudioUnitScope scope, AudioUnitElement elem, UInt32 size) {
+    static uint32_t seen[64][4];
+    static int seenCount;
+    uint32_t u = (uint32_t)((uintptr_t)unit & 0xffff);
+    for (int i = 0; i < seenCount; i++) {
+        if (seen[i][0] == u && seen[i][1] == prop &&
+            seen[i][2] == scope && seen[i][3] == elem) return;
+    }
+    if (seenCount < 64) {
+        seen[seenCount][0] = u; seen[seenCount][1] = prop;
+        seen[seenCount][2] = scope; seen[seenCount][3] = elem;
+        seenCount++;
+    }
+    CCHookLog(@"setprop u%x p%u s%u e%u sz%u", u, prop, scope, elem, size);
+}
+
+static OSStatus CCHookedSetProp(AudioUnit unit, AudioUnitPropertyID prop,
+                                AudioUnitScope scope, AudioUnitElement elem,
+                                const void *inData, UInt32 inDataSize) {
+    if (prop == kAudioUnitProperty_SetRenderCallback &&
+        inData && inDataSize >= sizeof(AURenderCallbackStruct)) {
+        const AURenderCallbackStruct *orig = (const AURenderCallbackStruct *)inData;
+        int idx = atomic_load(&g_cbCount);
+        if (orig->inputProc && idx < 16) {
+            CCCB *c = calloc(1, sizeof(CCCB));
+            if (c) {
+                c->proc = orig->inputProc;
+                c->refcon = orig->inputProcRefCon;
+                c->unit = unit;
+                c->bus = elem;
+                g_cbs[idx] = c;
+                atomic_store(&g_cbCount, idx + 1);
+
+                AURenderCallbackStruct wrap = *orig;
+                wrap.inputProc = CCHookedRenderCB;
+                wrap.inputProcRefCon = c;
+                OSStatus st = g_origSetProp(unit, prop, scope, elem, &wrap, sizeof(wrap));
+                CCHookLog(@"setRenderCB u%lx b%u proc%p ok%d",
+                          (unsigned long)((uintptr_t)unit & 0xffff), elem,
+                          orig->inputProc, st == noErr);
+                return st;
+            }
+        }
+    }
+    if (prop == kAudioOutputUnitProperty_SetInputCallback) {
+        CCNoteProperty(unit, prop, scope, elem, inDataSize);
+    } else if (prop == kAudioUnitProperty_StreamFormat ||
+               prop == kAudioOutputUnitProperty_EnableIO ||
+               prop == kAudioUnitProperty_MaximumFramesPerSlice) {
+        CCNoteProperty(unit, prop, scope, elem, inDataSize);
+    }
+    return g_origSetProp(unit, prop, scope, elem, inData, inDataSize);
+}
+
 #pragma mark - 后台线程：每秒汇报一次
 
 static void CCReport(void) {
@@ -200,8 +305,20 @@ static void CCReport(void) {
                   rms, (unsigned long long)calls);
     }
 
-    // 心跳：每 5 秒一次。哪怕 hook 没装上 / 没有任何 render，
-    // 也能证明 dylib 是否真的被注入到了 mediaserverd。
+    int cbCount = atomic_load(&g_cbCount);
+    for (int i = 0; i < cbCount; i++) {
+        CCCB *c = g_cbs[i];
+        if (!c) continue;
+        uint64_t calls = atomic_load(&c->calls);
+        if (calls == 0 || calls == g_lastCbCalls[i]) continue;
+        g_lastCbCalls[i] = calls;
+        CCHookLog(@"cb u%lx b%u f%u rms%.5f n%llu",
+                  (unsigned long)((uintptr_t)c->unit & 0xffff), c->bus,
+                  atomic_load(&c->frames), CCBitsFloat(atomic_load(&c->rmsBits)),
+                  (unsigned long long)calls);
+    }
+
+    // 心跳：每 5 秒一次，证明 dylib 注入/钩子安装状态
     static CFAbsoluteTime lastBeat;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (now - lastBeat >= 5.0) {
@@ -213,10 +330,11 @@ static void CCReport(void) {
             units++;
             calls += atomic_load(&g_slots[i].calls);
         }
-        CCHookLog(@"alive %@ tried%d msh%d rt%d rp%d units%d calls%llu",
+        CCHookLog(@"alive %@ tried%d msh%d rt%d rp%d sp%d units%d cb%d calls%llu",
                   CCProcName(), atomic_load(&g_hookTried), atomic_load(&g_mshookFound),
                   atomic_load(&g_rtInstalled), atomic_load(&g_rpInstalled),
-                  units, (unsigned long long)calls);
+                  g_origSetProp ? 1 : 0, units, cbCount,
+                  (unsigned long long)calls);
     }
 }
 
@@ -284,6 +402,14 @@ static void CCInstallHooks(void) {
             CCHookLog(@"installed AudioUnitProcess sym=%p old=%p", processSym, g_origProcess);
         } else {
             CCHookLog(@"AudioUnitProcess skipped sym=%p (not AudioToolbox)", processSym);
+        }
+
+        void *setPropSym = dlsym(RTLD_DEFAULT, "AudioUnitSetProperty");
+        if (setPropSym && CCSymbolInAudioToolbox(setPropSym)) {
+            g_MSHook(setPropSym, (void *)CCHookedSetProp, (void **)&g_origSetProp);
+            CCHookLog(@"installed AudioUnitSetProperty sym=%p old=%p", setPropSym, g_origSetProp);
+        } else {
+            CCHookLog(@"AudioUnitSetProperty skipped sym=%p (not AudioToolbox)", setPropSym);
         }
     }
 }

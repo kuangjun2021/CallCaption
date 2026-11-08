@@ -15,8 +15,12 @@
 	<key>CFBundlePackageType</key>
 	<string>BNDL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.13.7</string>
+	<string>0.14.0-alpha39</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
 	<key>CFBundleVersion</key>
-	<string>0.13.7</string>
+	<string>0.14.0-alpha39</string>
+	<key>NSPrincipalClass</key>
+	<string>CallCaptionRootListController</string>
 </dict>
 </plist>

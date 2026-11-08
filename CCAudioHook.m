@@ -1,10 +1,15 @@
 // CCAudioHook.m — LCT 同款音频验证（阶段 1）
 // 注入 mediaserverd / audiomxd，只观察 AudioUnitRender / AudioUnitProcess 的音频，
 // 打印格式与 RMS，不修改音频、不接 UI。用于验证“远端/本地声音到底有没有经过系统音频单元”。
+//
+// 日志通道：mediaserverd 是沙盒进程，不能直接写 /var/mobile/...，
+// 所以主通道是 Darwin 通知 "net.user.callcaption.log hook: ..."，
+// 由 SpringBoard 侧的 Tweak.x 收到后写进 probe.log；os_log/文件只是兜底。
 #import <Foundation/Foundation.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <AudioUnit/AudioUnit.h>
 #import <CoreFoundation/CoreFoundation.h>
+#import <os/log.h>
 #import <math.h>
 #import <stdio.h>
 #import <unistd.h>
@@ -13,6 +18,7 @@
 
 typedef void (*CCMSHookFunction)(void *symbol, void *hook, void **old);
 static CCMSHookFunction g_MSHook = NULL;
+static os_log_t g_oslog = NULL;
 
 #define CC_HOOK_LOG @"/var/mobile/Library/CallCaption/probe.log"
 
@@ -32,16 +38,35 @@ static void CCHookLog(NSString *fmt, ...) {
         va_start(ap, fmt);
         NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
         va_end(ap);
+
+        // 统一日志（Console/log show 可见）
+        if (!g_oslog) g_oslog = os_log_create("net.user.callcaption", "audiohook");
+        os_log_with_type(g_oslog, OS_LOG_TYPE_DEFAULT, "%{public}s", msg.UTF8String);
+
+        // 主通道：Darwin 通知 → SpringBoard 落盘（沙盒进程无文件权限）
+        NSString *name = [NSString stringWithFormat:@"net.user.callcaption.log hook: %@", msg];
+        if (name.length > 400) name = [name substringToIndex:400];
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                             (__bridge CFStringRef)name,
+                                             NULL, NULL, true);
+
+        // 兜底：万一进程有权限就直接写文件
         NSString *line = [NSString stringWithFormat:@"[%@] hook: %@\n",
                           [NSDate date], msg];
         NSFileManager *fm = [NSFileManager defaultManager];
         [fm createDirectoryAtPath:@"/var/mobile/Library/CallCaption"
       withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0777} error:nil];
-        FILE *fp = fopen(CC_HOOK_LOG.UTF8String, "a");
-        if (fp) {
+        const char *paths[] = {
+            CC_HOOK_LOG.UTF8String,
+            "/tmp/ccaudiohook.log",
+            NULL
+        };
+        for (int i = 0; paths[i]; i++) {
+            FILE *fp = fopen(paths[i], "a");
+            if (!fp) continue;
             fputs(line.UTF8String, fp);
             fclose(fp);
-            chmod(CC_HOOK_LOG.UTF8String, 0666);
+            chmod(paths[i], 0666);
         }
     }
 }
@@ -122,10 +147,9 @@ static void CCInspect(AudioUnit unit, UInt32 bus, UInt32 frames,
     }
     double rms = count ? (sum / (double)count) : 0;
 
-    CCHookLog(@"proc=%@ src=%s unit=%p bus=%u frames=%u rate=%.0f ch=%u bpf=%u fmt=0x%x float=%d rms=%.5f sub=%@ man=%@",
+    CCHookLog(@"proc=%@ src=%s unit=%p bus=%u frames=%u rate=%.0f ch=%u float=%d rms=%.5f sub=%@ man=%@",
               CCProcName(), source, unit, bus, frames,
-              asbd.mSampleRate, asbd.mChannelsPerFrame, asbd.mBytesPerFrame,
-              asbd.mFormatFlags, isFloat, rms,
+              asbd.mSampleRate, asbd.mChannelsPerFrame, isFloat, rms,
               CCFourCC(desc.componentSubType), CCFourCC(desc.componentManufacturer));
 }
 
@@ -155,21 +179,31 @@ __attribute__((constructor))
 static void CCAudioHookBoot(void) {
     @autoreleasepool {
         NSString *proc = CCProcName();
+        // 先报一声，确认 dylib 到底有没有被注入
+        CCHookLog(@"dylib loaded proc=%@ pid=%d", proc, getpid());
+
         if (!([proc isEqualToString:@"mediaserverd"] ||
               [proc isEqualToString:@"audiomxd"])) {
             return;
         }
-        CCHookLog(@"loaded proc=%@ pid=%d", proc, getpid());
 
         g_MSHook = (CCMSHookFunction)dlsym(RTLD_DEFAULT, "MSHookFunction");
         if (!g_MSHook) {
-            CCHookLog(@"MSHookFunction not found");
+            void *h = dlopen("/var/jb/usr/lib/libsubstrate.dylib", RTLD_NOW);
+            if (!h) h = dlopen("/var/jb/usr/lib/libellekit.dylib", RTLD_NOW);
+            if (!h) h = dlopen("libsubstrate.dylib", RTLD_NOW);
+            if (h) g_MSHook = (CCMSHookFunction)dlsym(h, "MSHookFunction");
+            CCHookLog(@"MSHookFunction dlsym=%p from dlopen=%p", g_MSHook, h);
+        } else {
+            CCHookLog(@"MSHookFunction dlsym=%p", g_MSHook);
+        }
+        if (!g_MSHook) {
+            CCHookLog(@"MSHookFunction not found, hook aborted");
             return;
         }
-        CCHookLog(@"MSHookFunction=%p", g_MSHook);
 
         void *renderSym = dlsym(RTLD_DEFAULT, "AudioUnitRender");
-        if (renderSym && g_MSHook) {
+        if (renderSym) {
             g_MSHook(renderSym, (void *)CCHookedRender, (void **)&g_origRender);
             CCHookLog(@"installed AudioUnitRender sym=%p old=%p", renderSym, g_origRender);
         } else {
@@ -177,7 +211,7 @@ static void CCAudioHookBoot(void) {
         }
 
         void *processSym = dlsym(RTLD_DEFAULT, "AudioUnitProcess");
-        if (processSym && g_MSHook) {
+        if (processSym) {
             g_MSHook(processSym, (void *)CCHookedProcess, (void **)&g_origProcess);
             CCHookLog(@"installed AudioUnitProcess sym=%p old=%p", processSym, g_origProcess);
         } else {

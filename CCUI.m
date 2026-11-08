@@ -103,13 +103,24 @@ static NSString *g_stateText;
 static BOOL g_swizzledOutsideTap;
 static void InstallOutsideTapSwizzle(void) {
     if (g_swizzledOutsideTap) return;
-    g_swizzledOutsideTap = YES;
     Method a = class_getInstanceMethod([UIWindow class], @selector(hitTest:withEvent:));
     Method b = class_getInstanceMethod([UIWindow class], @selector(cc_outsideHitTest:withEvent:));
-    if (a && b) {
-        method_exchangeImplementations(a, b);
-        CCLogf(@"ui: outside tap swizzle installed");
+    if (!a || !b) {
+        CCLogf(@"ui: outside tap swizzle skipped a=%p b=%p", a, b);
+        return;
     }
+
+    // 关键：UIWindow 自己没实现 hitTest:withEvent: 时，class_getInstanceMethod 会
+    // 返回 UIView 的实现。直接交换会把 UIView 的 hitTest 换成我们的方法，
+    // 之后任何 UIView 命中测试都会 unrecognized selector → SpringBoard 崩进安全模式。
+    // 先把 hitTest 复制到 UIWindow 自己的方法表，再在 UIWindow 内部交换。
+    class_addMethod([UIWindow class], @selector(hitTest:withEvent:),
+                    method_getImplementation(a), method_getTypeEncoding(a));
+    a = class_getInstanceMethod([UIWindow class], @selector(hitTest:withEvent:));
+    if (!a) return;
+    method_exchangeImplementations(a, b);
+    g_swizzledOutsideTap = YES;
+    CCLogf(@"ui: outside tap swizzle installed (window-scope)");
 }
 
 static CGFloat ScreenW(void) { return [UIScreen mainScreen].bounds.size.width; }
@@ -1109,7 +1120,7 @@ void CCUIBoot(void) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.13.19)");
+        CCLogLine(@"CallCaption UI booted (single window v0.14.0-alpha2)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

@@ -783,7 +783,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.13.19)");
+        CCLogLine(@"audioservice started (v0.14.0-alpha2)");
         {
             NSString *dk = CCPrefStr(CC_K_DEEPL_KEY, @"");
             CCLogf(@"prefs boot: engine=%@ deeplKeyLen=%lu remote=%d local=%d",

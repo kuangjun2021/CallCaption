@@ -258,13 +258,13 @@ static void VoiceLists(NSString *prefix,
                  @[@"auto", @"deepl", @"bing", @"google", @"ai"],
                  @[@"自动（推荐）", @"DeepL", @"Bing（免费·国内推荐）",
                    @"Google（免费 / Key）", @"AI 自定义"]),
-        MkText(@"DeepLKey", @"DeepL API Key", @"", YES, @"不填则跳过 DeepL"),
-        MkText(@"GoogleKey", @"Google API Key", @"", YES, @"不填则用免费接口"),
+        MkText(@"DeepLKey", @"DeepL API Key", @"", NO, @"不填则跳过 DeepL"),
+        MkText(@"GoogleKey", @"Google API Key", @"", NO, @"不填则用免费接口"),
     ];
     NSArray *ai = @[
         MkText(@"AIURL", @"AI 接口地址", @"https://api.deepseek.com/v1/chat/completions", NO,
                @"https://.../chat/completions"),
-        MkText(@"AIKey", @"AI API Key", @"", YES, @"sk-..."),
+        MkText(@"AIKey", @"AI API Key", @"", NO, @"sk-..."),
         MkText(@"AIModel", @"AI 模型名", @"deepseek-chat", NO, @"deepseek-chat"),
     ];
     NSArray *voices = @[
@@ -273,6 +273,7 @@ static void VoiceLists(NSString *prefix,
     ];
     NSArray *diag = @[
         MkSwitch(@"Diagnostics", @"诊断日志", YES),
+        MkAction(@"testApi", @"测试翻译接口"),
         MkAction(@"openLog", @"打开诊断日志"),
     ];
 
@@ -449,8 +450,12 @@ static void VoiceLists(NSString *prefix,
         [self presentChoices:row cell:[tv cellForRowAtIndexPath:ip]];
         return;
     }
-    if (row.kind == CCPrefsItemKindAction && [row.key isEqualToString:@"openLog"]) {
-        [self presentLogMenu:[tv cellForRowAtIndexPath:ip]];
+    if (row.kind == CCPrefsItemKindAction) {
+        if ([row.key isEqualToString:@"openLog"]) {
+            [self presentLogMenu:[tv cellForRowAtIndexPath:ip]];
+        } else if ([row.key isEqualToString:@"testApi"]) {
+            [self runApiTest];
+        }
     }
 }
 
@@ -500,6 +505,159 @@ static void VoiceLists(NSString *prefix,
         sheet.popoverPresentationController.sourceRect = cell ? cell.bounds : self.view.bounds;
     }
     [self presentViewController:sheet animated:YES completion:nil];
+}
+
+static NSString *CCApiSnippet2(NSData *data) {
+    if (!data) return @"";
+    NSString *s = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (!s) return @"";
+    s = [s stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
+    s = [s stringByReplacingOccurrencesOfString:@"\r" withString:@" "];
+    if (s.length > 100) s = [s substringToIndex:100];
+    return s;
+}
+
+- (NSString *)valForKey:(NSString *)key def:(NSString *)def {
+    id v = self.values[key];
+    if ([v isKindOfClass:[NSString class]] && [v length]) return v;
+    if ([v isKindOfClass:[NSNumber class]]) return [v stringValue];
+    return def;
+}
+
+- (void)runApiTest {
+    UIAlertController *loading = [UIAlertController alertControllerWithTitle:@"接口测试"
+        message:@"正在请求 DeepL / Google / AI / MyMemory…"
+        preferredStyle:UIAlertControllerStyleAlert];
+    [self presentViewController:loading animated:YES completion:nil];
+
+    NSMutableDictionary *res = [NSMutableDictionary dictionary];
+    dispatch_group_t group = dispatch_group_create();
+
+    NSString *dk = [self valForKey:@"DeepLKey" def:@""];
+    NSString *gk = [self valForKey:@"GoogleKey" def:@""];
+    NSString *aiURL = [self valForKey:@"AIURL" def:@""];
+    NSString *aiKey = [self valForKey:@"AIKey" def:@""];
+    NSString *aiModel = [self valForKey:@"AIModel" def:@"deepseek-chat"];
+
+    if (!dk.length) {
+        res[@"DeepL"] = @"未填 Key";
+    } else {
+        dispatch_group_enter(group);
+        NSString *body = [NSString stringWithFormat:@"text=Hello&source_lang=EN&target_lang=ZH"];
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:
+            [NSURL URLWithString:@"https://api-free.deepl.com/v2/translate"]];
+        req.HTTPMethod = @"POST";
+        [req setValue:@"application/x-www-form-urlencoded" forHTTPHeaderField:@"Content-Type"];
+        [req setValue:[NSString stringWithFormat:@"DeepL-Auth-Key %@", dk]
+   forHTTPHeaderField:@"Authorization"];
+        req.HTTPBody = [body dataUsingEncoding:NSUTF8StringEncoding];
+        req.timeoutInterval = 5.0;
+        [[[NSURLSession sharedSession] dataTaskWithRequest:req
+            completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+                NSInteger status = [resp isKindOfClass:[NSHTTPURLResponse class]]
+                                 ? [(NSHTTPURLResponse *)resp statusCode] : 0;
+                NSString *line;
+                id json = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+                NSString *out = nil;
+                if ([json isKindOfClass:[NSDictionary class]]) {
+                    NSArray *arr = json[@"translations"];
+                    if ([arr isKindOfClass:[NSArray class]] && arr.count) out = arr[0][@"text"];
+                }
+                if (err) line = [NSString stringWithFormat:@"HTTP %ld · %@", (long)status, err.localizedDescription];
+                else if (out.length) line = [NSString stringWithFormat:@"HTTP %ld · %@", (long)status, out];
+                else line = [NSString stringWithFormat:@"HTTP %ld · %@", (long)status, CCApiSnippet2(data)];
+                @synchronized(res) { res[@"DeepL"] = line; }
+                dispatch_group_leave(group);
+            }] resume];
+    }
+
+    dispatch_group_enter(group);
+    {
+        NSString *urlStr;
+        if (gk.length) {
+            urlStr = [NSString stringWithFormat:
+                @"https://translation.googleapis.com/language/translate/v2?key=%@&q=Hello&source=en&target=zh",
+                gk];
+        } else {
+            urlStr = @"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh&dt=t&q=Hello";
+        }
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
+        req.timeoutInterval = 5.0;
+        [[[NSURLSession sharedSession] dataTaskWithRequest:req
+            completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+                NSInteger status = [resp isKindOfClass:[NSHTTPURLResponse class]]
+                                 ? [(NSHTTPURLResponse *)resp statusCode] : 0;
+                NSString *line = err ? [NSString stringWithFormat:@"HTTP %ld · %@", (long)status, err.localizedDescription]
+                                     : [NSString stringWithFormat:@"HTTP %ld · %@", (long)status, CCApiSnippet2(data)];
+                @synchronized(res) { res[@"Google"] = line; }
+                dispatch_group_leave(group);
+            }] resume];
+    }
+
+    if (!aiURL.length || !aiKey.length) {
+        res[@"AI"] = @"未配置 URL/Key";
+    } else {
+        dispatch_group_enter(group);
+        NSDictionary *body = @{
+            @"model": aiModel.length ? aiModel : @"deepseek-chat",
+            @"temperature": @0,
+            @"max_tokens": @40,
+            @"messages": @[
+                @{@"role": @"system", @"content": @"Translate to Chinese. Output only the translation."},
+                @{@"role": @"user", @"content": @"Hello"},
+            ],
+        };
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:aiURL]];
+        req.HTTPMethod = @"POST";
+        [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+        [req setValue:[NSString stringWithFormat:@"Bearer %@", aiKey] forHTTPHeaderField:@"Authorization"];
+        req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
+        req.timeoutInterval = 7.0;
+        [[[NSURLSession sharedSession] dataTaskWithRequest:req
+            completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+                NSInteger status = [resp isKindOfClass:[NSHTTPURLResponse class]]
+                                 ? [(NSHTTPURLResponse *)resp statusCode] : 0;
+                NSString *line = err ? [NSString stringWithFormat:@"HTTP %ld · %@", (long)status, err.localizedDescription]
+                                     : [NSString stringWithFormat:@"HTTP %ld · %@", (long)status, CCApiSnippet2(data)];
+                @synchronized(res) { res[@"AI"] = line; }
+                dispatch_group_leave(group);
+            }] resume];
+    }
+
+    dispatch_group_enter(group);
+    {
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:
+            [NSURL URLWithString:@"https://api.mymemory.translated.net/get?q=Hello&langpair=en%7Czh"]];
+        req.timeoutInterval = 5.0;
+        [[[NSURLSession sharedSession] dataTaskWithRequest:req
+            completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+                NSInteger status = [resp isKindOfClass:[NSHTTPURLResponse class]]
+                                 ? [(NSHTTPURLResponse *)resp statusCode] : 0;
+                NSString *line = err ? [NSString stringWithFormat:@"HTTP %ld · %@", (long)status, err.localizedDescription]
+                                     : [NSString stringWithFormat:@"HTTP %ld · %@", (long)status, CCApiSnippet2(data)];
+                @synchronized(res) { res[@"MyMemory"] = line; }
+                dispatch_group_leave(group);
+            }] resume];
+    }
+
+    dispatch_group_notify(group, dispatch_get_main_queue(), ^{
+        NSArray *order = @[@"DeepL", @"Google", @"AI", @"MyMemory"];
+        NSMutableArray *lines = [NSMutableArray array];
+        for (NSString *k in order)
+            [lines addObject:[NSString stringWithFormat:@"%@：%@", k, res[k] ?: @"未测试"]];
+        NSString *summary = [lines componentsJoinedByString:@"\n"];
+        [loading dismissViewControllerAnimated:YES completion:^{
+            UIAlertController *result = [UIAlertController alertControllerWithTitle:@"接口测试结果"
+                message:summary preferredStyle:UIAlertControllerStyleAlert];
+            [result addAction:[UIAlertAction actionWithTitle:@"复制结果"
+                style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+                [UIPasteboard generalPasteboard].string = summary;
+            }]];
+            [result addAction:[UIAlertAction actionWithTitle:@"确定"
+                style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:result animated:YES completion:nil];
+        }];
+    });
 }
 
 - (void)presentLogMenu:(UITableViewCell *)cell {

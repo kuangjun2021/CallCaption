@@ -66,10 +66,10 @@ __attribute__((visibility("default")))
 
 @implementation CallCaptionRootListController
 
-+ (void)load { SLog(@"bundle loaded v0.14.0-alpha36"); }
++ (void)load { SLog(@"bundle loaded v0.14.0-alpha37"); }
 
 - (NSArray *)specifiers {
-    SLog(@"specifiers enter v36");
+    SLog(@"specifiers enter v37");
     if (!_specifiers) {
         @try { CCMigrateCFPrefsToFile(); } @catch (NSException *e) { SLog(@"migrate exc %@", e.reason); }
         NSBundle *b = self.bundle;

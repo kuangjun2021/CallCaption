@@ -251,6 +251,34 @@ static void CCReport(void) {
 static dispatch_queue_t g_reportQ;
 static dispatch_source_t g_reportTimer;
 
+static void *CCFindMSHook(NSString **src) {
+    void *sym = dlsym(RTLD_DEFAULT, "MSHookFunction");
+    if (sym) {
+        if (src) *src = @"RTLD_DEFAULT";
+        return sym;
+    }
+    // App 进程里 ElleKit 的符号可能不是全局导出，优先用已经加载的 libellekit。
+    // 注意顺序：libsubstrate 可能只是兼容 stub，先试 libellekit。
+    const char *paths[] = {
+        "/var/jb/usr/lib/libellekit.dylib",
+        "/var/jb/usr/lib/libsubstrate.dylib",
+        "libellekit.dylib",
+        "libsubstrate.dylib",
+        NULL
+    };
+    for (int i = 0; paths[i]; i++) {
+        void *h = dlopen(paths[i], RTLD_NOW | RTLD_NOLOAD);
+        if (!h) h = dlopen(paths[i], RTLD_NOW);
+        if (!h) continue;
+        sym = dlsym(h, "MSHookFunction");
+        if (sym) {
+            if (src) *src = [NSString stringWithUTF8String:paths[i]];
+            return sym;
+        }
+    }
+    return NULL;
+}
+
 __attribute__((constructor))
 static void CCAppProbeBoot(void) {
     @autoreleasepool {
@@ -274,19 +302,22 @@ static void CCAppProbeBoot(void) {
                     CCAppLog(@"appprobe disabled by appprobe.off");
                     return;
                 }
-                g_MSHook = (CCMSHookFunction)dlsym(RTLD_DEFAULT, "MSHookFunction");
-                if (!g_MSHook) {
-                    void *h = dlopen("/var/jb/usr/lib/libsubstrate.dylib", RTLD_NOW);
-                    if (!h) h = dlopen("/var/jb/usr/lib/libellekit.dylib", RTLD_NOW);
-                    if (h) g_MSHook = (CCMSHookFunction)dlsym(h, "MSHookFunction");
-                }
+                NSString *src = nil;
+                g_MSHook = (CCMSHookFunction)CCFindMSHook(&src);
                 if (!g_MSHook) { CCAppLog(@"MSHookFunction not found"); return; }
+
+                Dl_info mi;
+                memset(&mi, 0, sizeof(mi));
+                dladdr((void *)g_MSHook, &mi);
+                CCAppLog(@"mshook src=%@ impl=%s", src ?: @"?",
+                         mi.dli_fname ? mi.dli_fname : "?");
 
                 void *setProp = dlsym(RTLD_DEFAULT, "AudioUnitSetProperty");
                 if (setProp) {
                     g_MSHook(setProp, (void *)CCHookedSetProp, (void **)&g_origSetProp);
-                    CCAppLog(@"installed AudioUnitSetProperty sym=%p old=%p",
-                             setProp, g_origSetProp);
+                    CCAppLog(@"setprop hook sym=%p old=%p %@",
+                             setProp, g_origSetProp,
+                             g_origSetProp ? @"OK" : @"FAILED(old=0)");
                 } else {
                     CCAppLog(@"AudioUnitSetProperty not found");
                 }
@@ -294,7 +325,9 @@ static void CCAppProbeBoot(void) {
                 void *render = dlsym(RTLD_DEFAULT, "AudioUnitRender");
                 if (render) {
                     g_MSHook(render, (void *)CCHookedRender, (void **)&g_origRender);
-                    CCAppLog(@"installed AudioUnitRender sym=%p old=%p", render, g_origRender);
+                    CCAppLog(@"render hook sym=%p old=%p %@",
+                             render, g_origRender,
+                             g_origRender ? @"OK" : @"FAILED(old=0)");
                 } else {
                     CCAppLog(@"AudioUnitRender not found");
                 }

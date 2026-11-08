@@ -9,7 +9,7 @@
 		<key>cell</key>
 		<string>PSLinkCell</string>
 		<key>detail</key>
-		<string>PSListController</string>
+		<string>CallCaptionRootListController</string>
 		<key>isController</key>
 		<true/>
 		<key>icon</key>

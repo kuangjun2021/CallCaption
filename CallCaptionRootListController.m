@@ -66,37 +66,21 @@ __attribute__((visibility("default")))
 
 @implementation CallCaptionRootListController
 
-+ (void)load { SLog(@"bundle loaded v0.14.0-alpha30"); }
++ (void)load { SLog(@"bundle loaded"); }
 
 - (NSArray *)specifiers {
-    SLog(@"specifiers enter bundle=%@", self.bundle);
     if (!_specifiers) {
-        @try { CCMigrateCFPrefsToFile(); } @catch (NSException *e) { SLog(@"migrate exc %@", e.reason); }
+        CCMigrateCFPrefsToFile();
         NSBundle *b = self.bundle;
         if (!b) {
             b = [NSBundle bundleWithPath:@"/var/jb/Library/PreferenceBundles/CallCaptionPrefs.bundle"];
             if (b) self.bundle = b;
-        }
-        // 先走系统原生加载（对 PSLinkListCell 等类型最稳），失败再退回手工构建
-        if (b) {
-            @try {
-                NSArray *native = [self loadSpecifiersFromPlistName:@"Root" target:self bundle:b];
-                if (native.count) {
-                    SLog(@"native specs=%lu", (unsigned long)native.count);
-                    _specifiers = [native mutableCopy];
-                    return _specifiers;
-                }
-                SLog(@"native specs empty");
-            } @catch (NSException *e) {
-                SLog(@"native load exc: %@", e.reason);
-            }
         }
         NSString *path = [b pathForResource:@"Root" ofType:@"plist"];
         NSArray *dicts = [NSArray arrayWithContentsOfFile:path];
         SLog(@"manual load path=%@ dicts=%lu", path, (unsigned long)dicts.count);
 
         if (dicts.count) {
-            SLog(@"building specifiers count=%lu", (unsigned long)dicts.count);
             NSMutableArray *arr = [NSMutableArray array];
             for (NSDictionary *d in dicts) {
                 if (![d isKindOfClass:[NSDictionary class]]) continue;
@@ -107,32 +91,27 @@ __attribute__((visibility("default")))
                 // 关键：开关/输入框必须挂上默认的 get/set 选择器，否则系统会把行渲染成不可用（灰掉）
                 BOOL needKV = (type == PSSwitchCell || type == PSEditTextCell ||
                                type == PSTitleValueCell || type == PSListItemCell ||
-                               type == PSSecureEditTextCell || type == PSSliderCell ||
-                               type == PSLinkListCell);
+                               type == PSSecureEditTextCell);
                 SEL setSel = needKV ? @selector(setPreferenceValue:specifier:) : NULL;
                 SEL getSel = needKV ? @selector(readPreferenceValue:) : NULL;
 
-                @try {
-                    PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:label
-                                                                    target:self
-                                                                       set:setSel
-                                                                       get:getSel
-                                                                    detail:nil
-                                                                      cell:type
-                                                                      edit:nil];
-                    for (NSString *k in d) {
-                        if ([k isEqualToString:@"cell"] || [k isEqualToString:@"label"]) continue;
-                        [sp setProperty:d[k] forKey:k];
-                    }
-                    NSString *act = d[@"action"];
-                    if ([act isKindOfClass:[NSString class]] && act.length) {
-                        sp.buttonAction = NSSelectorFromString(act);
-                        [sp setProperty:act forKey:@"action"];
-                    }
-                    [arr addObject:sp];
-                } @catch (NSException *e) {
-                    SLog(@"spec exc cell=%@ label=%@: %@", cellStr, label, e.reason);
+                PSSpecifier *sp = [PSSpecifier preferenceSpecifierNamed:label
+                                                                target:self
+                                                                   set:setSel
+                                                                   get:getSel
+                                                                detail:nil
+                                                                  cell:type
+                                                                  edit:nil];
+                for (NSString *k in d) {
+                    if ([k isEqualToString:@"cell"] || [k isEqualToString:@"label"]) continue;
+                    [sp setProperty:d[k] forKey:k];
                 }
+                NSString *act = d[@"action"];
+                if ([act isKindOfClass:[NSString class]] && act.length) {
+                    sp.buttonAction = NSSelectorFromString(act);
+                    [sp setProperty:act forKey:@"action"];
+                }
+                [arr addObject:sp];
             }
             _specifiers = arr;
             SLog(@"manual specs=%lu", (unsigned long)arr.count);

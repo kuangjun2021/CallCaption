@@ -12,6 +12,7 @@ typedef NS_ENUM(NSInteger, CCPrefsItemKind) {
     CCPrefsItemKindText,
     CCPrefsItemKindChoice,
     CCPrefsItemKindAction,
+    CCPrefsItemKindSlider,
 };
 
 @interface CCPrefsItem : NSObject
@@ -24,6 +25,8 @@ typedef NS_ENUM(NSInteger, CCPrefsItemKind) {
 @property (nonatomic) BOOL secure;
 @property (nonatomic, copy) NSArray<NSString *> *choiceValues;
 @property (nonatomic, copy) NSArray<NSString *> *choiceTitles;
+@property (nonatomic) double minValue;
+@property (nonatomic) double maxValue;
 @end
 @implementation CCPrefsItem @end
 
@@ -31,6 +34,52 @@ typedef NS_ENUM(NSInteger, CCPrefsItemKind) {
 @property (nonatomic, copy) NSString *prefKey;
 @end
 @implementation CCPrefsSwitch @end
+
+@interface CCPrefsSlider : UISlider
+@property (nonatomic, copy) NSString *prefKey;
+@property (nonatomic, weak) UILabel *valueLabel;
+@end
+@implementation CCPrefsSlider @end
+
+@interface CCPrefsSliderCell : UITableViewCell
+@property (nonatomic, strong) UILabel *nameLabel;
+@property (nonatomic, strong) CCPrefsSlider *slider;
+@property (nonatomic, strong) UILabel *valueLabel;
+@end
+
+@implementation CCPrefsSliderCell
+- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
+    self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
+    if (self) {
+        _nameLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+        _nameLabel.font = [UIFont systemFontOfSize:16];
+        _nameLabel.textColor = [UIColor labelColor];
+        _nameLabel.adjustsFontSizeToFitWidth = YES;
+        _nameLabel.minimumScaleFactor = 0.7;
+        [self.contentView addSubview:_nameLabel];
+
+        _slider = [[CCPrefsSlider alloc] initWithFrame:CGRectZero];
+        [self.contentView addSubview:_slider];
+
+        _valueLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+        _valueLabel.font = [UIFont monospacedDigitSystemFontOfSize:14 weight:UIFontWeightRegular];
+        _valueLabel.textColor = [UIColor secondaryLabelColor];
+        _valueLabel.textAlignment = NSTextAlignmentRight;
+        [self.contentView addSubview:_valueLabel];
+    }
+    return self;
+}
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat w = self.contentView.bounds.size.width;
+    CGFloat h = self.contentView.bounds.size.height;
+    _nameLabel.frame = CGRectMake(16, 0, w * 0.40, h);
+    CGFloat vx = w - 16 - 50;
+    _valueLabel.frame = CGRectMake(vx, 0, 50, h);
+    CGFloat sx = 16 + w * 0.40 + 8;
+    _slider.frame = CGRectMake(sx, 0, MAX(60.0, vx - sx - 10), h);
+}
+@end
 
 @interface CCPrefsTextCell : UITableViewCell
 @property (nonatomic, strong) UILabel *nameLabel;
@@ -143,6 +192,13 @@ static CCPrefsItem *MkText(NSString *key, NSString *title, NSString *def, BOOL s
     r.secure = secure; r.placeholder = ph;
     return r;
 }
+static CCPrefsItem *MkSlider(NSString *key, NSString *title, NSString *def,
+                       double minV, double maxV) {
+    CCPrefsItem *r = [CCPrefsItem new];
+    r.kind = CCPrefsItemKindSlider; r.key = key; r.title = title; r.defString = def;
+    r.minValue = minV; r.maxValue = maxV;
+    return r;
+}
 static CCPrefsItem *MkChoice(NSString *key, NSString *title, NSString *def,
                        NSArray<NSString *> *vals, NSArray<NSString *> *titles) {
     CCPrefsItem *r = [CCPrefsItem new];
@@ -188,8 +244,8 @@ static void VoiceLists(NSString *prefix,
     ];
 
     NSArray *volumes = @[
-        MkText(@"RemoteOriginalVolume", @"对方原音音量 (0-100)", @"30", NO, @"30"),
-        MkText(@"LocalOriginalVolume", @"我方原音音量 (0-100)", @"30", NO, @"30"),
+        MkSlider(@"RemoteOriginalVolume", @"对方原音", @"30", 0, 100),
+        MkSlider(@"LocalOriginalVolume", @"我方原音", @"30", 0, 100),
     ];
 
     NSMutableArray *zhV = [NSMutableArray array], *zhT = [NSMutableArray array];
@@ -328,6 +384,29 @@ static void VoiceLists(NSString *prefix,
         return cell;
     }
 
+    if (row.kind == CCPrefsItemKindSlider) {
+        static NSString *cid = @"slider";
+        CCPrefsSliderCell *cell = [tv dequeueReusableCellWithIdentifier:cid];
+        if (!cell) {
+            cell = [[CCPrefsSliderCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                            reuseIdentifier:cid];
+            [cell.slider addTarget:self action:@selector(sliderChanged:)
+                  forControlEvents:UIControlEventValueChanged];
+        }
+        cell.nameLabel.text = row.title;
+        double v = [[self stringFor:row] doubleValue];
+        if (v < row.minValue) v = row.minValue;
+        if (v > row.maxValue) v = row.maxValue;
+        cell.slider.minimumValue = (float)row.minValue;
+        cell.slider.maximumValue = (float)row.maxValue;
+        cell.slider.value = (float)v;
+        cell.slider.prefKey = row.key;
+        cell.slider.valueLabel = cell.valueLabel;
+        cell.valueLabel.text = [NSString stringWithFormat:@"%d%%", (int)lround(v)];
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        return cell;
+    }
+
     if (row.kind == CCPrefsItemKindChoice) {
         static NSString *cid = @"choice";
         UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:cid];
@@ -379,6 +458,12 @@ static void VoiceLists(NSString *prefix,
 
 - (void)switchChanged:(CCPrefsSwitch *)sw {
     [self setPrefValue:@(sw.on) forKey:sw.prefKey];
+}
+
+- (void)sliderChanged:(CCPrefsSlider *)sl {
+    int v = (int)lround(sl.value);
+    sl.valueLabel.text = [NSString stringWithFormat:@"%d%%", v];
+    [self setPrefValue:@(v) forKey:sl.prefKey];
 }
 
 - (void)textFieldDidEndEditing:(UITextField *)tf {

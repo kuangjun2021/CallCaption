@@ -127,6 +127,7 @@ __attribute__((visibility("default")))
 @property (nonatomic, strong) NSArray<NSString *> *sectionFooters;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, id> *values;
 @property (nonatomic, strong) NSArray<CCPrefsItem *> *textRows;
+@property (nonatomic, assign) BOOL embedded;   // YES: 作为 Settings.app 子控制器，不显示“完成”
 @end
 
 @implementation CCSettingsController
@@ -136,11 +137,13 @@ __attribute__((visibility("default")))
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"CallCaption";
-    self.navigationItem.rightBarButtonItem =
-        [[UIBarButtonItem alloc] initWithTitle:@"完成"
-                                         style:UIBarButtonItemStyleDone
-                                        target:self
-                                        action:@selector(closeSettings)];
+    if (!self.embedded) {
+        self.navigationItem.rightBarButtonItem =
+            [[UIBarButtonItem alloc] initWithTitle:@"完成"
+                                             style:UIBarButtonItemStyleDone
+                                            target:self
+                                            action:@selector(closeSettings)];
+    }
     self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
 
     // 隐藏 PSListController 自带的表格，避免空白页/白屏
@@ -683,6 +686,10 @@ static NSString *CCApiSnippet2(NSData *data) {
 }
 
 - (void)closeSettings {
+    if (self.embedded) {
+        [self.navigationController popViewControllerAnimated:YES];
+        return;
+    }
     self.view.window.hidden = YES;
 }
 

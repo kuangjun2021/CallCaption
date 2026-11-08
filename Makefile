@@ -24,7 +24,7 @@ CallCaptionAppProbe_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused
 CallCaptionAppProbe_LDFLAGS = -Wl,-fixup_chains
 
 BUNDLE_NAME = CallCaptionPrefs
-CallCaptionPrefs_FILES = CallCaptionRootListController.m
+CallCaptionPrefs_FILES = CallCaptionRootListController.m CCSettings.m
 CallCaptionPrefs_FRAMEWORKS = Foundation UIKit AVFoundation
 
 CallCaptionPrefs_CFLAGS = -fobjc-arc -Iinclude -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns

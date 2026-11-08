@@ -247,6 +247,9 @@ static BOOL CCGenerateUplinkTTS(NSString *text) {
     NSString *lastChunkText;         // 上一块的识别文本（用于重叠去重）
     NSUInteger chunkSeq;
     BOOL urlUseOnDevice;
+    BOOL chunkIsFloat;
+    double chunkRate;
+    _Atomic(int) chunkReady;
     NSUInteger callGen;          // 通话/采集代际：stop/新采集递增，用于丢弃上一通的结果
     NSUInteger partialGen;       // 临时翻译代际：只接受最新 partial 的译文
 }
@@ -321,8 +324,19 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
                         ch->lastRMS = rms;
                         if (rms > 0.008f)
                             ch->lastLoudAt = CFAbsoluteTimeGetCurrent();
-                        if (rms > 0.0015f)
-                            [r appendAudioPCMBuffer:pcm];
+                        if (ch->chunkBuf && ch->chunkIsFloat) {
+                            @synchronized(ch) {
+                                [ch->chunkBuf appendBytes:dst length:nf * sizeof(float)];
+                                ch->chunkEnergy += (double)rms * (double)nf;
+                                ch->chunkSamples += nf;
+                                if (ch->chunkRate > 0 &&
+                                    (double)ch->chunkSamples / ch->chunkRate >= 4.0) {
+                                    atomic_store(&ch->chunkReady, 1);
+                                }
+                            }
+                        }
+                        (void)r;
+                        (void)pcm;
                         __atomic_add_fetch(&ch->frames, nf, __ATOMIC_RELAXED);
                     }
                 }
@@ -368,10 +382,10 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
         lastChunkText = nil;
         urlTaskRunning = NO;
         urlUseOnDevice = YES;
-        // LCT 的识别就是流式 SFSpeechAudioBufferRecognitionRequest：
-        // 先起任务，再把文件音频持续 append 进去。
-        [self recogStart];
-        CCLogf(@"%@: file capture started (wav stream, locale=%@)", self.tag, self.locale);
+        chunkRate = 16000.0;
+        chunkIsFloat = NO;
+        atomic_store(&chunkReady, 0);
+        CCLogf(@"%@: file capture started (wav chunked, locale=%@)", self.tag, self.locale);
         return YES;
     }
 
@@ -458,7 +472,15 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
     lastProvisional = nil;
     lastPartialAt = 0;
     lastTextAt = 0;
-    [self recogStart];
+    chunkRate = 44100.0;
+    chunkIsFloat = YES;
+    chunkBuf = [NSMutableData data];
+    chunkEnergy = 0;
+    chunkSamples = 0;
+    lastChunkText = nil;
+    urlTaskRunning = NO;
+    urlUseOnDevice = YES;
+    atomic_store(&chunkReady, 0);
 
     st = AudioQueueStart(queue, NULL);
     if (st != noErr) {
@@ -495,6 +517,7 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
     chunkSamples = 0;
     lastChunkText = nil;
     urlTaskRunning = NO;
+    atomic_store(&chunkReady, 0);
     callGen++;
     partialGen++;
     @try {
@@ -677,31 +700,79 @@ static void CCWriteChunkWav(NSString *path, NSData *pcm) {
         chunkSamples += outFrames;
         __atomic_add_fetch(&frames, outFrames, __ATOMIC_RELAXED);
         __atomic_add_fetch(&audioBytes, (uint64_t)outFrames * 2, __ATOMIC_RELAXED);
-
-        // 静音段不喂识别器：1110 No speech detected 多半是持续静音触发的
-        if (rms > 0.0015f && req) {
-            [req appendAudioPCMBuffer:pcm];
-        } else if (!req && capturing) {
-            [self recogStart];
-        }
+        if (chunkRate > 0 && (double)chunkSamples / chunkRate >= 4.0)
+            atomic_store(&chunkReady, 1);
+        if (atomic_load(&chunkReady)) [self flushChunk];
     } @catch (NSException *e) { }
+}
+
+- (NSData *)chunkTo16kS16 {
+    if (!chunkIsFloat && chunkRate == 16000.0) return [chunkBuf copy];
+    NSMutableData *out = [NSMutableData data];
+    int16_t buf[2048];
+    UInt32 cnt = 0;
+    if (chunkIsFloat) {
+        const float *src = (const float *)chunkBuf.bytes;
+        NSUInteger n = chunkBuf.length / 4;
+        if (!n) return out;
+        double step = chunkRate / 16000.0;
+        double pos = 0;
+        while (pos < (double)n) {
+            NSUInteger i = (NSUInteger)pos;
+            float a = src[i];
+            float c = src[i + 1 < n ? i + 1 : i];
+            float v = a + (c - a) * (float)(pos - (double)i);
+            int iv = (int)lrintf(v * 32767.0f);
+            if (iv > 32767) iv = 32767;
+            if (iv < -32768) iv = -32768;
+            buf[cnt++] = (int16_t)iv;
+            if (cnt == 2048) { [out appendBytes:buf length:cnt * 2]; cnt = 0; }
+            pos += step;
+        }
+    } else {
+        const int16_t *src = (const int16_t *)chunkBuf.bytes;
+        NSUInteger n = chunkBuf.length / 2;
+        for (NSUInteger i = 0; i + 2 < n; i += 3) {
+            int v = ((int)src[i] + src[i + 1] + src[i + 2]) / 3;
+            buf[cnt++] = (int16_t)v;
+            if (cnt == 2048) { [out appendBytes:buf length:cnt * 2]; cnt = 0; }
+        }
+    }
+    if (cnt) [out appendBytes:buf length:cnt * 2];
+    return out;
 }
 
 - (void)flushChunk {
     @try {
-        if (!self.fileMode || !capturing || urlTaskRunning) return;
-        if (!chunkBuf || chunkBuf.length < 16000 * 2) return;
-        double avg = chunkSamples ? chunkEnergy / (double)chunkSamples : 0;
-        NSData *pcm = [chunkBuf copy];
-
-        // 保留最后 1 秒做重叠，去掉前面已识别部分
-        NSUInteger keepBytes = MIN(pcm.length, 16000 * 2);
-        chunkBuf = [[pcm subdataWithRange:NSMakeRange(pcm.length - keepBytes, keepBytes)] mutableCopy];
-        chunkEnergy = avg * (double)chunkSamples * ((double)keepBytes / (double)pcm.length);
-        chunkSamples = keepBytes / 2;
-
-        if (avg < 0.003) {
-            CCLogf(@"%@: chunk skip (rms %.4f)", self.tag, avg);
+        if (!capturing || urlTaskRunning) return;
+        NSData *pcm = nil;
+        double avg = 0;
+        @synchronized(self) {
+            if (!chunkBuf || chunkSamples == 0) return;
+            double dur = chunkRate > 0 ? (double)chunkSamples / chunkRate : 0;
+            if (dur < 3.0) return;
+            avg = chunkEnergy / (double)chunkSamples;
+            pcm = [self chunkTo16kS16];
+            NSUInteger keepSamples = (NSUInteger)chunkRate;   // 保留 1 秒重叠
+            if (chunkSamples > keepSamples) {
+                NSUInteger bps = chunkIsFloat ? 4 : 2;
+                NSUInteger keepBytes = keepSamples * bps;
+                if (keepBytes < chunkBuf.length) {
+                    NSData *tail = [chunkBuf subdataWithRange:
+                                    NSMakeRange(chunkBuf.length - keepBytes, keepBytes)];
+                    chunkBuf = [tail mutableCopy];
+                }
+                chunkEnergy = avg * (double)keepSamples;
+                chunkSamples = keepSamples;
+            } else {
+                chunkBuf = [NSMutableData data];
+                chunkEnergy = 0;
+                chunkSamples = 0;
+            }
+            atomic_store(&chunkReady, 0);
+        }
+        if (avg < 0.003 || pcm.length < 3200) {
+            CCLogf(@"%@: chunk skip (rms %.4f len %lu)", self.tag, avg, (unsigned long)pcm.length);
             return;
         }
         if (!recog) {
@@ -712,11 +783,9 @@ static void CCWriteChunkWav(NSString *path, NSData *pcm) {
             CCLogf(@"%@: url recog not available", self.tag);
             return;
         }
-
         NSUInteger seq = ++chunkSeq;
         NSString *path = [NSString stringWithFormat:@"/tmp/cc_chunk_%lu.wav", (unsigned long)seq];
         CCWriteChunkWav(path, pcm);
-
         SFSpeechURLRecognitionRequest *ur =
             [[SFSpeechURLRecognitionRequest alloc] initWithURL:[NSURL fileURLWithPath:path]];
         ur.shouldReportPartialResults = NO;
@@ -727,7 +796,7 @@ static void CCWriteChunkWav(NSString *path, NSData *pcm) {
         }
         urlTaskRunning = YES;
         CCLogf(@"%@: url recog chunk %lu (%.1fs rms%.3f onDevice=%d)",
-               self.tag, (unsigned long)seq, pcm.length / 32000.0, avg, urlUseOnDevice);
+               self.tag, (unsigned long)seq, (double)pcm.length / 32000.0, avg, urlUseOnDevice);
 
         __weak CCChannel *weakSelf = self;
         [recog recognitionTaskWithRequest:ur
@@ -741,7 +810,7 @@ static void CCWriteChunkWav(NSString *path, NSData *pcm) {
                 if (error) {
                     CCLogf(@"%@: url recog err %ld %@", ch.tag, (long)error.code,
                            error.localizedDescription);
-                    if (ch->urlUseOnDevice) ch->urlUseOnDevice = NO;   // 下块走云端
+                    if (ch->urlUseOnDevice) ch->urlUseOnDevice = NO;   // 下一块走云端
                 }
                 ch->urlTaskRunning = NO;
                 [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
@@ -1032,6 +1101,11 @@ static void CheckArm(void) {
         }
         // 文件模式：每次 tick 把 WhatsApp 探针新写出的 PCM 喂给识别器
         if (g_remote.fileMode) [g_remote pumpFileAudio];
+        // 分块识别：两个通道攒够 4 秒就送 SFSpeechURLRecognitionRequest
+        for (CCChannel *ch in @[g_remote, g_local]) {
+            if (ch->capturing && atomic_load(&ch->chunkReady))
+                [ch flushChunk];
+        }
 
         // 我方通道（双向模式）
         BOOL localOn = CCPrefBool(CC_K_LOCAL_ENABLED, NO);
@@ -1086,10 +1160,7 @@ static void CheckArm(void) {
             if (ch->audioBytes != ch->lastAudioSeen) {
                 ch->lastAudioSeen = ch->audioBytes;
                 ch->lastFrameChangeAt = now;
-                if (!ch->req && now - ch->lastRecogTry > 5.0) {
-                    CCLogf(@"%@: audio flowing but no recognition request, restarting recog", ch.tag);
-                    [ch recogStart];
-                }
+                (void)0;
             } else if (now - ch->lastFrameChangeAt > 8.0) {
                 if (ch->fileMode) {
                     // 文件模式没有 Tap 可重挂；文件 8 秒没长，多半是通话结束了
@@ -1173,7 +1244,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.14.0-alpha17)");
+        CCLogLine(@"audioservice started (v0.14.0-alpha18)");
         // LCT 的 livecallhelper 在识别前会配置 AVAudioSession（SoloAmbient/Default）；
         // 我们的守护进程以前没做这一步，补上。
         @try {

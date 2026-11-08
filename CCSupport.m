@@ -244,6 +244,7 @@ void CCSetPrefBool(NSString *key, BOOL value) {
                                  (__bridge CFPropertyListRef)@(value),
                                  (__bridge CFStringRef)CC_DOMAIN);
         CFPreferencesAppSynchronize((__bridge CFStringRef)CC_DOMAIN);
+        CCPrefsReload();          // 立即刷新 SpringBoard 内存缓存，否则按钮状态看不到变化
         CCPostNotif(@"prefschanged");
         CCLogf(@"pref set %@=%d file=%d", key, value, ok);
     } @catch (NSException *e) { }

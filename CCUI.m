@@ -662,6 +662,10 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
     dispatch_async(dispatch_get_main_queue(), ^{
         [g_remoteHide invalidate]; g_remoteHide = nil;
         [g_localHide invalidate];  g_localHide = nil;
+        // 30 秒隐藏后把文本也清掉，避免再点地球/面板时旧字幕“复活”。
+        for (int i = 0; i < 4; i++) { g_texts[i] = @""; g_textAt[i] = 0; }
+        g_engines[0] = nil;
+        g_engines[1] = nil;
         if (g_remoteBox && !g_remoteBox.hidden) {
             [UIView animateWithDuration:0.25 animations:^{ g_remoteBox.alpha = 0; }];
         }
@@ -1070,7 +1074,7 @@ void CCUIBoot(void) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.13.16)");
+        CCLogLine(@"CallCaption UI booted (single window v0.13.17)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

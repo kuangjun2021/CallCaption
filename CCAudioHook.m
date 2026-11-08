@@ -44,8 +44,9 @@ static void CCHookLog(NSString *fmt, ...) {
         os_log_with_type(g_oslog, OS_LOG_TYPE_DEFAULT, "%{public}s", msg.UTF8String);
 
         // 主通道：Darwin 通知 → SpringBoard 落盘（沙盒进程无文件权限）
-        NSString *name = [NSString stringWithFormat:@"net.user.callcaption.log hook: %@", msg];
-        if (name.length > 400) name = [name substringToIndex:400];
+        // 通知名别太长，压缩到 90 字符以内，确保各版本 notifyd 都收得下。
+        NSString *shortMsg = msg.length > 90 ? [msg substringToIndex:90] : msg;
+        NSString *name = [NSString stringWithFormat:@"net.user.callcaption.log hook: %@", shortMsg];
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                              (__bridge CFStringRef)name,
                                              NULL, NULL, true);
@@ -147,8 +148,8 @@ static void CCInspect(AudioUnit unit, UInt32 bus, UInt32 frames,
     }
     double rms = count ? (sum / (double)count) : 0;
 
-    CCHookLog(@"proc=%@ src=%s unit=%p bus=%u frames=%u rate=%.0f ch=%u float=%d rms=%.5f sub=%@ man=%@",
-              CCProcName(), source, unit, bus, frames,
+    CCHookLog(@"%@ u%lx b%u f%u sr%.0f c%u fl%d rms%.5f %@/%@",
+              source, (unsigned long)((uintptr_t)unit & 0xffff), bus, frames,
               asbd.mSampleRate, asbd.mChannelsPerFrame, isFloat, rms,
               CCFourCC(desc.componentSubType), CCFourCC(desc.componentManufacturer));
 }

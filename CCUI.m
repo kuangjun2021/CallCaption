@@ -49,8 +49,15 @@ static CGFloat TextHeight(NSString *s, UIFont *f, CGFloat w) {
     return ceil(r.size.height);
 }
 
+@interface UIWindow (LCTPrivate)
+- (instancetype)initWithScreen:(UIScreen *)screen;
+@end
+
 static void AttachScene(UIWindow *win) {
     if (@available(iOS 13.0, *)) {
+        if (win.windowScene) return;
+        UIWindow *kw = [UIApplication sharedApplication].keyWindow;
+        if (kw && kw.windowScene) { win.windowScene = kw.windowScene; return; }
         for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
             if ([sc isKindOfClass:[UIWindowScene class]]) {
                 win.windowScene = (UIWindowScene *)sc;
@@ -58,6 +65,19 @@ static void AttachScene(UIWindow *win) {
             }
         }
     }
+}
+
+// 按 LiveCallTranslator 的方式创建全屏窗口：优先私有 initWithScreen:，并挂到 keyWindow 的 scene
+static UIWindow *MakeOverlayWindow(void) {
+    UIWindow *win = nil;
+    @try {
+        win = [[UIWindow alloc] initWithScreen:[UIScreen mainScreen]];
+    } @catch (NSException *e) { win = nil; }
+    if (!win) win = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    win.frame = [UIScreen mainScreen].bounds;
+    AttachScene(win);
+    win.backgroundColor = [UIColor clearColor];
+    return win;
 }
 
 
@@ -139,9 +159,8 @@ static void EnsurePanelUI(void) {
     @try {
         CGFloat w = CardWidth();
         CGFloat h = 150;
-        UIWindow *win = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+        UIWindow *win = MakeOverlayWindow();
         win.windowLevel = UIWindowLevelAlert + 1000;
-        win.backgroundColor = [UIColor clearColor];
 
         CCPanelBGView *bg = [[CCPanelBGView alloc] initWithFrame:win.bounds];
         bg.backgroundColor = [UIColor clearColor];
@@ -155,6 +174,11 @@ static void EnsurePanelUI(void) {
         blur.layer.masksToBounds = YES;
         [bg addSubview:blur];
         bg.card = blur;
+
+        UITapGestureRecognizer *bgTap = [[UITapGestureRecognizer alloc]
+            initWithTarget:[CCUIHelper class] action:@selector(outsideTapped:)];
+        bgTap.cancelsTouchesInView = NO;
+        [bg addGestureRecognizer:bgTap];
 
         UIView *ov = [[UIView alloc] initWithFrame:blur.bounds];
         ov.backgroundColor = [UIColor colorWithWhite:0 alpha:0.20];
@@ -231,10 +255,9 @@ static void EnsureMiniUI(void) {
     if (g_miniWin) return;
     @try {
         CGFloat s = 64.0;
-        UIWindow *win = [[UIWindow alloc] initWithFrame:
-            CGRectMake(ScreenW() - s - 16, ScreenH() * 0.52, s, s)];
+        UIWindow *win = MakeOverlayWindow();
+        win.frame = CGRectMake(ScreenW() - s - 16, ScreenH() * 0.52, s, s);
         win.windowLevel = UIWindowLevelAlert + 1001;
-        win.backgroundColor = [UIColor clearColor];
 
         UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
         b.frame = CGRectMake(0, 0, s, s);
@@ -267,10 +290,9 @@ static void EnsureMiniUI(void) {
 
 static UIWindow *MakeLCTBox(NSString *recogHeader) {
     CGFloat w = CardWidth();
-    UIWindow *win = [[UIWindow alloc] initWithFrame:
-        CGRectMake((ScreenW() - w) / 2.0, ScreenH() - 520, w, 10)];
+    UIWindow *win = MakeOverlayWindow();
+    win.frame = CGRectMake((ScreenW() - w) / 2.0, ScreenH() - 520, w, 10);
     win.windowLevel = UIWindowLevelStatusBar + 101;
-    win.backgroundColor = [UIColor clearColor];
 
     UIVisualEffectView *blur = [[UIVisualEffectView alloc]
         initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialDark]];
@@ -567,6 +589,11 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
 }
 
 + (void)outsideTapped:(id)sender {
+    if ([sender isKindOfClass:[UITapGestureRecognizer class]]) {
+        UITapGestureRecognizer *g = (UITapGestureRecognizer *)sender;
+        CGPoint p = [g locationInView:g.view];
+        if (g_panelCard && CGRectContainsPoint(g_panelCard.frame, p)) return;
+    }
     CCLogf(@"panel: outside tap (expanded=%d)", g_panelExpanded);
     [self collapsePanel];
 }

@@ -357,7 +357,7 @@
 		<string>RemoteOriginalVolume</string>
 		<key>label</key>
 		<string>对方原音</string>
-		<key>titles</key>
+		<key>validTitles</key>
 		<array>
 			<string>0%</string>
 			<string>10%</string>
@@ -366,7 +366,7 @@
 			<string>70%</string>
 			<string>100%</string>
 		</array>
-		<key>values</key>
+		<key>validValues</key>
 		<array>
 			<integer>0</integer>
 			<integer>10</integer>
@@ -385,7 +385,7 @@
 		<string>LocalOriginalVolume</string>
 		<key>label</key>
 		<string>我方原音</string>
-		<key>titles</key>
+		<key>validTitles</key>
 		<array>
 			<string>0%</string>
 			<string>10%</string>
@@ -394,7 +394,7 @@
 			<string>70%</string>
 			<string>100%</string>
 		</array>
-		<key>values</key>
+		<key>validValues</key>
 		<array>
 			<integer>0</integer>
 			<integer>10</integer>

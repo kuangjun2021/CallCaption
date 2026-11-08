@@ -66,7 +66,7 @@ __attribute__((visibility("default")))
 
 @implementation CallCaptionRootListController
 
-+ (void)load { SLog(@"bundle loaded v0.14.0-alpha29"); }
++ (void)load { SLog(@"bundle loaded v0.14.0-alpha30"); }
 
 - (NSArray *)specifiers {
     SLog(@"specifiers enter bundle=%@", self.bundle);

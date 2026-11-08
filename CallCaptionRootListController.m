@@ -275,4 +275,223 @@ static void CCMigrateCFPrefsToFile(void) {
     [self presentSheet:sheet];
 }
 
+// ---------- 接口测试 ----------
+static NSString *CCApiEsc(NSString *s) {
+    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
+        @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~"];
+    return [s stringByAddingPercentEncodingWithAllowedCharacters:allowed] ?: @"";
+}
+
+static NSString *CCApiSnippet(NSData *data) {
+    if (!data) return @"";
+    NSString *s = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (!s) return @"";
+    s = [s stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
+    s = [s stringByReplacingOccurrencesOfString:@"\r" withString:@" "];
+    if (s.length > 120) s = [s substringToIndex:120];
+    return s;
+}
+
+- (void)deeplTestKey:(NSString *)key endpoint:(NSString *)endpoint
+          completion:(void (^)(NSInteger status, NSString *summary))done {
+    NSMutableString *body = [NSMutableString stringWithFormat:
+        @"auth_key=%@&text=Hello&source_lang=EN&target_lang=ZH", CCApiEsc(key)];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:endpoint]];
+    req.HTTPMethod = @"POST";
+    [req setValue:@"application/x-www-form-urlencoded" forHTTPHeaderField:@"Content-Type"];
+    req.HTTPBody = [body dataUsingEncoding:NSUTF8StringEncoding];
+    req.timeoutInterval = 4.0;
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req
+        completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+            NSInteger status = [resp isKindOfClass:[NSHTTPURLResponse class]]
+                               ? [(NSHTTPURLResponse *)resp statusCode] : 0;
+            if (err) {
+                done(status, [NSString stringWithFormat:@"HTTP %ld · 网络错误：%@",
+                              (long)status, err.localizedDescription]);
+                return;
+            }
+            id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            NSString *out = nil;
+            if ([json isKindOfClass:[NSDictionary class]]) {
+                NSArray *arr = json[@"translations"];
+                if ([arr isKindOfClass:[NSArray class]] && arr.count > 0) out = arr[0][@"text"];
+            }
+            if ([out isKindOfClass:[NSString class]] && out.length)
+                done(status, [NSString stringWithFormat:@"HTTP %ld · 成功：%@", (long)status, out]);
+            else
+                done(status, [NSString stringWithFormat:@"HTTP %ld · %@", (long)status, CCApiSnippet(data)]);
+        }] resume];
+}
+
+- (void)testTranslationAPI {
+    NSString *engine = CCObjString(@"Engine", @"auto");
+    NSString *dk = CCObjString(@"DeepLKey", @"");
+    NSString *gk = CCObjString(@"GoogleKey", @"");
+    NSString *aiURL = CCObjString(@"AIURL", @"");
+    NSString *aiKey = CCObjString(@"AIKey", @"");
+    NSString *aiModel = CCObjString(@"AIModel", @"deepseek-chat");
+
+    SLog(@"api test start engine=%@ deeplKeyLen=%lu googleKeyLen=%lu aiURL=%@ aiKeyLen=%lu",
+         engine, (unsigned long)dk.length, (unsigned long)gk.length, aiURL,
+         (unsigned long)aiKey.length);
+
+    UIAlertController *loading = [UIAlertController alertControllerWithTitle:@"接口测试"
+        message:@"正在请求 DeepL / Google / AI / Bing…" preferredStyle:UIAlertControllerStyleAlert];
+    [self presentViewController:loading animated:YES completion:nil];
+
+    NSMutableDictionary *res = [NSMutableDictionary dictionary];
+    dispatch_group_t group = dispatch_group_create();
+
+    if (!dk.length) {
+        res[@"DeepL"] = @"未填 Key";
+    } else {
+        dispatch_group_enter(group);
+        [self deeplTestKey:dk endpoint:@"https://api-free.deepl.com/v2/translate"
+              completion:^(NSInteger status, NSString *summary) {
+            if (status == 401 || status == 403) {
+                [self deeplTestKey:dk endpoint:@"https://api.deepl.com/v2/translate"
+                      completion:^(NSInteger s2, NSString *sum2) {
+                    @synchronized(res) {
+                        res[@"DeepL"] = [NSString stringWithFormat:@"free %@ · pro %@", summary, sum2];
+                    }
+                    dispatch_group_leave(group);
+                }];
+            } else {
+                @synchronized(res) { res[@"DeepL"] = summary; }
+                dispatch_group_leave(group);
+            }
+        }];
+    }
+
+    dispatch_group_enter(group);
+    {
+        NSString *urlStr;
+        if (gk.length) {
+            urlStr = [NSString stringWithFormat:
+                @"https://translation.googleapis.com/language/translate/v2?key=%@&q=Hello&source=en&target=zh",
+                CCApiEsc(gk)];
+        } else {
+            urlStr = @"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh&dt=t&q=Hello";
+        }
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
+        req.timeoutInterval = 4.0;
+        [[[NSURLSession sharedSession] dataTaskWithRequest:req
+            completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+                NSInteger status = [resp isKindOfClass:[NSHTTPURLResponse class]]
+                                   ? [(NSHTTPURLResponse *)resp statusCode] : 0;
+                NSString *line;
+                if (err) {
+                    line = [NSString stringWithFormat:@"%@ HTTP %ld · 网络错误：%@",
+                            gk.length ? @"Cloud" : @"免费", (long)status, err.localizedDescription];
+                } else {
+                    line = [NSString stringWithFormat:@"%@ HTTP %ld · %@",
+                            gk.length ? @"Cloud" : @"免费", (long)status, CCApiSnippet(data)];
+                }
+                @synchronized(res) { res[@"Google"] = line; }
+                dispatch_group_leave(group);
+            }] resume];
+    }
+
+    if (!aiURL.length || !aiKey.length) {
+        res[@"AI"] = @"未配置 URL/Key";
+    } else {
+        dispatch_group_enter(group);
+        NSDictionary *body = @{
+            @"model": aiModel.length ? aiModel : @"deepseek-chat",
+            @"temperature": @0,
+            @"max_tokens": @40,
+            @"messages": @[
+                @{@"role": @"system", @"content": @"Translate to Chinese. Output only the translation."},
+                @{@"role": @"user", @"content": @"Hello"},
+            ],
+        };
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:aiURL]];
+        req.HTTPMethod = @"POST";
+        [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+        [req setValue:[NSString stringWithFormat:@"Bearer %@", aiKey] forHTTPHeaderField:@"Authorization"];
+        req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
+        req.timeoutInterval = 6.0;
+        [[[NSURLSession sharedSession] dataTaskWithRequest:req
+            completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+                NSInteger status = [resp isKindOfClass:[NSHTTPURLResponse class]]
+                                   ? [(NSHTTPURLResponse *)resp statusCode] : 0;
+                NSString *line;
+                if (err) {
+                    line = [NSString stringWithFormat:@"HTTP %ld · 网络错误：%@",
+                            (long)status, err.localizedDescription];
+                } else {
+                    line = [NSString stringWithFormat:@"HTTP %ld · %@",
+                            (long)status, CCApiSnippet(data)];
+                }
+                @synchronized(res) { res[@"AI"] = line; }
+                dispatch_group_leave(group);
+            }] resume];
+    }
+
+    dispatch_group_enter(group);
+    {
+        NSMutableURLRequest *auth = [NSMutableURLRequest requestWithURL:
+            [NSURL URLWithString:@"https://edge.microsoft.com/translate/auth"]];
+        auth.timeoutInterval = 4.0;
+        [[[NSURLSession sharedSession] dataTaskWithRequest:auth
+            completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+                NSInteger status = [resp isKindOfClass:[NSHTTPURLResponse class]]
+                                   ? [(NSHTTPURLResponse *)resp statusCode] : 0;
+                NSString *token = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
+                token = [token stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                if (err || !token.length) {
+                    @synchronized(res) {
+                        res[@"Bing"] = [NSString stringWithFormat:@"auth HTTP %ld · %@",
+                                        (long)status, err.localizedDescription ?: CCApiSnippet(data)];
+                    }
+                    dispatch_group_leave(group);
+                    return;
+                }
+                NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:
+                    [NSURL URLWithString:@"https://api-edge.cognitive.microsofttranslator.com/translate?api-version=3.0&to=zh-Hans&from=en"]];
+                req.HTTPMethod = @"POST";
+                [req setValue:[NSString stringWithFormat:@"Bearer %@", token]
+           forHTTPHeaderField:@"Authorization"];
+                [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+                req.HTTPBody = [NSJSONSerialization dataWithJSONObject:@[@{@"Text": @"Hello"}]
+                                                               options:0 error:nil];
+                req.timeoutInterval = 5.0;
+                [[[NSURLSession sharedSession] dataTaskWithRequest:req
+                    completionHandler:^(NSData *data2, NSURLResponse *resp2, NSError *err2) {
+                        NSInteger st2 = [resp2 isKindOfClass:[NSHTTPURLResponse class]]
+                                         ? [(NSHTTPURLResponse *)resp2 statusCode] : 0;
+                        NSString *line = err2
+                            ? [NSString stringWithFormat:@"HTTP %ld · 网络错误：%@",
+                               (long)st2, err2.localizedDescription]
+                            : [NSString stringWithFormat:@"HTTP %ld · %@",
+                               (long)st2, CCApiSnippet(data2)];
+                        @synchronized(res) { res[@"Bing"] = line; }
+                        dispatch_group_leave(group);
+                    }] resume];
+            }] resume];
+    }
+
+    dispatch_group_notify(group, dispatch_get_main_queue(), ^{
+        NSArray *order = @[@"DeepL", @"Google", @"AI", @"Bing"];
+        NSMutableArray *lines = [NSMutableArray array];
+        for (NSString *k in order) {
+            NSString *v = res[k] ?: @"未测试";
+            [lines addObject:[NSString stringWithFormat:@"%@：%@", k, v]];
+            SLog(@"api test %@: %@", k, v);
+        }
+        NSString *summary = [lines componentsJoinedByString:@"\n"];
+        [loading dismissViewControllerAnimated:YES completion:^{
+            UIAlertController *result = [UIAlertController alertControllerWithTitle:@"接口测试结果"
+                message:summary preferredStyle:UIAlertControllerStyleAlert];
+            [result addAction:[UIAlertAction actionWithTitle:@"复制结果"
+                style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+                [UIPasteboard generalPasteboard].string = summary;
+            }]];
+            [result addAction:[UIAlertAction actionWithTitle:@"确定"
+                style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:result animated:YES completion:nil];
+        }];
+    });
+}
+
 @end

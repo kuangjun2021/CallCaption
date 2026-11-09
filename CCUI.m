@@ -1594,7 +1594,7 @@ static void CCRunSpeechSelfTest(BOOL onDevice) {
         }];
 }
 
-#pragma mark - 0.15.9 流式识别（LCT 同款 SFSpeechAudioBufferRecognitionRequest）
+#pragma mark - 0.15.10 流式识别（LCT 同款 SFSpeechAudioBufferRecognitionRequest）
 //
 // 旧方案：每 2~6 秒切一块 WAV，串行跑 SFSpeechURLRecognitionRequest。
 //   - 6 秒硬切会把单词劈成两半，重叠去重靠“单词完全相等”，识别不一致就丢词；
@@ -1638,7 +1638,7 @@ static void CCRunSpeechSelfTest(BOOL onDevice) {
 static CCStream *g_rs;
 static CCStream *g_ls;
 static NSTimer *g_streamTimer;
-// 0.15.9 诊断：先只跑“对方”一路流式，验证单任务是否稳定。
+// 0.15.10 诊断：先只跑“对方”一路流式，验证单任务是否稳定。
 // 本地方向的麦克风音频仍由守护进程连续写入 local16k.wav（没丢），只是暂停识别。
 static BOOL g_localStreamPaused = YES;
 
@@ -1694,6 +1694,16 @@ static void CCStreamShowPartial(CCStream *st, NSString *t) {
     if (show.length > 200) show = [show substringFromIndex:show.length - 200];
     if (st.isLocal) CCUIDeliverLocalOriginal(show);
     else CCUIDeliverRemoteOriginal(show);
+}
+
+static BOOL CCStreamHasSentenceEnd(NSString *t) {
+    if (!t.length) return NO;
+    NSString *trim = [t stringByTrimmingCharactersInSet:
+                      [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!trim.length) return NO;
+    unichar c = [trim characterAtIndex:trim.length - 1];
+    return (c == '.' || c == '?' || c == '!' ||
+            c == 0x3002 || c == 0xFF1F || c == 0xFF01);   // 。？！(全角)
 }
 
 static void CCStreamDeliver(CCStream *st) {
@@ -1800,6 +1810,11 @@ static void CCStreamStart(CCStream *st) {
     if (@available(iOS 13.0, *)) {
         r.taskHint = SFSpeechRecognitionTaskHintDictation;
         r.requiresOnDeviceRecognition = st.onDevice;
+    }
+    if (@available(iOS 16.0, *)) {
+        // 让识别器自己输出标点：句末标点就是它给出的“一句话结束”，
+        // 不再由我们数静音秒数/词数。
+        r.addsPunctuation = YES;
     }
     st.req = r;
     st.starting = YES;
@@ -2012,22 +2027,11 @@ static void CCStreamTick(CCStream *st) {
 
     CCStreamFeed(st, s, cnt);
 
-    if (st.hadVoice) {
-        double silence = now - st.lastVoiceAt;
-        double stable = st.lastTextAt > 0 ? now - st.lastTextAt : 0;
-        NSUInteger words = st.text.length
-            ? [[st.text componentsSeparatedByString:@" "] count] : 0;
-        BOOL bySilence = (st.text.length > 0 && silence > 0.6);
-        // 至少 4 个词、稳定 1.2 秒才算“这一句说完了”，避免把 What / Hey 这种
-        // 中间 partial 当整句送出去（日志里出现过三句只有 What / Hey / What's）。
-        BOOL byStable = (st.text.length > 0 && stable > 1.2 && words >= 4 &&
-                         now - st.lastDeliverAt > 1.5);
-        // 连续说不停顿也不能无限等：每 12 秒把已识别的部分先翻出去
-        BOOL byTimeout = (st.text.length > 0 && st.lastTextAt > 0 &&
-                          st.lastDeliverAt > 0 &&
-                          now - st.lastDeliverAt > 12.0 && words >= 2);
-        if (bySilence || byStable || byTimeout) {
-            st.hadVoice = (silence <= 0.55);
+    // 断句完全交给识别结果自己：只认句末标点。
+    // 不再按静音时长、文本稳定时长或词数做任何判断（用户铁律：不干预）。
+    if (st.text.length) {
+        NSString *tail = CCStreamNewTail(st.text, st.delivered);
+        if (tail.length && CCStreamHasSentenceEnd(tail)) {
             CCStreamDeliver(st);
         }
     }
@@ -2117,7 +2121,7 @@ void CCUIBoot(void) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.15.9)");
+        CCLogLine(@"CallCaption UI booted (single window v0.15.10)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

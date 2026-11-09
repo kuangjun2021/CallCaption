@@ -1576,7 +1576,7 @@ static void CCRunSpeechSelfTest(BOOL onDevice) {
         }];
 }
 
-#pragma mark - 0.15.2 流式识别（LCT 同款 SFSpeechAudioBufferRecognitionRequest）
+#pragma mark - 0.15.3 流式识别（LCT 同款 SFSpeechAudioBufferRecognitionRequest）
 //
 // 旧方案：每 2~6 秒切一块 WAV，串行跑 SFSpeechURLRecognitionRequest。
 //   - 6 秒硬切会把单词劈成两半，重叠去重靠“单词完全相等”，识别不一致就丢词；
@@ -2071,7 +2071,7 @@ void CCUIBoot(void) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.15.2)");
+        CCLogLine(@"CallCaption UI booted (single window v0.15.3)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

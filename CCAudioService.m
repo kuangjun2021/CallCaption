@@ -1207,17 +1207,19 @@ static void CheckArm(void) {
             // 新通话：重置 Tap 探测，从 speaker(-2) 开始，最多试 -1 / -3。
             g_remote->tapProbeCount = 0;
             g_remote.tapPID = CC_TAP_PID_SPEAKER;
-            // 立刻重建 16k 桥文件，清掉上一通残留。否则 SpringBoard 的流式识别
-            // 会在通话第一拍读到旧音频（日志里出现过 backlog 152 秒 → 1110 连败）。
-            [g_remote stop];
+            // 清掉上一通的 16k 桥文件：关闭后删除，下次写入自动重建并截断。
+            // 0.15.3 在这里 stop 通道并直接 fopen，结果守护进程每 6~7 秒重启一次
+            // （日志里 44 次 audioservice started），整条链路等于没有运行。
+            NSFileManager *fm2 = [NSFileManager defaultManager];
             CCRemoteTeeClose();
-            CCRemoteTeeOpen();
+            [fm2 removeItemAtPath:[CC_DIR stringByAppendingPathComponent:@"remote16k.wav"]
+                            error:nil];
             if (CCPrefBool(CC_K_LOCAL_ENABLED, YES)) {
-                [g_local stop];
                 CCLocalTeeClose();
-                CCLocalTeeOpen();
+                [fm2 removeItemAtPath:[CC_DIR stringByAppendingPathComponent:@"local16k.wav"]
+                                error:nil];
             }
-            CCLogf(@"arm: bridge wav reset");
+            CCLogf(@"arm: bridge wav cleared");
         }
         lastArmed = armed;
         if (!armed) {
@@ -1436,16 +1438,25 @@ static void CCDaemonNotifCB(CFNotificationCenterRef center, void *observer,
 
 // ---------- 入口 ----------
 
+static void CCUncaughtException(NSException *e) {
+    CCLogf(@"UNCAUGHT %@: %@", e.name, e.reason);
+}
+static void CCAtExit(void) {
+    CCLogf(@"daemon exiting (atexit)");
+}
+
 int main(int argc, char *argv[]) {
     @autoreleasepool {
         CCProcessInit();
+        NSSetUncaughtExceptionHandler(&CCUncaughtException);
+        atexit(CCAtExit);
         NSFileManager *fm = [NSFileManager defaultManager];
         if (![fm fileExistsAtPath:CC_DIR]) {
             [fm createDirectoryAtPath:CC_DIR withIntermediateDirectories:YES
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.15.2)");
+        CCLogLine(@"audioservice started (v0.15.3)");
         // LCT 的 livecallhelper 在识别前会配置 AVAudioSession（SoloAmbient/Default）；
         // 我们的守护进程以前没做这一步，补上。
         @try {
@@ -1469,25 +1480,32 @@ int main(int argc, char *argv[]) {
 
         g_stateQ = dispatch_queue_create("net.user.callcaption.audio", DISPATCH_QUEUE_SERIAL);
 
-        // 自检素材：把最近一通 WhatsApp 通话里“有声音的那段”复制到
-        // /var/mobile/Library/CallCaption/selftest.wav，供 SpringBoard 里的
-        // SFSpeech 自检使用（不需要用户再打电话）。
+        // 旧版这里有一个 +6 秒的“自检素材复制”：会把最大的 cc_remote_*.wav
+        // 整个读进内存再截取 10 秒。长通话后文件可达几十 MB，守护进程会被
+        // jetsam 杀掉 → 日志里出现每 6~7 秒一次 audioservice started 的崩溃循环。
+        // 现在改成只读文件尾部一小段，且只在 selftest 开关存在时执行。
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6 * NSEC_PER_SEC)),
                        g_stateQ, ^{
             @try {
+                if (![[NSFileManager defaultManager] fileExistsAtPath:
+                      [CC_DIR stringByAppendingPathComponent:@"run_selftest"]]) return;
                 NSString *dst = [CC_DIR stringByAppendingPathComponent:@"selftest.wav"];
                 NSString *src = CCLargestRemoteWav();
-                if (!src) { CCLogf(@"selftest: no source wav"); return; }
-                NSData *d = [NSData dataWithContentsOfFile:src];
-                if (d.length < 44 + 48000 * 2) {
-                    CCLogf(@"selftest: source too small %lu", (unsigned long)d.length);
-                    return;
-                }
-                NSUInteger n = MIN(d.length - 44, (NSUInteger)48000 * 2 * 10);
-                NSData *pcm = [d subdataWithRange:NSMakeRange(44, n)];
-                if (CCWriteWav48kAtPath(dst, pcm))
-                    CCLogf(@"selftest: wrote %lu bytes from %@",
-                           (unsigned long)n, [src lastPathComponent]);
+                if (!src) return;
+                NSDictionary *at = [[NSFileManager defaultManager]
+                                    attributesOfItemAtPath:src error:nil];
+                unsigned long long size = [at[NSFileSize] unsignedLongLongValue];
+                if (size < 44 + 48000 * 2) return;
+                unsigned long long want = MIN((unsigned long long)(48000 * 2 * 10),
+                                              size - 44);
+                NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:src];
+                if (!fh) return;
+                [fh seekToFileOffset:size - want];
+                NSData *pcm = [fh readDataToEndOfFile];
+                [fh closeFile];
+                if (pcm.length && CCWriteWav48kAtPath(dst, pcm))
+                    CCLogf(@"selftest tail %lu bytes from %@",
+                           (unsigned long)pcm.length, [src lastPathComponent]);
             } @catch (NSException *e) {
                 CCLogf(@"selftest copy exc %@", e.reason);
             }
@@ -1513,10 +1531,26 @@ int main(int argc, char *argv[]) {
         dispatch_source_set_timer(timer, DISPATCH_TIME_NOW,
                                   (uint64_t)500 * NSEC_PER_MSEC,
                                   (uint64_t)200 * NSEC_PER_MSEC);
-        dispatch_source_set_event_handler(timer, ^{ CheckArm(); });
+        dispatch_source_set_event_handler(timer, ^{
+            static CFAbsoluteTime lastBeat;
+            CFAbsoluteTime tn = CFAbsoluteTimeGetCurrent();
+            if (tn - lastBeat >= 30.0) {
+                lastBeat = tn;
+                CCLogf(@"daemon alive armed=%d",
+                       (int)[[NSFileManager defaultManager] fileExistsAtPath:CC_ARM_PATH]);
+            }
+            CheckArm();
+        });
         dispatch_resume(timer);
 
-        [[NSRunLoop currentRunLoop] run];
+        // 即使 run loop 没有任何 source，也绝不退出：
+        // 退出会被 launchd 立即重启，形成 logs 里每 6~7 秒一次的重启循环。
+        while (1) {
+            @autoreleasepool {
+                [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                         beforeDate:[NSDate dateWithTimeIntervalSinceNow:60]];
+            }
+        }
     }
     return 0;
 }

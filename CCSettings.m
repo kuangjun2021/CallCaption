@@ -121,7 +121,8 @@ typedef NS_ENUM(NSInteger, CCPrefsItemKind) {
 // ---------- 音色选择 + 试听 ----------
 // 系统 AVSpeechSynthesisVoice 列表 + 点一下立即用该音色朗读示例，选中即保存。
 
-@interface CCVoicePickerController : UIViewController <UITableViewDataSource, UITableViewDelegate>
+@interface CCVoicePickerController : UIViewController
+    <UITableViewDataSource, UITableViewDelegate, AVSpeechSynthesizerDelegate>
 @property (nonatomic, copy) NSArray<NSString *> *values;
 @property (nonatomic, copy) NSArray<NSString *> *titles;
 @property (nonatomic, copy) NSString *current;
@@ -148,6 +149,7 @@ typedef NS_ENUM(NSInteger, CCPrefsItemKind) {
     self.table.delegate = self;
     [self.view addSubview:self.table];
     self.synth = [[AVSpeechSynthesizer alloc] init];
+    self.synth.delegate = self;
 }
 
 - (void)closeTapped {
@@ -197,6 +199,17 @@ typedef NS_ENUM(NSInteger, CCPrefsItemKind) {
 
 - (void)previewVoice:(NSString *)identifier {
     [self.synth stopSpeakingAtBoundary:AVSpeechBoundaryImmediate];
+    // 设置进程默认音频会话是 ambient：静音开关一开就完全没声。
+    // 试听前显式切到 Playback（可绕过静音键），播完再交还。
+    @try {
+        AVAudioSession *as = [AVAudioSession sharedInstance];
+        [as setCategory:AVAudioSessionCategoryPlayback
+                   mode:AVAudioSessionModeDefault
+                options:AVAudioSessionCategoryOptionMixWithOthers |
+                        AVAudioSessionCategoryOptionDuckOthers
+                  error:nil];
+        [as setActive:YES error:nil];
+    } @catch (NSException *e) { }
     NSString *text = self.sampleText.length ? self.sampleText
                                             : @"你好，这是语音试听。";
     AVSpeechUtterance *u = [[AVSpeechUtterance alloc] initWithString:text];
@@ -206,7 +219,17 @@ typedef NS_ENUM(NSInteger, CCPrefsItemKind) {
     else if (self.fallbackLang.length)
         u.voice = [AVSpeechSynthesisVoice voiceWithLanguage:self.fallbackLang];
     u.rate = 0.48;
+    u.volume = 1.0;
     [self.synth speakUtterance:u];
+}
+
+- (void)speechSynthesizer:(AVSpeechSynthesizer *)s
+    didFinishSpeechUtterance:(AVSpeechUtterance *)utterance {
+    @try {
+        [[AVAudioSession sharedInstance] setActive:NO
+            withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
+              error:nil];
+    } @catch (NSException *e) { }
 }
 
 @end

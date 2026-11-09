@@ -43,6 +43,9 @@ static void SBDarwinCB(CFNotificationCenterRef center, void *observer,
     @try {
         CCProcessInit();
         if (CCIsSpringBoard()) {
+            // 注入存活标记：这行进了 probe.log，就说明 SpringBoard 侧 dylib 正常加载
+            CCLogLine(@"SB dylib injected");
+            CCMark(@"sb dylib injected");
             // v0.8.2: SB 侧仅 UI + 通知观察——不安装任何音频钩子、不建 CTCallCenter
             CCUIBoot();
             CFNotificationCenterAddObserver(

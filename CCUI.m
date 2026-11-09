@@ -537,7 +537,7 @@ static UIView *MakeBox(NSString *recogHeader) {
 
 static void EnsureCaptionUI(void) {
     if (g_boxesBuilt) return;
-    g_remoteBox = MakeBox(@"Recognized Remote:");
+    g_remoteBox = MakeBox(@"对方（识别原文）");
     NSNumber *rx = CCPref(@"RemoteBoxX"), *ry = CCPref(@"RemoteBoxY");
     if ([rx isKindOfClass:[NSNumber class]] && [ry isKindOfClass:[NSNumber class]]) {
         g_remoteBox.center = CGPointMake([rx floatValue], [ry floatValue]);
@@ -545,7 +545,7 @@ static void EnsureCaptionUI(void) {
         g_remoteBox.center = CGPointMake(ScreenW() / 2.0, ScreenH() - 520);
     }
 
-    g_localBox = MakeBox(@"Recognized Local:");
+    g_localBox = MakeBox(@"我方（识别原文）");
     NSNumber *lx = CCPref(@"LocalBoxX"), *ly = CCPref(@"LocalBoxY");
     if ([lx isKindOfClass:[NSNumber class]] && [ly isKindOfClass:[NSNumber class]]) {
         g_localBox.center = CGPointMake([lx floatValue], [ly floatValue]);
@@ -1594,7 +1594,7 @@ static void CCRunSpeechSelfTest(BOOL onDevice) {
         }];
 }
 
-#pragma mark - 0.15.5 流式识别（LCT 同款 SFSpeechAudioBufferRecognitionRequest）
+#pragma mark - 0.15.6 流式识别（LCT 同款 SFSpeechAudioBufferRecognitionRequest）
 //
 // 旧方案：每 2~6 秒切一块 WAV，串行跑 SFSpeechURLRecognitionRequest。
 //   - 6 秒硬切会把单词劈成两半，重叠去重靠“单词完全相等”，识别不一致就丢词；
@@ -1624,6 +1624,8 @@ static void CCRunSpeechSelfTest(BOOL onDevice) {
 @property (nonatomic) BOOL rotating;
 @property (nonatomic) BOOL starting;
 @property (nonatomic) BOOL catchingUp;
+@property (nonatomic) CFAbsoluteTime nextRetryAt;
+@property (nonatomic) BOOL restartScheduled;
 @property (nonatomic) BOOL onDevice;
 @property (nonatomic) BOOL legacy;
 @property (nonatomic) int failures;
@@ -1636,6 +1638,9 @@ static void CCRunSpeechSelfTest(BOOL onDevice) {
 static CCStream *g_rs;
 static CCStream *g_ls;
 static NSTimer *g_streamTimer;
+// 0.15.6 诊断：先只跑“对方”一路流式，验证单任务是否稳定。
+// 本地方向的麦克风音频仍由守护进程连续写入 local16k.wav（没丢），只是暂停识别。
+static BOOL g_localStreamPaused = YES;
 
 static CCStream *CCStreamFor(BOOL local) {
     if (!g_rs) { g_rs = [CCStream new]; g_rs.gain = 1.0; }
@@ -1792,6 +1797,8 @@ static void CCStreamStart(CCStream *st) {
     }
     st.req = r;
     st.starting = YES;
+    st.restartScheduled = NO;
+    st.nextRetryAt = 0;
     st.text = @"";
     st.delivered = @"";            // 新会话只包含新音频，旧文本不能用来做差集
     st.lastTextAt = 0;
@@ -1870,10 +1877,14 @@ static void CCStreamFinishSession(CCStream *st) {
         CCLogf(@"stream %@ retry with onDevice=%d (failures=%d)",
                CCStreamTag(st), st.onDevice, st.failures);
     }
-    double delay = st.failures ? MIN(4.0, 0.3 * (double)st.failures) : 0.05;
+    if (st.restartScheduled) return;   // final 和 error 可能同时来，只排一次重启
+    double delay = st.failures ? MIN(3.0, 0.5 * (double)st.failures) : 0.05;
+    st.nextRetryAt = CFAbsoluteTimeGetCurrent() + delay;
+    st.restartScheduled = YES;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        CCStreamStart(st);
+        st.restartScheduled = NO;
+        if (g_callActive) CCStreamStart(st);
     });
 }
 
@@ -1885,6 +1896,7 @@ static void CCStreamReset(CCStream *st) {
     st.pending = nil;
     st.hadVoice = NO; st.rotating = NO; st.starting = NO; st.catchingUp = NO;
     st.failures = 0; st.legacy = NO;
+    st.nextRetryAt = 0; st.restartScheduled = NO;
     st.lastVoiceAt = 0; st.lastTextAt = 0; st.lastDeliverAt = 0; st.lastUIAt = 0;
     st.sessionStart = 0; st.gain = 1.0;
 }
@@ -1895,10 +1907,12 @@ static void CCStreamStop(CCStream *st) {
     st.path = nil; st.offset = 0;
     st.text = @""; st.delivered = @"";
     st.hadVoice = NO; st.rotating = NO; st.starting = NO; st.catchingUp = NO;
+    st.nextRetryAt = 0; st.restartScheduled = NO;
 }
 
 static void CCStreamTick(CCStream *st) {
     if (!g_callActive) return;
+    if (st.isLocal && g_localStreamPaused) return;
     if (!g_sessionActive) {              // 面板关闭/未启用：不要空跑识别会话
         if (st.task || st.req) CCStreamStop(st);
         return;
@@ -1943,7 +1957,9 @@ static void CCStreamTick(CCStream *st) {
         CCStreamStart(st);
     }
     if (st.legacy) return;
-    if (!st.task && !st.starting) CCStreamStart(st);
+    if (!st.task && !st.starting && !st.restartScheduled &&
+        CFAbsoluteTimeGetCurrent() >= st.nextRetryAt)
+        CCStreamStart(st);
     if (size <= st.offset) return;
 
     // 积压（例如 SpringBoard 重启后文件里已有整通录音）时按约 5 倍实时补读，
@@ -1992,12 +2008,16 @@ static void CCStreamTick(CCStream *st) {
     if (st.hadVoice) {
         double silence = now - st.lastVoiceAt;
         double stable = st.lastTextAt > 0 ? now - st.lastTextAt : 0;
-        BOOL bySilence = (silence > 0.55);
-        BOOL byStable = (st.text.length > 0 && stable > 0.9 &&
-                         now - st.lastDeliverAt > 1.2);
+        NSUInteger words = st.text.length
+            ? [[st.text componentsSeparatedByString:@" "] count] : 0;
+        BOOL bySilence = (st.text.length > 0 && silence > 0.6);
+        // 至少 4 个词、稳定 1.2 秒才算“这一句说完了”，避免把 What / Hey 这种
+        // 中间 partial 当整句送出去（日志里出现过三句只有 What / Hey / What's）。
+        BOOL byStable = (st.text.length > 0 && stable > 1.2 && words >= 4 &&
+                         now - st.lastDeliverAt > 1.5);
         // 连续说不停顿也不能无限等：每 12 秒把已识别的部分先翻出去
         BOOL byTimeout = (st.text.length > 0 && st.lastTextAt > 0 &&
-                          now - st.lastDeliverAt > 12.0);
+                          now - st.lastDeliverAt > 12.0 && words >= 2);
         if (bySilence || byStable || byTimeout) {
             st.hadVoice = (silence <= 0.55);
             CCStreamDeliver(st);
@@ -2025,7 +2045,8 @@ static void CCStreamCallActive(BOOL active) {
         BOOL cloud = CCPrefBool(CC_K_CLOUD_ASR, YES);
         r.onDevice = !cloud;
         l.onDevice = !cloud;
-        CCLogf(@"stream: call active, cloud=%d", cloud);
+        CCLogf(@"stream: call active, cloud=%d localPaused=%d", cloud,
+               g_localStreamPaused);
     } else {
         CCStreamStop(r);
         CCStreamStop(l);
@@ -2088,7 +2109,7 @@ void CCUIBoot(void) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.15.5)");
+        CCLogLine(@"CallCaption UI booted (single window v0.15.6)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

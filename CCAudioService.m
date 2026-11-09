@@ -422,6 +422,9 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     NSString *t = CCASRTrim(res.bestTranscription.formattedString);
     if (t.length) {
+        if (!text.length)
+            CCLogf(@"local asr first partial after %.2fs onDevice=%d",
+                   now - sessionStart, !useCloud);
         text = t;
         lastTextAt = now;
         failures = 0;

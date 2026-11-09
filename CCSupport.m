@@ -27,11 +27,14 @@ static NSDictionary *CCReadGlobalPrefs(void) {
 
 // Settings.app 在沙盒里通过 CFPreferences 写设置时，可能落在自己的容器而不是
 // /var/mobile/Library/Preferences。守护进程是 root，可以扫描容器把值找回来。
+static NSDate *g_containerPrefsDate = nil;
+static NSDate *CCContainerPrefsDate(void) { return g_containerPrefsDate; }
+
 static NSDictionary *CCFindContainerPrefs(void) {
     static NSDictionary *cache = nil;
     static CFAbsoluteTime cacheAt = 0;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (cache && now - cacheAt < 10.0) return cache;
+    if (cache && now - cacheAt < 1.0) return cache;
     cacheAt = now;
     cache = nil;
 
@@ -49,6 +52,7 @@ static NSDictionary *CCFindContainerPrefs(void) {
         if ([d isKindOfClass:[NSDictionary class]]) {
             cache = d;
             bestDate = m;
+            g_containerPrefsDate = m;
             static NSString *loggedPath = nil;
             if (![loggedPath isEqualToString:p]) {
                 loggedPath = p;
@@ -61,35 +65,40 @@ static NSDictionary *CCFindContainerPrefs(void) {
 
 void CCPrefsReload(void) {
     @try {
-        // v0.13.11: 守护进程(root) 和 SpringBoard(mobile) 统一直接读 mobile plist；
-        // 守护进程额外从 Settings.app 容器里补缺失的 Key/Engine。
-        if (CCIsAudioService()) {
+        // 读取顺序：全局 plist 为准；如果 Settings.app 的容器 plist 比全局文件更新，
+        // 说明用户刚在设置 App 里改过 → 用容器值覆盖（否则会出现“开关开着、日志 cloud=0”）。
+        if (CCIsAudioService() || CCIsSpringBoard()) {
+            NSString *gpath = @"/var/mobile/Library/Preferences/net.user.callcaption.plist";
             NSDictionary *global = CCReadGlobalPrefs();
             NSMutableDictionary *m = [global mutableCopy] ?: [NSMutableDictionary dictionary];
             NSDictionary *container = CCFindContainerPrefs();
+            NSDate *cdate = CCContainerPrefsDate();
+            NSDate *gdate = [[NSFileManager defaultManager]
+                             attributesOfItemAtPath:gpath error:nil][NSFileModificationDate];
+            BOOL containerWins = container.count && cdate &&
+                                 (!gdate || [cdate compare:gdate] == NSOrderedDescending);
             BOOL changed = NO;
             if (container.count) {
                 for (id k in container) {
                     id v = container[k];
-                    if (!m[k] || ([m[k] isKindOfClass:[NSString class]] && ![m[k] length])) {
+                    if (containerWins) {
+                        if (![m[k] isEqual:v]) { m[k] = v; changed = YES; }
+                    } else if (!m[k] ||
+                               ([m[k] isKindOfClass:[NSString class]] && ![m[k] length])) {
                         m[k] = v;
                         changed = YES;
                     }
                 }
             }
-            if (changed) {
-                NSString *path = @"/var/mobile/Library/Preferences/net.user.callcaption.plist";
-                BOOL ok = [m writeToFile:path atomically:YES];
+            if (changed && CCIsAudioService()) {
+                BOOL ok = [m writeToFile:gpath atomically:YES];
                 [[NSFileManager defaultManager] setAttributes:@{NSFilePosixPermissions: @0666}
-                                                 ofItemAtPath:path error:nil];
-                CCLogf(@"prefs: merged Settings.app values into global ok=%d (deeplKeyLen=%lu engine=%@)",
-                       ok, (unsigned long)[(m[@"DeepLKey"] ?: @"") length], m[@"Engine"] ?: @"?");
+                                                 ofItemAtPath:gpath error:nil];
+                CCLogf(@"prefs: merged Settings.app values into global ok=%d (deeplKeyLen=%lu engine=%@ cloud=%d)",
+                       ok, (unsigned long)[(m[@"DeepLKey"] ?: @"") length], m[@"Engine"] ?: @"?",
+                       [m[@"CloudASR"] boolValue]);
             }
             g_prefs = m;
-            return;
-        }
-        if (CCIsSpringBoard()) {
-            g_prefs = CCReadGlobalPrefs();
             return;
         }
         CFPreferencesAppSynchronize((__bridge CFStringRef)CC_DOMAIN);

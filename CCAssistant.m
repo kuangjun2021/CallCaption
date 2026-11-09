@@ -618,7 +618,9 @@ static void CCSetDoubleSel(id o, NSString *selName, double v) {
 
 - (void)tick:(NSTimer *)t {
     BOOL armed = [[NSFileManager defaultManager] fileExistsAtPath:CC_ASSIST_ARM];
-    if (armed && !self.running) {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (armed && !self.running && now >= self.nextTryAt) {
+        self.nextTryAt = now + 5.0;
         CCLogA(@"arm detected, starting Siri local recognizer");
         [self startRecognizer];
     } else if (!armed && self.running) {

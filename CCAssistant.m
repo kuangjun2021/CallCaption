@@ -550,17 +550,13 @@ static void CCSetDoubleSel(id o, NSString *selName, double v) {
         for (NSUInteger i = 0; i < total; i += chunk) {
             NSUInteger cnt = MIN(chunk, total - i);
             NSData *pcm = [NSData dataWithBytes:s + i length:cnt * 2];
-            id pkt = [self makePacketWithData:pcm];
-            if (!pkt) {
-                if (!self.feedLogged) {
-                    self.feedLogged = YES;
-                    CCLogA(@"feed: no packet class");
-                }
-                return;
-            }
+            // iOS16 的 CoreEmbeddedSpeechRecognizerProvider 明确是 addAudioPacket:(NSData *)
             @try {
+                if (!self.feedLogged)
+                    CCLogA(@"feed: calling addAudioPacket (NSData %lu bytes)",
+                           (unsigned long)pcm.length);
                 [self.recognizer performSelector:NSSelectorFromString(@"addAudioPacket:")
-                                      withObject:pkt];
+                                      withObject:pcm];
                 if (!self.feedLogged) {
                     self.feedLogged = YES;
                     CCLogA(@"feed: first packet sent (%lu samples)", (unsigned long)cnt);

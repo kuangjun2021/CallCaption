@@ -26,7 +26,7 @@
 #define CC_ASSIST_FALLBACK @"/tmp/ccassistant.log"
 #define CC_ASSIST_ARM  @"/var/mobile/Library/CallCaption/armed"
 #define CC_ASSIST_WAV  @"/var/mobile/Library/CallCaption/remote16k.wav"
-#ifdef CC_ASSISTANT_EMBED
+#if defined(CC_ASSISTANT_EMBED) || defined(CC_ASSISTANT_TOOL)
 #define CC_ASSIST_PROBE @"/var/mobile/Library/CallCaption/probe.log"
 #endif
 
@@ -50,7 +50,7 @@ static void CCLogA(NSString *fmt, ...) {
             fclose(fp);
             chmod(paths[i], 0666);
         }
-#ifdef CC_ASSISTANT_EMBED
+#if defined(CC_ASSISTANT_EMBED) || defined(CC_ASSISTANT_TOOL)
         // 同时写进用户平时发送的 probe.log，省得再找 assistant.log
         NSString *pl = [NSString stringWithFormat:@"[Siri] %@", msg];
         pl = [pl stringByAppendingFormat:@"%c", 10];

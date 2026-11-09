@@ -30,6 +30,12 @@ static void CCLocalTeeWriteFloat(const float *src, UInt32 n);
 
 static dispatch_queue_t g_stateQ;
 static CFAbsoluteTime g_muteUntil;         // 英文 TTS 播放期间静音，防回声自激
+// v0.15.4：守护进程只做“音频桥”——麦克风 Tap + 16k WAV 写入 + TTS 文件复制。
+// 识别/翻译/TTS 合成全部在 SpringBoard（唯一可用 SFSpeech 上下文）。
+// 守护进程里那套 SFSpeech 从来没被喂过音频，只会触发看门狗反复重启 Tap，
+// 把 local16k.wav 切成一段段空洞——这就是“我方漏句”的直接原因。
+static BOOL g_bridgeOnly = YES;
+static CFAbsoluteTime g_localStartAfter;   // arm 后延迟 1 秒再挂麦克风 Tap，避开通话建立
 static CFAbsoluteTime g_ttsUntil;          // SB 中文播报窗口（从 tts_until 文件读取）
 static CFAbsoluteTime g_lastPrefsLoad;
 static CFAbsoluteTime g_lastTransWarn;     // 翻译失败提示节流
@@ -328,7 +334,7 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
                             ch->lastLoudAt = CFAbsoluteTimeGetCurrent();
                         if (ch.expectCJK)
                             CCLocalTeeWriteFloat(dst, nf);
-                        if (ch->chunkBuf && ch->chunkIsFloat) {
+                        if (!g_bridgeOnly && ch->chunkBuf && ch->chunkIsFloat) {
                             @synchronized(ch) {
                                 [ch->chunkBuf appendBytes:dst length:nf * sizeof(float)];
                                 ch->chunkEnergy += (double)rms * (double)nf;
@@ -393,15 +399,17 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
         return YES;
     }
 
-    SFSpeechRecognizerAuthorizationStatus auth = [SFSpeechRecognizer authorizationStatus];
-    if (auth != SFSpeechRecognizerAuthorizationStatusAuthorized) {
-        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-        if (now - lastAuthLog > 10) {
-            lastAuthLog = now;
-            CCLogf(@"%@: speech NOT authorized (status=%ld)", self.tag, (long)auth);
-            CCASendState(@"● 语音识别未授权（查看 probe.log）");
+    if (!g_bridgeOnly) {
+        SFSpeechRecognizerAuthorizationStatus auth = [SFSpeechRecognizer authorizationStatus];
+        if (auth != SFSpeechRecognizerAuthorizationStatusAuthorized) {
+            CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+            if (now - lastAuthLog > 10) {
+                lastAuthLog = now;
+                CCLogf(@"%@: speech NOT authorized (status=%ld)", self.tag, (long)auth);
+                CCASendState(@"● 语音识别未授权（查看 probe.log）");
+            }
+            return NO;
         }
-        return NO;
     }
 
     Class descCls = NSClassFromString(@"ATAudioTapDescription");
@@ -1208,7 +1216,7 @@ static void CheckArm(void) {
             g_remote->tapProbeCount = 0;
             g_remote.tapPID = CC_TAP_PID_SPEAKER;
             // 清掉上一通的 16k 桥文件：关闭后删除，下次写入自动重建并截断。
-            // 0.15.3 在这里 stop 通道并直接 fopen，结果守护进程每 6~7 秒重启一次
+            // 0.15.4 在这里 stop 通道并直接 fopen，结果守护进程每 6~7 秒重启一次
             // （日志里 44 次 audioservice started），整条链路等于没有运行。
             NSFileManager *fm2 = [NSFileManager defaultManager];
             CCRemoteTeeClose();
@@ -1219,7 +1227,8 @@ static void CheckArm(void) {
                 [fm2 removeItemAtPath:[CC_DIR stringByAppendingPathComponent:@"local16k.wav"]
                                 error:nil];
             }
-            CCLogf(@"arm: bridge wav cleared");
+            g_localStartAfter = CFAbsoluteTimeGetCurrent() + 1.0;
+            CCLogf(@"arm: bridge wav cleared (local tap in 1.0s)");
         }
         lastArmed = armed;
         if (!armed) {
@@ -1242,8 +1251,8 @@ static void CheckArm(void) {
         }
         // 文件模式：每次 tick 把 WhatsApp 探针新写出的 PCM 喂给识别器
         if (g_remote.fileMode) [g_remote pumpFileAudio];
-        // 分块识别：两个通道攒够 4 秒就送 SFSpeechURLRecognitionRequest
-        if (g_remote->capturing && atomic_load(&g_remote->chunkReady))
+        // 分块识别只在非桥接模式启用（桥接模式由 SpringBoard 统一识别）
+        if (!g_bridgeOnly && g_remote->capturing && atomic_load(&g_remote->chunkReady))
             [g_remote flushChunk];
 
         // 我方通道（双向模式）
@@ -1256,7 +1265,8 @@ static void CheckArm(void) {
                 CCLogf(@"local: locale changed %@ -> %@, restart", oldLocalLocale, g_local.locale);
                 [g_local stop];
             }
-            if (!g_local->capturing && now - g_local->lastAttempt > 3.0) {
+            if (!g_local->capturing && now - g_local->lastAttempt > 3.0 &&
+                now >= g_localStartAfter) {
                 g_local->lastAttempt = now;
                 [g_local start];
             }
@@ -1264,32 +1274,32 @@ static void CheckArm(void) {
             [g_local stop];
         }
 
-        // TTS 外放期间暂停两路识别，避免把播报回声当成人声
-        BOOL speaking = (now < g_ttsUntil) || (now < g_muteUntil);
         NSArray<CCChannel *> *chans = @[g_remote, g_local];
-        for (CCChannel *ch in chans) {
-            if (!ch->capturing) continue;
-            if (speaking && ch->task) {
-                [ch pauseRecog];
-                ch->ttsPaused = YES;
-            } else if (!speaking && ch->ttsPaused) {
-                ch->ttsPaused = NO;
-                [ch recogStart];
+        if (!g_bridgeOnly) {
+            // TTS 外放期间暂停两路识别，避免把播报回声当成人声
+            BOOL speaking = (now < g_ttsUntil) || (now < g_muteUntil);
+            for (CCChannel *ch in chans) {
+                if (!ch->capturing) continue;
+                if (speaking && ch->task) {
+                    [ch pauseRecog];
+                    ch->ttsPaused = YES;
+                } else if (!speaking && ch->ttsPaused) {
+                    ch->ttsPaused = NO;
+                    [ch recogStart];
+                }
             }
-        }
 
-        // 自然停顿检测：partial 2 秒没变化才收句。
-        // 0.8 秒太短，会把“思考一下再说”切断；2 秒更接近 LCT/Siri 的 endpointing。
-        // 注意 lastPartialAt > 0：recogStart 刚启动时没有 partial，绝不能把旧 lastPartialText 当稳定句。
-        for (CCChannel *ch in chans) {
-            if (!ch->capturing || !ch->req || ch->endAudioSent) continue;
-            if (ch->lastPartialText.length >= 4 &&
-                ch->lastPartialAt > 0 &&
-                now - ch->lastPartialAt > 2.0) {
-                ch->endAudioSent = YES;
-                CCLogf(@"%@: stable partial, requesting final", ch.tag);
-                [ch translateProvisional:ch->lastPartialText];
-                [ch->req endAudio];
+            // 自然停顿检测：partial 2 秒没变化才收句。
+            for (CCChannel *ch in chans) {
+                if (!ch->capturing || !ch->req || ch->endAudioSent) continue;
+                if (ch->lastPartialText.length >= 4 &&
+                    ch->lastPartialAt > 0 &&
+                    now - ch->lastPartialAt > 2.0) {
+                    ch->endAudioSent = YES;
+                    CCLogf(@"%@: stable partial, requesting final", ch.tag);
+                    [ch translateProvisional:ch->lastPartialText];
+                    [ch->req endAudio];
+                }
             }
         }
 
@@ -1316,19 +1326,22 @@ static void CheckArm(void) {
             }
         }
 
-        // 识别健康看门狗：有真实声音、但 6 秒没有任何识别结果 → 重启识别
-        for (CCChannel *ch in chans) {
-            if (!ch->capturing || ch->ttsPaused) continue;
-            if (ch->fileMode) continue;   // 文件分块识别自带重试，不走流式重启
-            if (ch->lastLoudAt > 0 &&
-                now - ch->lastLoudAt < 2.0 &&
-                now - ch->lastResultAt > 6.0) {
-                CCLogf(@"%@: loud(rms=%.3f) but no recognition for %.1fs, restarting tap pid=%d",
-                       ch.tag, ch->lastRMS, now - ch->lastResultAt, ch.tapPID);
-                ch->lastResultAt = now;
-                [ch stop];
-                ch->lastAttempt = 0;
-                ch->lastFrameChangeAt = now;
+        // 识别健康看门狗只在非桥接模式启用；桥接模式没有识别结果，
+        // 以前它每 5~10 秒就重启一次麦克风 Tap，直接把 local16k.wav 切出空洞。
+        if (!g_bridgeOnly) {
+            for (CCChannel *ch in chans) {
+                if (!ch->capturing || ch->ttsPaused) continue;
+                if (ch->fileMode) continue;
+                if (ch->lastLoudAt > 0 &&
+                    now - ch->lastLoudAt < 2.0 &&
+                    now - ch->lastResultAt > 6.0) {
+                    CCLogf(@"%@: loud(rms=%.3f) but no recognition for %.1fs, restarting tap pid=%d",
+                           ch.tag, ch->lastRMS, now - ch->lastResultAt, ch.tapPID);
+                    ch->lastResultAt = now;
+                    [ch stop];
+                    ch->lastAttempt = 0;
+                    ch->lastFrameChangeAt = now;
+                }
             }
         }
 
@@ -1456,7 +1469,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.15.3)");
+        CCLogLine(@"audioservice started (v0.15.4)");
         // LCT 的 livecallhelper 在识别前会配置 AVAudioSession（SoloAmbient/Default）；
         // 我们的守护进程以前没做这一步，补上。
         @try {

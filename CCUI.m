@@ -1110,6 +1110,8 @@ static NSString *g_sbPath;
 static unsigned long long g_sbOffset;
 static NSMutableData *g_sbChunk;
 static BOOL g_sbBusy;
+static BOOL g_sbCloudOn = YES;   // 旧分块识别：云端优先，失败自动换本地
+static BOOL g_sbCloudInit;
 static NSString *g_sbLastText;
 static SFSpeechRecognizer *g_sbRecog;
 static SFSpeechRecognitionTask *g_sbTask;
@@ -1268,12 +1270,13 @@ static void CCRemoteFileTick(void) {
         SFSpeechURLRecognitionRequest *ur =
             [[SFSpeechURLRecognitionRequest alloc] initWithURL:[NSURL fileURLWithPath:tmp]];
         ur.shouldReportPartialResults = NO;
+        if (!g_sbCloudInit) { g_sbCloudInit = YES; g_sbCloudOn = CCPrefBool(CC_K_CLOUD_ASR, YES); }
         if (@available(iOS 13.0, *)) {
             ur.taskHint = SFSpeechRecognitionTaskHintDictation;
-            ur.requiresOnDeviceRecognition = YES;           // 自检证明 on-device 可用
+            ur.requiresOnDeviceRecognition = !g_sbCloudOn;
         }
         g_sbBusy = YES;
-        CCLogf(@"sb recog chunk %.1fs rms%.3f", (double)pcm.length / 32000.0, avg);
+        CCLogf(@"sb recog chunk %.1fs rms%.3f cloud=%d", (double)pcm.length / 32000.0, avg, g_sbCloudOn);
         g_sbTask = [g_sbRecog recognitionTaskWithRequest:ur
             resultHandler:^(SFSpeechRecognitionResult *res, NSError *err) {
                 if (res.isFinal) {
@@ -1282,7 +1285,13 @@ static void CCRemoteFileTick(void) {
                         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
                     if (txt.length) CCSBDeliverChunk(txt);
                 }
-                if (err) CCLogf(@"sb recog err %ld %@", (long)err.code, err.localizedDescription);
+                if (err) {
+                    CCLogf(@"sb recog err %ld %@ cloud=%d", (long)err.code,
+                           err.localizedDescription, g_sbCloudOn);
+                    if (err.code == 1110 || err.code == 1101 ||
+                        err.code == 203 || err.code == 301)
+                        g_sbCloudOn = !g_sbCloudOn;   // 下块换另一种识别模式
+                }
                 g_sbBusy = NO;
                 [[NSFileManager defaultManager] removeItemAtPath:tmp error:nil];
             }];
@@ -1294,6 +1303,8 @@ static NSString *g_lbPath;
 static unsigned long long g_lbOffset;
 static NSMutableData *g_lbChunk;
 static BOOL g_lbBusy;
+static BOOL g_lbCloudOn = YES;
+static BOOL g_lbCloudInit;
 static NSString *g_lbLastText;
 static SFSpeechRecognizer *g_lbRecog;
 static SFSpeechRecognitionTask *g_lbTask;
@@ -1506,12 +1517,13 @@ static void CCLocalFileTick(void) {
         SFSpeechURLRecognitionRequest *ur =
             [[SFSpeechURLRecognitionRequest alloc] initWithURL:[NSURL fileURLWithPath:tmp]];
         ur.shouldReportPartialResults = NO;
+        if (!g_lbCloudInit) { g_lbCloudInit = YES; g_lbCloudOn = CCPrefBool(CC_K_CLOUD_ASR, YES); }
         if (@available(iOS 13.0, *)) {
             ur.taskHint = SFSpeechRecognitionTaskHintDictation;
-            ur.requiresOnDeviceRecognition = YES;
+            ur.requiresOnDeviceRecognition = !g_lbCloudOn;
         }
         g_lbBusy = YES;
-        CCLogf(@"sb local chunk %.1fs rms%.3f", (double)pcm.length / 32000.0, avg);
+        CCLogf(@"sb local chunk %.1fs rms%.3f cloud=%d", (double)pcm.length / 32000.0, avg, g_lbCloudOn);
         g_lbTask = [g_lbRecog recognitionTaskWithRequest:ur
             resultHandler:^(SFSpeechRecognitionResult *res, NSError *err) {
                 if (res.isFinal) {
@@ -1520,7 +1532,13 @@ static void CCLocalFileTick(void) {
                         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
                     if (txt.length) CCLBDeliverChunk(txt);
                 }
-                if (err) CCLogf(@"sb local err %ld %@", (long)err.code, err.localizedDescription);
+                if (err) {
+                    CCLogf(@"sb local err %ld %@ cloud=%d", (long)err.code,
+                           err.localizedDescription, g_lbCloudOn);
+                    if (err.code == 1110 || err.code == 1101 ||
+                        err.code == 203 || err.code == 301)
+                        g_lbCloudOn = !g_lbCloudOn;
+                }
                 g_lbBusy = NO;
                 [[NSFileManager defaultManager] removeItemAtPath:tmp error:nil];
             }];
@@ -1576,7 +1594,7 @@ static void CCRunSpeechSelfTest(BOOL onDevice) {
         }];
 }
 
-#pragma mark - 0.15.3 流式识别（LCT 同款 SFSpeechAudioBufferRecognitionRequest）
+#pragma mark - 0.15.4 流式识别（LCT 同款 SFSpeechAudioBufferRecognitionRequest）
 //
 // 旧方案：每 2~6 秒切一块 WAV，串行跑 SFSpeechURLRecognitionRequest。
 //   - 6 秒硬切会把单词劈成两半，重叠去重靠“单词完全相等”，识别不一致就丢词；
@@ -2071,7 +2089,7 @@ void CCUIBoot(void) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.15.3)");
+        CCLogLine(@"CallCaption UI booted (single window v0.15.4)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

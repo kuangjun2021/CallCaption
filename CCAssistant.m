@@ -222,22 +222,14 @@ static void CCSetObjSel(id o, NSString *selName, id v) {
 static void CCSetBoolSel(id o, NSString *selName, BOOL v) {
     SEL s = NSSelectorFromString(selName);
     if (!s || ![o respondsToSelector:s]) return;
-    NSMethodSignature *sig = [o methodSignatureForSelector:s];
-    if (!sig) return;
-    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-    inv.target = o; inv.selector = s;
-    [inv setArgument:&v atIndex:2];
-    [inv invoke];
+    typedef void (*Fn)(id, SEL, BOOL);
+    ((Fn)objc_msgSend)(o, s, v);
 }
 static void CCSetDoubleSel(id o, NSString *selName, double v) {
     SEL s = NSSelectorFromString(selName);
     if (!s || ![o respondsToSelector:s]) return;
-    NSMethodSignature *sig = [o methodSignatureForSelector:s];
-    if (!sig) return;
-    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-    inv.target = o; inv.selector = s;
-    [inv setArgument:&v atIndex:2];
-    [inv invoke];
+    typedef void (*Fn)(id, SEL, double);
+    ((Fn)objc_msgSend)(o, s, v);
 }
 
 @implementation CCAssistantRunner
@@ -342,6 +334,7 @@ static void CCSetDoubleSel(id o, NSString *selName, double v) {
     }
     self.recognizer = rec;
 
+    CCLogA(@"core: building params");
     Class pc = NSClassFromString(@"CESRSpeechParameters");
     SEL builderSel = NSSelectorFromString(@"newWithBuilder:");
     id params = nil;
@@ -376,6 +369,7 @@ static void CCSetDoubleSel(id o, NSString *selName, double v) {
         CCLogA(@"core: didStartHandler ok=%d", ok);
     } copy];
     @try {
+        CCLogA(@"core: invoking start");
         [rec performSelector:startSel withObject:params withObject:started];
         CCLogA(@"core: start invoked");
     } @catch (NSException *e) {

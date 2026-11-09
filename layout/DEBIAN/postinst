@@ -44,15 +44,12 @@ KILLALL=/var/jb/usr/bin/killall
 [ -x "$KILLALL" ] || KILLALL=killall
 "$KILLALL" -9 CallCaptionAudioService 2>/dev/null || true
 
-# Siri helper：LaunchDaemon（照 LCT livecallhelper 的方式由 launchd 启动，拿到完整沙盒/权限上下文）
-H="$JB/usr/local/bin/CallCaptionSiriHelper"
-P="$JB/Library/LaunchDaemons/net.user.callcaption.sirihelper.plist"
-chown 0:0 "$H" 2>/dev/null || true
-chmod 0755 "$H" 2>/dev/null || true
-chown 0:0 "$P" 2>/dev/null || true
-chmod 0644 "$P" 2>/dev/null || true
+# 0.17.0：清理 Siri 实验组件（系统拒绝独立进程使用 CoreEmbeddedSpeechRecognizer）
 "$KILLALL" -9 CallCaptionSiriHelper 2>/dev/null || true
 launchctl bootout system/net.user.callcaption.sirihelper 2>/dev/null || true
-launchctl bootstrap system "$P" >/dev/null 2>&1   || launchctl load "$P" >/dev/null 2>&1   || true
+rm -f "$JB/Library/LaunchDaemons/net.user.callcaption.sirihelper.plist" 2>/dev/null || true
+rm -f "$JB/usr/local/bin/CallCaptionSiriHelper" 2>/dev/null || true
+rm -f "$JB/Library/MobileSubstrate/DynamicLibraries/CallCaptionAssistant.dylib" 2>/dev/null || true
+rm -f "$JB/Library/MobileSubstrate/DynamicLibraries/CallCaptionAssistant.plist" 2>/dev/null || true
 
 exit 0

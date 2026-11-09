@@ -5,7 +5,7 @@ INSTALL_TARGET_PROCESSES = SpringBoard mediaserverd
 
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME = CallCaption CallCaptionAudioHook CallCaptionAppProbe CallCaptionAssistant
+TWEAK_NAME = CallCaption CallCaptionAudioHook CallCaptionAppProbe
 CallCaption_FILES = Tweak.x CCSupport.m CCTranslator.m CCEngine.m CCUI.m CCMicCapture.m CCSettings.m
 CallCaption_FRAMEWORKS = Foundation UIKit AudioToolbox CoreTelephony AVFoundation Speech CoreFoundation CallKit
 CallCaption_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-command-line-argument -Wno-unused-function -fno-objc-msgsend-selector-stubs -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
@@ -23,11 +23,6 @@ CallCaptionAppProbe_FRAMEWORKS = Foundation AudioToolbox
 CallCaptionAppProbe_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function -fno-objc-msgsend-selector-stubs -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
 CallCaptionAppProbe_LDFLAGS = -Wl,-fixup_chains
 
-# Stage A：assistantd 内本地 Siri 识别器验证（独立 dylib，全部私有 API 动态调用）
-CallCaptionAssistant_FILES = CCAssistant.m
-CallCaptionAssistant_FRAMEWORKS = Foundation
-CallCaptionAssistant_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function -Wno-arc-performSelector-leaks -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
-CallCaptionAssistant_LDFLAGS = -Wl,-fixup_chains -Wl,-undefined,dynamic_lookup
 
 BUNDLE_NAME = CallCaptionPrefs
 CallCaptionPrefs_FILES = CallCaptionRootListController.m CCSettings.m
@@ -37,7 +32,7 @@ CallCaptionPrefs_CFLAGS = -fobjc-arc -Iinclude -fptrauth-intrinsics -fptrauth-ca
 CallCaptionPrefs_LDFLAGS = -Wl,-fixup_chains -Wl,-undefined,dynamic_lookup
 
 # v0.10: 独立音频守护进程（系统级 Tap 抓取通话对方声音，无钩子/无 mediaserverd）
-TOOL_NAME = CallCaptionAudioService CallCaptionSiriHelper
+TOOL_NAME = CallCaptionAudioService
 CallCaptionAudioService_FILES = CCAudioService.m CCSupport.m CCTranslator.m
 CallCaptionAudioService_FRAMEWORKS = Foundation AudioToolbox AVFAudio AVFoundation Speech CoreFoundation
 CallCaptionAudioService_CFLAGS = -fobjc-arc -DCC_TOOL -Wno-deprecated-declarations -Wno-arc-performSelector-leaks -Wno-unused-variable -Wno-unused-function -fno-objc-msgsend-selector-stubs -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
@@ -45,13 +40,6 @@ CallCaptionAudioService_LDFLAGS = -Wl,-fixup_chains
 CallCaptionAudioService_CODESIGN_FLAGS = -Sentitlements/CallCaptionAudioService.plist
 CallCaptionAudioService_INSTALL_PATH = /usr/local/bin
 
-# Stage A helper：独立进程跑 SiriCore/corespeech，守护进程只负责 spawn/kill
-CallCaptionSiriHelper_FILES = CCAssistant.m
-CallCaptionSiriHelper_FRAMEWORKS = Foundation
-CallCaptionSiriHelper_CFLAGS = -fobjc-arc -DCC_ASSISTANT_TOOL -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function -Wno-arc-performSelector-leaks -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
-CallCaptionSiriHelper_LDFLAGS = -Wl,-fixup_chains -Wl,-undefined,dynamic_lookup
-CallCaptionSiriHelper_CODESIGN_FLAGS = -Sentitlements/CallCaptionSiriHelper.plist
-CallCaptionSiriHelper_INSTALL_PATH = /usr/local/bin
 
 
 include $(THEOS_MAKE_PATH)/tweak.mk

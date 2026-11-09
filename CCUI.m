@@ -516,7 +516,7 @@ static UIView *MakeBox(NSString *recogHeader) {
 
     UILabel *c = [[UILabel alloc] initWithFrame:CGRectZero];
     c.tag = 1005;
-    c.text = @"Translated by …";
+    c.text = @"翻译引擎：…";
     c.font = [UIFont systemFontOfSize:11];
     c.textColor = [UIColor colorWithWhite:1 alpha:0.55];
     c.textAlignment = NSTextAlignmentRight;
@@ -537,7 +537,7 @@ static UIView *MakeBox(NSString *recogHeader) {
 
 static void EnsureCaptionUI(void) {
     if (g_boxesBuilt) return;
-    g_remoteBox = MakeBox(@"对方（识别原文）");
+    g_remoteBox = MakeBox(@"对方语音");
     NSNumber *rx = CCPref(@"RemoteBoxX"), *ry = CCPref(@"RemoteBoxY");
     if ([rx isKindOfClass:[NSNumber class]] && [ry isKindOfClass:[NSNumber class]]) {
         g_remoteBox.center = CGPointMake([rx floatValue], [ry floatValue]);
@@ -545,7 +545,7 @@ static void EnsureCaptionUI(void) {
         g_remoteBox.center = CGPointMake(ScreenW() / 2.0, ScreenH() - 520);
     }
 
-    g_localBox = MakeBox(@"我方（识别原文）");
+    g_localBox = MakeBox(@"我的语音");
     NSNumber *lx = CCPref(@"LocalBoxX"), *ly = CCPref(@"LocalBoxY");
     if ([lx isKindOfClass:[NSNumber class]] && [ly isKindOfClass:[NSNumber class]]) {
         g_localBox.center = CGPointMake([lx floatValue], [ly floatValue]);
@@ -591,7 +591,7 @@ static void LayoutBox(UIView *box, NSString *recog, NSString *trans, NSString *e
         t.font = [UIFont systemFontOfSize:18 weight:UIFontWeightSemibold];
         CGFloat hh = TextHeight(trans, t.font, cw);
         t.frame = CGRectMake(pad, y, cw, hh); y += hh + 14.0;
-        c.text = [NSString stringWithFormat:@"Translated by %@", CCEngineName(engine)];
+        c.text = [NSString stringWithFormat:@"翻译引擎：%@", CCEngineName(engine)];
         c.frame = CGRectMake(pad, y, cw, 14); y += 18.0;
     } else {
         sh.hidden = YES; t.hidden = YES; c.hidden = YES;
@@ -1594,7 +1594,7 @@ static void CCRunSpeechSelfTest(BOOL onDevice) {
         }];
 }
 
-#pragma mark - 0.15.6 流式识别（LCT 同款 SFSpeechAudioBufferRecognitionRequest）
+#pragma mark - 0.15.7 流式识别（LCT 同款 SFSpeechAudioBufferRecognitionRequest）
 //
 // 旧方案：每 2~6 秒切一块 WAV，串行跑 SFSpeechURLRecognitionRequest。
 //   - 6 秒硬切会把单词劈成两半，重叠去重靠“单词完全相等”，识别不一致就丢词；
@@ -1638,7 +1638,7 @@ static void CCRunSpeechSelfTest(BOOL onDevice) {
 static CCStream *g_rs;
 static CCStream *g_ls;
 static NSTimer *g_streamTimer;
-// 0.15.6 诊断：先只跑“对方”一路流式，验证单任务是否稳定。
+// 0.15.7 诊断：先只跑“对方”一路流式，验证单任务是否稳定。
 // 本地方向的麦克风音频仍由守护进程连续写入 local16k.wav（没丢），只是暂停识别。
 static BOOL g_localStreamPaused = YES;
 
@@ -2109,7 +2109,7 @@ void CCUIBoot(void) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.15.6)");
+        CCLogLine(@"CallCaption UI booted (single window v0.15.7)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

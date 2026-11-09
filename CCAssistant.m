@@ -403,6 +403,31 @@ static void CCSetArg(NSInvocation *inv, NSUInteger idx, const char *type,
 }
 @end
 
+#ifdef CC_ASSISTANT_TOOL
+// 独立守护进程模式：不依赖 assistantd 注入，用自己进程的 Siri 权限
+int main(int argc, char *argv[]) {
+    @autoreleasepool {
+        [[NSFileManager defaultManager] createDirectoryAtPath:CC_ASSIST_DIR
+                                  withIntermediateDirectories:YES
+                                                   attributes:@{NSFilePosixPermissions: @0777}
+                                                        error:nil];
+        CCLogA(@"=== CallCaptionSiriHelper started pid=%d ===", getpid());
+        CCAssistantRunner *r = [CCAssistantRunner shared];
+        [r logEnvironment];
+        [NSTimer scheduledTimerWithTimeInterval:1.0
+                                         target:r
+                                       selector:@selector(tick:)
+                                       userInfo:nil repeats:YES];
+        while (1) {
+            @autoreleasepool {
+                [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                         beforeDate:[NSDate dateWithTimeIntervalSinceNow:60]];
+            }
+        }
+    }
+    return 0;
+}
+#else
 __attribute__((constructor))
 static void CCAssistantInit(void) {
     @autoreleasepool {
@@ -417,3 +442,4 @@ static void CCAssistantInit(void) {
                                        userInfo:nil repeats:YES];
     }
 }
+#endif

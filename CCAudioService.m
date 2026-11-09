@@ -30,7 +30,7 @@ static void CCLocalTeeWriteFloat(const float *src, UInt32 n);
 
 static dispatch_queue_t g_stateQ;
 static CFAbsoluteTime g_muteUntil;         // 英文 TTS 播放期间静音，防回声自激
-// v0.15.7：守护进程只做“音频桥”——麦克风 Tap + 16k WAV 写入 + TTS 文件复制。
+// v0.15.8：守护进程只做“音频桥”——麦克风 Tap + 16k WAV 写入 + TTS 文件复制。
 // 识别/翻译/TTS 合成全部在 SpringBoard（唯一可用 SFSpeech 上下文）。
 // 守护进程里那套 SFSpeech 从来没被喂过音频，只会触发看门狗反复重启 Tap，
 // 把 local16k.wav 切成一段段空洞——这就是“我方漏句”的直接原因。
@@ -789,7 +789,20 @@ static void CCWriteChunkWav(NSString *path, NSData *pcm) {
         }
         if (!filePath || ![filePath isEqualToString:path]) {
             filePath = path;
-            fileOffset = 44;         // 跳过 WAV 头
+            NSDictionary *fat = [[NSFileManager defaultManager]
+                                 attributesOfItemAtPath:path error:nil];
+            unsigned long long fsz = [fat[NSFileSize] unsignedLongLongValue];
+            // 探针的 cc_remote_*.wav 会跨通话累积（WhatsApp 不重建 render callback 时不会截断）。
+            // 新通话第一拍如果文件里已经有 >2 秒音频，那必然是上一通/更早的内容：
+            // 直接从文件末尾开始读。以前从 44 读，把整段旧通话重新喂给识别器，
+            // 就是你看到的“拨通后先显示上一次通话字幕”。
+            if (fsz > 44 + 48000ULL * 2 * 2) {
+                fileOffset = fsz;
+                CCLogf(@"%@: skip stale probe wav %.1fs -> end", self.tag,
+                       (double)(fsz - 44) / 96000.0);
+            } else {
+                fileOffset = 44;     // 真正的本通新文件：从头读，一个字不丢
+            }
             CCLogf(@"%@: file source %@", self.tag, [path lastPathComponent]);
         }
         NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:path];
@@ -1216,7 +1229,7 @@ static void CheckArm(void) {
             g_remote->tapProbeCount = 0;
             g_remote.tapPID = CC_TAP_PID_SPEAKER;
             // 清掉上一通的 16k 桥文件：关闭后删除，下次写入自动重建并截断。
-            // 0.15.7 在这里 stop 通道并直接 fopen，结果守护进程每 6~7 秒重启一次
+            // 0.15.8 在这里 stop 通道并直接 fopen，结果守护进程每 6~7 秒重启一次
             // （日志里 44 次 audioservice started），整条链路等于没有运行。
             NSFileManager *fm2 = [NSFileManager defaultManager];
             CCRemoteTeeClose();
@@ -1469,7 +1482,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.15.7)");
+        CCLogLine(@"audioservice started (v0.15.8)");
         // LCT 的 livecallhelper 在识别前会配置 AVAudioSession（SoloAmbient/Default）；
         // 我们的守护进程以前没做这一步，补上。
         @try {

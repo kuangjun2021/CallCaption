@@ -284,6 +284,7 @@ static UIWindow *CreateOverlayWindow(void) {
 #pragma mark - 前向声明
 
 static void CCUIHandleCallActive(BOOL active);
+static void CCStreamCallActive(BOOL active);
 static void RefreshBoxes(void);
 static void EnsureUI(void);
 
@@ -980,6 +981,7 @@ static void CCUIHandleCallActive(BOOL active) {
     g_callActive = active;
     CCLogf(@"call state: %@", active ? @"ACTIVE" : @"NONE");
     EnsureUI();
+    CCStreamCallActive(active);
 
     if (active) {
         if (!g_sessionActive && CCPrefBool(CC_K_ENABLED, YES)) {
@@ -1572,6 +1574,405 @@ static void CCRunSpeechSelfTest(BOOL onDevice) {
         }];
 }
 
+#pragma mark - 0.15.0 流式识别（LCT 同款 SFSpeechAudioBufferRecognitionRequest）
+//
+// 旧方案：每 2~6 秒切一块 WAV，串行跑 SFSpeechURLRecognitionRequest。
+//   - 6 秒硬切会把单词劈成两半，重叠去重靠“单词完全相等”，识别不一致就丢词；
+//   - 识别期间新音频只能排队，块被裁剪；
+//   - 本地 URL 识别延迟 0.5~2 秒。
+// 新方案：每个方向一个长连接，音频边到边喂，partial 实时上字幕，
+// 静音/文本稳定即判一句结束，只翻译新增部分。会话每 55 秒轮换（Apple 约 1 分钟上限）。
+
+@interface CCStream : NSObject
+@property (nonatomic) BOOL isLocal;
+@property (nonatomic, copy) NSString *path;
+@property (nonatomic) unsigned long long offset;
+@property (nonatomic, strong) SFSpeechRecognizer *recog;
+@property (nonatomic, copy) NSString *locale;
+@property (nonatomic, strong) SFSpeechAudioBufferRecognitionRequest *req;
+@property (nonatomic, strong) SFSpeechRecognitionTask *task;
+@property (nonatomic, strong) NSMutableData *pending;
+@property (nonatomic, copy) NSString *text;
+@property (nonatomic, copy) NSString *delivered;
+@property (nonatomic) CFAbsoluteTime lastVoiceAt;
+@property (nonatomic) CFAbsoluteTime lastTextAt;
+@property (nonatomic) CFAbsoluteTime lastDeliverAt;
+@property (nonatomic) CFAbsoluteTime lastUIAt;
+@property (nonatomic) CFAbsoluteTime sessionStart;
+@property (nonatomic) BOOL hadVoice;
+@property (nonatomic) BOOL rotating;
+@property (nonatomic) BOOL starting;
+@property (nonatomic) BOOL onDevice;
+@property (nonatomic) BOOL legacy;
+@property (nonatomic) int failures;
+@property (nonatomic) double gain;
+@end
+
+@implementation CCStream
+@end
+
+static CCStream *g_rs;
+static CCStream *g_ls;
+static NSTimer *g_streamTimer;
+
+static CCStream *CCStreamFor(BOOL local) {
+    if (!g_rs) { g_rs = [CCStream new]; g_rs.gain = 1.0; }
+    if (!g_ls) { g_ls = [CCStream new]; g_ls.isLocal = YES; g_ls.gain = 1.0; }
+    return local ? g_ls : g_rs;
+}
+
+static NSString *CCStreamTag(CCStream *st) { return st.isLocal ? @"local" : @"remote"; }
+
+static NSString *CCStreamLocale(CCStream *st) {
+    return st.isLocal ? CCPrefStr(CC_K_LOCAL_LOCALE, @"zh-CN")
+                      : CCPrefStr(CC_K_REMOTE_LOCALE, @"en-US");
+}
+
+static AVAudioFormat *CCStreamFormat(void) {
+    static AVAudioFormat *f;
+    if (!f) f = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32
+                                                sampleRate:16000
+                                                  channels:1
+                                               interleaved:NO];
+    return f;
+}
+
+// 只取“还没翻译过”的新增词。ASR 偶尔会改写前文，改写时退化为最后 12 个词。
+static NSString *CCStreamNewTail(NSString *full, NSString *delivered) {
+    if (!full.length) return @"";
+    if (!delivered.length) return full;
+    if ([full hasPrefix:delivered]) {
+        return [[full substringFromIndex:delivered.length]
+                stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    }
+    NSArray *a = [delivered componentsSeparatedByString:@" "];
+    NSArray *b = [full componentsSeparatedByString:@" "];
+    NSUInteger i = 0;
+    while (i < a.count && i < b.count &&
+           [[a[i] lowercaseString] isEqualToString:[b[i] lowercaseString]]) i++;
+    if (i < b.count) {
+        if (i == 0 && b.count > 12) i = b.count - 12;
+        return [[b subarrayWithRange:NSMakeRange(i, b.count - i)]
+                componentsJoinedByString:@" "];
+    }
+    return @"";
+}
+
+static void CCStreamShowPartial(CCStream *st, NSString *t) {
+    if (!t.length) return;
+    NSString *show = t;
+    if (show.length > 200) show = [show substringFromIndex:show.length - 200];
+    if (st.isLocal) CCUIDeliverLocalOriginal(show);
+    else CCUIDeliverRemoteOriginal(show);
+}
+
+static void CCStreamDeliver(CCStream *st) {
+    NSString *full = st.text ?: @"";
+    if (!full.length) return;
+    NSString *tail = CCStreamNewTail(full, st.delivered);
+    st.delivered = full;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    st.lastDeliverAt = now;
+    if (!tail.length) return;
+    CCLogf(@"stream %@ deliver (silence %.2fs): %@", CCStreamTag(st),
+           st.lastVoiceAt > 0 ? now - st.lastVoiceAt : 0, tail);
+    if (st.isLocal) {
+        CCTranslateEx(tail, @"zh", @"en", ^(NSString *out, NSString *engine) {
+            if (!out.length) return;
+            CCUIDeliverLocalTranslated(out);
+            if (engine.length) CCUIDeliverLocalEngine(engine);
+            if (CCPrefBool(CC_K_TTS_ENABLED, YES))
+                CCTTSBuffer(out, @"en-US", @"cc_tts.wav");
+        });
+    } else {
+        CCTranslateEx(tail, @"en", @"zh", ^(NSString *out, NSString *engine) {
+            if (!out.length) return;
+            CCUIDeliverRemoteTranslated(out);
+            if (engine.length) CCUIDeliverRemoteEngine(engine);
+            if (CCPrefBool(CC_K_TTS_ENABLED, YES))
+                CCTTSBuffer(out, @"zh-CN", @"cc_tts_zh.wav");
+        });
+    }
+}
+
+static void CCStreamFeedRaw(CCStream *st, const int16_t *s, NSUInteger n) {
+    if (!n || !st.req) return;
+    AVAudioPCMBuffer *buf = [[AVAudioPCMBuffer alloc] initWithPCMFormat:CCStreamFormat()
+                                                         frameCapacity:(AVAudioFrameCount)n];
+    if (!buf) return;
+    buf.frameLength = (AVAudioFrameCount)n;
+    float *dst = buf.floatChannelData[0];
+    double g = st.gain;
+    for (NSUInteger i = 0; i < n; i++) {
+        double v = (double)s[i] / 32768.0 * g;
+        if (v > 1.0) v = 1.0;
+        if (v < -1.0) v = -1.0;
+        dst[i] = (float)v;
+    }
+    [st.req appendAudioPCMBuffer:buf];
+}
+
+static void CCStreamFeed(CCStream *st, const int16_t *s, NSUInteger n) {
+    if (!n) return;
+    if (st.req) {
+        CCStreamFeedRaw(st, s, n);
+        return;
+    }
+    // 会话切换的间隙：音频先存着，新 request 就绪后补喂，避免丢字
+    if (!st.pending) st.pending = [NSMutableData data];
+    [st.pending appendBytes:s length:n * 2];
+    NSUInteger cap = 16000 * 2 * 6;
+    if (st.pending.length > cap) {
+        st.pending = [[st.pending subdataWithRange:
+                       NSMakeRange(st.pending.length - cap, cap)] mutableCopy];
+    }
+}
+
+static void CCStreamFlushPending(CCStream *st) {
+    if (!st.pending.length || !st.req) return;
+    NSData *d = st.pending;
+    st.pending = nil;
+    CCStreamFeedRaw(st, (const int16_t *)d.bytes, d.length / 2);
+}
+
+static void CCStreamStart(CCStream *st);
+static void CCStreamFinishSession(CCStream *st);
+
+static void CCStreamStart(CCStream *st) {
+    if (st.task || st.starting || st.legacy) return;
+    NSString *loc = CCStreamLocale(st);
+    if (!st.recog || ![st.locale isEqualToString:loc]) {
+        st.recog = [[SFSpeechRecognizer alloc] initWithLocale:
+                    [NSLocale localeWithLocaleIdentifier:loc]];
+        st.locale = loc;
+    }
+    if (!st.recog) {
+        st.legacy = YES;
+        CCLogf(@"stream %@: no recognizer for %@, fallback chunk mode", CCStreamTag(st), loc);
+        return;
+    }
+    SFSpeechAudioBufferRecognitionRequest *r =
+        [[SFSpeechAudioBufferRecognitionRequest alloc] init];
+    r.shouldReportPartialResults = YES;
+    if (@available(iOS 13.0, *)) {
+        r.taskHint = SFSpeechRecognitionTaskHintDictation;
+        r.requiresOnDeviceRecognition = st.onDevice;
+    }
+    st.req = r;
+    st.starting = YES;
+    st.text = @"";
+    st.delivered = @"";            // 新会话只包含新音频，旧文本不能用来做差集
+    st.lastTextAt = 0;
+    st.rotating = NO;
+    st.sessionStart = CFAbsoluteTimeGetCurrent();
+    CCLogf(@"stream %@ start onDevice=%d locale=%@", CCStreamTag(st), st.onDevice, loc);
+
+    __weak CCStream *weakSt = st;
+    st.task = [st.recog recognitionTaskWithRequest:r
+        resultHandler:^(SFSpeechRecognitionResult *res, NSError *err) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                CCStream *s = weakSt;
+                if (!s) return;
+                s.starting = NO;
+                NSString *t = nil;
+                if (res) {
+                    t = [res.bestTranscription.formattedString
+                         stringByTrimmingCharactersInSet:
+                         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                    if (t.length) {
+                        s.failures = 0;
+                        if (!s.lastTextAt)
+                            CCLogf(@"stream %@ first partial after %.2fs onDevice=%d",
+                                   CCStreamTag(s), CFAbsoluteTimeGetCurrent() - s.sessionStart,
+                                   s.onDevice);
+                        if (![t isEqualToString:(s.text ?: @"")]) {
+                            s.text = t;
+                            s.lastTextAt = CFAbsoluteTimeGetCurrent();
+                        }
+                        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+                        if (now - s.lastUIAt > 0.30) {
+                            s.lastUIAt = now;
+                            CCStreamShowPartial(s, t);
+                        }
+                    }
+                    if (res.isFinal) {
+                        CCLogf(@"stream %@ final %lu chars onDevice=%d",
+                               CCStreamTag(s), (unsigned long)t.length, s.onDevice);
+                        CCStreamFinishSession(s);
+                        return;
+                    }
+                }
+                if (err) {
+                    CCLogf(@"stream %@ err %ld %@ onDevice=%d",
+                           CCStreamTag(s), (long)err.code,
+                           err.localizedDescription ?: @"", s.onDevice);
+                    s.failures++;
+                    CCStreamFinishSession(s);
+                }
+            });
+        }];
+    if (!st.task) {
+        st.starting = NO;
+        st.req = nil;
+        st.failures++;
+        CCStreamFinishSession(st);
+        return;
+    }
+    CCStreamFlushPending(st);
+}
+
+static void CCStreamFinishSession(CCStream *st) {
+    if (st.task) [st.task cancel];
+    st.task = nil;
+    st.req = nil;
+    st.starting = NO;
+    st.rotating = NO;
+    if (st.failures > 0) {
+        CCStreamDeliver(st);               // 重启前先把已识别的部分送出去，别丢
+        if (!st.onDevice) {
+            st.onDevice = YES;             // 云端失败 → 本地
+        } else if (st.failures >= 3) {
+            st.legacy = YES;               // 本地也连续失败 → 退回旧分块识别
+            CCLogf(@"stream %@ -> legacy chunk mode after %d failures",
+                   CCStreamTag(st), st.failures);
+            return;
+        }
+    }
+    double delay = st.failures ? 0.25 : 0.05;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        CCStreamStart(st);
+    });
+}
+
+static void CCStreamReset(CCStream *st) {
+    if (st.task) [st.task cancel];
+    st.task = nil; st.req = nil;
+    st.path = nil; st.offset = 0;
+    st.text = @""; st.delivered = @"";
+    st.pending = nil;
+    st.hadVoice = NO; st.rotating = NO; st.starting = NO;
+    st.failures = 0; st.legacy = NO;
+    st.lastVoiceAt = 0; st.lastTextAt = 0; st.lastDeliverAt = 0; st.lastUIAt = 0;
+    st.sessionStart = 0; st.gain = 1.0;
+}
+
+static void CCStreamStop(CCStream *st) {
+    if (st.task) [st.task cancel];
+    st.task = nil; st.req = nil; st.pending = nil;
+    st.path = nil; st.offset = 0;
+    st.text = @""; st.delivered = @"";
+    st.hadVoice = NO; st.rotating = NO; st.starting = NO;
+}
+
+static void CCStreamTick(CCStream *st) {
+    if (!g_callActive) return;
+    if (!g_sessionActive) {              // 面板关闭/未启用：不要空跑识别会话
+        if (st.task || st.req) CCStreamStop(st);
+        return;
+    }
+    if (st.isLocal && !CCPrefBool(CC_K_LOCAL_ENABLED, YES)) {
+        if (st.task || st.req) CCStreamStop(st);
+        return;
+    }
+    if (st.legacy) return;                 // 旧分块识别由 1 秒定时器接管
+
+    NSString *p = [CC_DIR stringByAppendingPathComponent:
+                   (st.isLocal ? @"local16k.wav" : @"remote16k.wav")];
+    NSDictionary *at = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:nil];
+    if (!at) return;
+    unsigned long long size = [at[NSFileSize] unsignedLongLongValue];
+    if (size <= 44) return;
+
+    if (!st.path || ![st.path isEqualToString:p] || size < st.offset) {
+        BOOL fresh = (st.path == nil);
+        st.path = p;
+        st.offset = (fresh && size > 16000 * 2 * 8) ? size : 44;
+        // 新通话/文件重建：识别会话、文本全部重来
+        if (st.task) [st.task cancel];
+        st.task = nil; st.req = nil;
+        st.text = @""; st.delivered = @"";
+        st.pending = nil;
+        st.hadVoice = NO; st.failures = 0;
+        st.lastVoiceAt = 0; st.lastTextAt = 0; st.lastDeliverAt = 0;
+        st.sessionStart = 0; st.gain = 1.0;
+        CCStreamStart(st);
+    }
+    if (st.legacy) return;
+    if (!st.task && !st.starting) CCStreamStart(st);
+    if (size <= st.offset) return;
+
+    NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:p];
+    if (!fh) return;
+    [fh seekToFileOffset:st.offset];
+    NSData *d = [fh readDataToEndOfFile];
+    [fh closeFile];
+    NSUInteger n = d.length & ~(NSUInteger)1;
+    if (n == 0) return;
+    st.offset += n;
+
+    const int16_t *s = (const int16_t *)d.bytes;
+    NSUInteger cnt = n / 2;
+
+    // VAD + 音量归一（电话音频常只有 0.01 左右）
+    double sum = 0;
+    for (NSUInteger i = 0; i < cnt; i++) sum += fabs((double)s[i]);
+    double avg = cnt ? sum / (double)cnt / 32768.0 : 0;
+    if (avg > 0.002) {
+        double want = 0.05 / avg;
+        if (want > 8.0) want = 8.0;
+        if (want < 1.0) want = 1.0;
+        st.gain = st.gain * 0.70 + want * 0.30;
+    }
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (avg > 0.006) { st.hadVoice = YES; st.lastVoiceAt = now; }
+
+    CCStreamFeed(st, s, cnt);
+
+    if (st.hadVoice) {
+        double silence = now - st.lastVoiceAt;
+        double stable = st.lastTextAt > 0 ? now - st.lastTextAt : 0;
+        BOOL bySilence = (silence > 0.55);
+        BOOL byStable = (st.text.length > 0 && stable > 0.9 &&
+                         now - st.lastDeliverAt > 1.2);
+        if (bySilence || byStable) {
+            st.hadVoice = (silence <= 0.55);
+            CCStreamDeliver(st);
+        }
+    }
+
+    // Apple 单会话约 1 分钟：55 秒时收句并轮换，间隙音频进 pending
+    if (st.task && now - st.sessionStart > 55.0 && !st.rotating) {
+        CCLogf(@"stream %@ rotate at 55s", CCStreamTag(st));
+        CCStreamDeliver(st);
+        st.rotating = YES;
+        [st.req endAudio];
+    }
+}
+
+static void CCStreamCallActive(BOOL active) {
+    CCStream *r = CCStreamFor(NO);
+    CCStream *l = CCStreamFor(YES);
+    if (active) {
+        CCStreamReset(r);
+        CCStreamReset(l);
+        BOOL cloud = CCPrefBool(CC_K_CLOUD_ASR, YES);
+        r.onDevice = !cloud;
+        l.onDevice = !cloud;
+        CCLogf(@"stream: call active, cloud=%d", cloud);
+    } else {
+        CCStreamStop(r);
+        CCStreamStop(l);
+        CCLogf(@"stream: call ended");
+    }
+}
+
+static void CCStreamTimerTick(void) {
+    if (!g_uiReady || !g_callActive) return;
+    CCStreamTick(CCStreamFor(NO));
+    CCStreamTick(CCStreamFor(YES));
+}
+
 void CCUIBoot(void) {
     @try {
         if (!CCIsSpringBoard() || g_uiReady) return;
@@ -1605,15 +2006,23 @@ void CCUIBoot(void) {
                     g_sbTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
                                                                 repeats:YES
                                                                   block:^(NSTimer *t) {
-                        CCRemoteFileTick();
-                        CCLocalFileTick();
+                        // 旧分块识别只在流式识别连续失败后才兜底启用
+                        if (g_rs && g_rs.legacy) CCRemoteFileTick();
+                        if (g_ls && g_ls.legacy) CCLocalFileTick();
+                    }];
+                }
+                if (!g_streamTimer) {
+                    g_streamTimer = [NSTimer scheduledTimerWithTimeInterval:0.2
+                                                                    repeats:YES
+                                                                      block:^(NSTimer *t) {
+                        CCStreamTimerTick();
                     }];
                 }
             } @catch (NSException *e) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.14.0-alpha41)");
+        CCLogLine(@"CallCaption UI booted (single window v0.15.0)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

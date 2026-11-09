@@ -281,7 +281,7 @@ static CCCB *CCMakeCB(AudioUnit unit, UInt32 bus,
     if (c->fmt.rate <= 0) c->fmt.rate = 48000;
     if (c->fmt.ch == 0) c->fmt.ch = 1;
     if (c->fmt.bits == 0) c->fmt.bits = 32;
-    c->cap = (UInt32)(c->fmt.rate * 2);
+    c->cap = (UInt32)(c->fmt.rate * 10);   // 10 秒环：报告线程偶发卡顿也不丢字
     c->ring = calloc(c->cap, sizeof(float));
     if (!c->ring) { free(c); return NULL; }
 
@@ -720,8 +720,8 @@ static void CCAppProbeBoot(void) {
 
         g_reportQ = dispatch_queue_create("cc.appprobe.report", DISPATCH_QUEUE_SERIAL);
         g_reportTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, g_reportQ);
-        dispatch_source_set_timer(g_reportTimer, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
-                                  NSEC_PER_SEC, 200 * NSEC_PER_MSEC);
+        dispatch_source_set_timer(g_reportTimer, dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC),
+                                  500 * NSEC_PER_MSEC, 100 * NSEC_PER_MSEC);
         dispatch_source_set_event_handler(g_reportTimer, ^{ @autoreleasepool { CCReport(); } });
         dispatch_resume(g_reportTimer);
 

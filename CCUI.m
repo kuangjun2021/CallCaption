@@ -1691,6 +1691,7 @@ static void CCRunSpeechSelfTest(BOOL onDevice) {
 @property (nonatomic) BOOL catchingUp;
 @property (nonatomic) CFAbsoluteTime nextRetryAt;
 @property (nonatomic) BOOL restartScheduled;
+@property (nonatomic) NSUInteger deliverGen;   // 只接受最新一次交付的翻译结果
 @property (nonatomic) BOOL onDevice;
 @property (nonatomic) BOOL legacy;
 @property (nonatomic) int failures;
@@ -1850,6 +1851,7 @@ static void CCStreamDeliver(CCStream *st) {
     st.delivered = full;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     st.lastDeliverAt = now;
+    NSUInteger dg = ++st.deliverGen;
     CCLogf(@"stream %@ deliver (silence %.2fs): %@", CCStreamTag(st),
            st.lastVoiceAt > 0 ? now - st.lastVoiceAt : 0, tail);
     // 所有引擎都失败时把 delivered 退回去，下一段继续重试，别把这句话吞掉
@@ -1861,6 +1863,7 @@ static void CCStreamDeliver(CCStream *st) {
     if (st.isLocal) {
         CCTranslateEx(tail, @"zh", @"en", ^(NSString *out, NSString *engine) {
             dispatch_async(dispatch_get_main_queue(), ^{
+                if (dg != st.deliverGen) return;   // 已经有更新的交付，丢掉慢请求
                 if (!out.length) { onFail(); return; }
                 CCUIDeliverLocalTranslated(out);
                 if (engine.length) CCUIDeliverLocalEngine(engine);
@@ -1871,6 +1874,7 @@ static void CCStreamDeliver(CCStream *st) {
     } else {
         CCTranslateEx(tail, @"en", @"zh", ^(NSString *out, NSString *engine) {
             dispatch_async(dispatch_get_main_queue(), ^{
+                if (dg != st.deliverGen) return;   // 已经有更新的交付，丢掉慢请求
                 if (!out.length) { onFail(); return; }
                 CCUIDeliverRemoteTranslated(out);
                 if (engine.length) CCUIDeliverRemoteEngine(engine);
@@ -2043,9 +2047,10 @@ static void CCStreamFinishSession(CCStream *st) {
     if (st.failures > 0) {
         // 只换识别模式重试：绝不回落到“按时间切块”。
         // 用户铁律：宁可暂时没有识别结果，也不切用户说的话。
-        // on-device 第一次失败先在本地重试；连续两次才切云端，避免一次抖动就吃 5s 云延迟。
+        // 对方优先 on-device。只有连续 4 次失败才切云端（给本地冲突留出自动暂停的时间），
+        // 云端一旦失败立刻回 on-device；避免一次抖动就永久吃 5s 云延迟。
         if (st.onDevice) {
-            if (st.failures >= 2) st.onDevice = NO;
+            if (st.failures >= 4) st.onDevice = NO;
         } else {
             st.onDevice = YES;
         }

@@ -353,6 +353,7 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
     CFAbsoluteTime lastPartialAt;
     CFAbsoluteTime nextRetryAt;
     CFAbsoluteTime nextDeliverAt;
+    CFAbsoluteTime rotateAt;
     CFAbsoluteTime suspendedUntil;
     BOOL running;
     BOOL starting;
@@ -362,6 +363,7 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
     int consecutiveFailures;
     int fastFailures;              // 短命会话（start 后 3 秒内被 1110/1101 杀掉）的次数
     NSUInteger callGen;
+    NSUInteger deliverGen;         // 只接受最新一次交付的翻译结果，防止慢请求乱序重复播报
 }
 - (void)start;
 - (void)stop;
@@ -537,7 +539,7 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
     nextRetryAt = CFAbsoluteTimeGetCurrent() + delay;
 }
 
-// 只探测文件尾部 0.1 秒有没有人声，不推进 offset、不丢音频。
+// 只探测文件尾部有没有人声，不推进 offset、不丢音频。
 // 我方没说话时不起 SFSpeech task：既省云端/本地资源，也避免和对方通道抢会话。
 - (BOOL)hasRecentVoice {
     NSString *p = [CC_DIR stringByAppendingPathComponent:@"local16k.wav"];
@@ -545,7 +547,9 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
     if (!at) return NO;
     unsigned long long size = [at[NSFileSize] unsignedLongLongValue];
     if (size <= 44) return NO;
-    NSUInteger want = 16000;                // 0.5s @ 16k mono s16，短促的“嗯/好”也能抓到
+    // 第一次起识别（offset 还没动）扫最近 3 秒，避免通话刚接通时一句短话落在探测窗之外；
+    // 之后只需 0.5 秒，短促的“嗯/好”也能抓到。
+    NSUInteger want = (offset <= 44) ? 96000 : 16000;
     if (size - 44 < (unsigned long long)want)
         want = (NSUInteger)(size - 44) & ~(NSUInteger)1;
     if (!want) return NO;
@@ -632,12 +636,13 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
            lastDeliverAt - lastTextAt, tail);
     CCTransportSendLine([@"LI|" stringByAppendingString:tail]);
     NSUInteger cg = callGen;
+    NSUInteger dg = ++deliverGen;
     __weak CCLocalASR *weakSelf = self;
     CCTranslateEx(tail, @"zh", @"en", ^(NSString *out, NSString *engine) {
         dispatch_async(g_stateQ, ^{
             CCLocalASR *s = weakSelf;
             if (!s) return;
-            if (!s->running || cg != s->callGen) return;
+            if (!s->running || cg != s->callGen || dg != s->deliverGen) return;
             if (![[NSFileManager defaultManager] fileExistsAtPath:CC_ARM_PATH]) return;
             if (!out.length) {
                 if ([s->delivered isEqualToString:full]) s->delivered = prev;
@@ -677,6 +682,7 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
     if (stable > 0.8 || age > 58.0) {
         CCLogf(@"local asr rotate at %.0fs", age);
         [self deliverNow];
+        rotateAt = now;
         rotating = YES;
         [req endAudio];
     }
@@ -701,10 +707,31 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
             nextRetryAt = now + 0.2;
         }
     }
-    if (!req || rotating) return;
+    if (rotating) {
+        // endAudio 后正常会来 final/error；2.5 秒还没来就自己收尾，别把 SFSpeech 会话挂死。
+        if (req && now - rotateAt > 2.5) {
+            CCLogf(@"local asr rotate timeout");
+            task = nil;
+            req = nil;
+            rotating = NO;
+            starting = NO;
+            nextRetryAt = now + 0.2;
+        }
+        return;
+    }
+    if (!req) return;
     [self feed];
     [self checkEndpoint:now];
     [self maybeRotate:now];
+    // 我方说完并安静 2.5 秒后主动收掉本地 task，把 SFSpeech 会话让回给“对方”通道。
+    // 下一句人声到来时 tick 会重新起 task，音频一直在文件里，不会漏。
+    if (req && !rotating && !useCloud &&
+        now - lastVoiceAt > 2.5 && now - lastDeliverAt > 2.0) {
+        CCLogf(@"local asr idle end");
+        rotateAt = now;
+        rotating = YES;
+        [req endAudio];
+    }
 }
 
 - (void)stop {

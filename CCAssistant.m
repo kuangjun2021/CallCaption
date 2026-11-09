@@ -19,6 +19,7 @@
 #import <unistd.h>
 #import <sys/stat.h>
 #import <uuid/uuid.h>
+#import <dlfcn.h>
 
 #define CC_ASSIST_DIR  @"/var/mobile/Library/CallCaption"
 #define CC_ASSIST_LOG  @"/var/mobile/Library/CallCaption/assistant.log"
@@ -193,7 +194,26 @@ static void CCSetArg(NSInvocation *inv, NSUInteger idx, const char *type,
     return r;
 }
 
+- (void)loadSiriFrameworks {
+    static BOOL tried = NO;
+    if (tried) return;
+    tried = YES;
+    const char *cands[] = {
+        "/System/Library/PrivateFrameworks/SiriCore.framework/SiriCore",
+        "/System/Library/PrivateFrameworks/AssistantServices.framework/AssistantServices",
+        "/System/Library/PrivateFrameworks/SpeechRecognitionCore.framework/SpeechRecognitionCore",
+        "/System/Library/PrivateFrameworks/EmbeddedAcousticRecognition.framework/EmbeddedAcousticRecognition",
+        "/usr/lib/libSiriCore.dylib"
+    };
+    for (size_t i = 0; i < sizeof(cands)/sizeof(cands[0]); i++) {
+        void *h = dlopen(cands[i], RTLD_LAZY | RTLD_GLOBAL);
+        CCLogA(@"dlopen %s -> %s%s", cands[i], h ? "OK" : "FAIL",
+               h ? "" : (dlerror() ?: ""));
+    }
+}
+
 - (void)logEnvironment {
+    [self loadSiriFrameworks];
     Class cls = NSClassFromString(@"SiriCoreLocalSpeechRecognizer");
     CCLogA(@"env: SiriCoreLocalSpeechRecognizer=%@", cls ? @"YES" : @"NO");
     if (cls) {
@@ -215,6 +235,7 @@ static void CCSetArg(NSInvocation *inv, NSUInteger idx, const char *type,
 
 - (BOOL)startRecognizer {
     if (self.running) return YES;
+    [self loadSiriFrameworks];
     Class cls = NSClassFromString(@"SiriCoreLocalSpeechRecognizer");
     if (!cls) { CCLogA(@"start: class missing"); return NO; }
 

@@ -15,6 +15,7 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <objc/message.h>
 #import <stdio.h>
 #import <unistd.h>
 #import <sys/stat.h>
@@ -308,36 +309,17 @@ static void CCSetDoubleSel(id o, NSString *selName, double v) {
     CCLogA(@"core: allocated %p", rec);
     SEL initSel = NSSelectorFromString(@"initWithDelegate:instanceUUID:");
     if (rec && [rec respondsToSelector:initSel]) {
-        CCLogA(@"core: getting init signature");
-        NSMethodSignature *isig = [rec methodSignatureForSelector:initSel];
-        if (isig) {
-            NSInvocation *iinv = [NSInvocation invocationWithMethodSignature:isig];
-            iinv.target = rec;
-            iinv.selector = initSel;
-            id dd = d;
-            [iinv setArgument:&dd atIndex:2];
-            const char *t3 = [isig getArgumentTypeAtIndex:3];
-            uuid_t uu; uuid_generate(uu);
-            if (t3[0] == '*' || t3[0] == '^') {
-                void *p = uu;
-                [iinv setArgument:&p atIndex:3];
-            } else {
-                unsigned char b = 0;
-                [iinv setArgument:&b atIndex:3];
-            }
-            CCLogA(@"core: init sig ret=%s arg2=%s arg3=%s",
-                   [isig methodReturnType], [isig getArgumentTypeAtIndex:2], t3);
-            CCLogA(@"core: invoking init");
-            @try {
-                [iinv invoke];
-                __unsafe_unretained id out = nil;
-                [iinv getReturnValue:&out];
-                rec = out;
-                CCLogA(@"core: initWithDelegate uuid type=%s -> %@", t3,
-                       rec ? @"OK" : @"nil");
-            } @catch (NSException *e) {
-                CCLogA(@"core: initWithDelegate exc %@", e.reason);
-            }
+        uuid_t uu;
+        uuid_generate(uu);
+        CCLogA(@"core: calling initWithDelegate (uuid pointer)");
+        @try {
+            // 绕开 NSMethodSignature/NSInvocation：该私有类的签名会让 helper 崩溃
+            typedef id (*CCInitFn)(id, SEL, id, void *);
+            id out = ((CCInitFn)objc_msgSend)(rec, initSel, d, (void *)uu);
+            rec = out;
+            CCLogA(@"core: initWithDelegate -> %@", rec ? @"OK" : @"nil");
+        } @catch (NSException *e) {
+            CCLogA(@"core: initWithDelegate exc %@", e.reason);
         }
     } else {
         rec = [rec init];

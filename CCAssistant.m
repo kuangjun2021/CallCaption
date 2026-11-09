@@ -142,6 +142,21 @@ static NSString *CCTextFromObject(id o) {
     } @catch (NSException *e) { CCLogA(@"package exc %@", e.reason); }
 }
 
+- (void)speechServiceDidRecognizeTokens:(NSArray *)tokens {
+    [self localSpeechRecognizer:nil didRecognizeTokens:tokens];
+}
+- (void)speechServiceDidFinishRecognitionWithStatistics:(NSDictionary *)stats error:(NSError *)err {
+    [self localSpeechRecognizer:nil didCompletionRecognitionWithStatistics:stats error:err];
+}
+- (void)speechServiceDidProcessAudioDuration:(double)d {
+    [self localSpeechRecognizer:nil didProcessAudioDuration:d];
+}
+- (void)speechServiceDidRecognizePackage:(id)package {
+    [self localSpeechRecognizer:nil didRecognizePackage:package];
+}
+- (void)speechServiceDidRecognizeRawEagerRecognitionCandidate:(id)cand {
+    [self localSpeechRecognizer:nil didRecognizeRawEagerRecognitionCandidate:cand];
+}
 - (void)coreEmbeddedSpeechRecognizer:(id)r didRecognizeTokens:(NSArray *)tokens {
     [self localSpeechRecognizer:r didRecognizeTokens:tokens];
 }
@@ -281,6 +296,12 @@ static void CCSetDoubleSel(id o, NSString *selName, double v) {
 - (BOOL)startCoreEmbedded:(Class)cls {
     CCAssistantDelegate *d = [CCAssistantDelegate new];
     self.delegate = d;
+    // 有些版本会用 conformsToProtocol 检查 delegate，运行时补上协议声明
+    Protocol *p1 = objc_getProtocol("CoreEmbeddedSpeechRecognizerDelegate");
+    if (p1) class_addProtocol([d class], p1);
+    Protocol *p2 = objc_getProtocol("SiriCoreLocalSpeechRecognizerDelegate");
+    if (p2) class_addProtocol([d class], p2);
+
     id rec = [cls alloc];
     SEL initSel = NSSelectorFromString(@"initWithDelegate:instanceUUID:");
     if (rec && [rec respondsToSelector:initSel]) {
@@ -300,6 +321,8 @@ static void CCSetDoubleSel(id o, NSString *selName, double v) {
                 unsigned char b = 0;
                 [iinv setArgument:&b atIndex:3];
             }
+            CCLogA(@"core: init sig ret=%s arg2=%s arg3=%s",
+                   [isig methodReturnType], [isig getArgumentTypeAtIndex:2], t3);
             @try {
                 [iinv invoke];
                 __unsafe_unretained id out = nil;
@@ -314,6 +337,16 @@ static void CCSetDoubleSel(id o, NSString *selName, double v) {
     } else {
         rec = [rec init];
         CCLogA(@"core: falling back to init -> %@", rec ? @"OK" : @"nil");
+    }
+    if (!rec) {
+        // 最后再试一次裸 init（部分版本 initWithDelegate 不可用）
+        @try {
+            rec = [[cls alloc] init];
+            CCLogA(@"core: fallback plain init -> %@", rec ? @"OK" : @"nil");
+            if (rec) [rec setValue:d forKey:@"delegate"];
+        } @catch (NSException *e) {
+            CCLogA(@"core: fallback init exc %@", e.reason);
+        }
     }
     if (!rec) { CCLogA(@"core: init failed"); return NO; }
     if (![rec valueForKey:@"delegate"]) {

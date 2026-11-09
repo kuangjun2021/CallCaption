@@ -537,7 +537,7 @@ static UIView *MakeBox(NSString *recogHeader) {
 
 static void EnsureCaptionUI(void) {
     if (g_boxesBuilt) return;
-    g_remoteBox = MakeBox(@"对方语音");
+    g_remoteBox = MakeBox(@"来电语音");
     NSNumber *rx = CCPref(@"RemoteBoxX"), *ry = CCPref(@"RemoteBoxY");
     if ([rx isKindOfClass:[NSNumber class]] && [ry isKindOfClass:[NSNumber class]]) {
         g_remoteBox.center = CGPointMake([rx floatValue], [ry floatValue]);
@@ -545,7 +545,7 @@ static void EnsureCaptionUI(void) {
         g_remoteBox.center = CGPointMake(ScreenW() / 2.0, ScreenH() - 520);
     }
 
-    g_localBox = MakeBox(@"我的语音");
+    g_localBox = MakeBox(@"去电语音");
     NSNumber *lx = CCPref(@"LocalBoxX"), *ly = CCPref(@"LocalBoxY");
     if ([lx isKindOfClass:[NSNumber class]] && [ly isKindOfClass:[NSNumber class]]) {
         g_localBox.center = CGPointMake([lx floatValue], [ly floatValue]);

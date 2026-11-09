@@ -51,8 +51,8 @@ static void CCLogA(NSString *fmt, ...) {
         }
 #ifdef CC_ASSISTANT_EMBED
         // 同时写进用户平时发送的 probe.log，省得再找 assistant.log
-        NSString *pl = [NSString stringWithFormat:@"[Siri] %@
-", msg];
+        NSString *pl = [NSString stringWithFormat:@"[Siri] %@", msg];
+        pl = [pl stringByAppendingFormat:@"%c", 10];
         FILE *pfp = fopen(CC_ASSIST_PROBE.fileSystemRepresentation, "a");
         if (pfp) {
             fputs(pl.UTF8String, pfp);

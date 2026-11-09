@@ -1594,7 +1594,7 @@ static void CCRunSpeechSelfTest(BOOL onDevice) {
         }];
 }
 
-#pragma mark - 0.17.0 流式识别（LCT 同款 SFSpeechAudioBufferRecognitionRequest）
+#pragma mark - 0.17.1 流式识别（LCT 同款 SFSpeechAudioBufferRecognitionRequest）
 //
 // 旧方案：每 2~6 秒切一块 WAV，串行跑 SFSpeechURLRecognitionRequest。
 //   - 6 秒硬切会把单词劈成两半，重叠去重靠“单词完全相等”，识别不一致就丢词；
@@ -1638,9 +1638,9 @@ static void CCRunSpeechSelfTest(BOOL onDevice) {
 static CCStream *g_rs;
 static CCStream *g_ls;
 static NSTimer *g_streamTimer;
-// 0.17.0 诊断：先只跑“对方”一路流式，验证单任务是否稳定。
+// 0.17.1 诊断：先只跑“对方”一路流式，验证单任务是否稳定。
 // 本地方向的麦克风音频仍由守护进程连续写入 local16k.wav（没丢），只是暂停识别。
-static BOOL g_localStreamPaused = NO;
+static BOOL g_localStreamPaused = YES;
 
 static CCStream *CCStreamFor(BOOL local) {
     if (!g_rs) { g_rs = [CCStream new]; g_rs.gain = 1.0; }
@@ -2058,10 +2058,11 @@ static void CCStreamCallActive(BOOL active) {
         r.callStart = now;
         l.callStart = now;
         BOOL cloud = CCPrefBool(CC_K_CLOUD_ASR, YES);
-        r.onDevice = !cloud;
+        // 对方方向：云端正向优先（实测云端可用；本地流式 1110），失败会自动退本地
+        r.onDevice = NO;
         l.onDevice = !cloud;
-        CCLogf(@"stream: call active, cloud=%d localPaused=%d", cloud,
-               g_localStreamPaused);
+        CCLogf(@"stream: call active, cloud=%d remoteCloudFirst=1 localPaused=%d",
+               cloud, g_localStreamPaused);
     } else {
         CCStreamStop(r);
         CCStreamStop(l);
@@ -2124,7 +2125,7 @@ void CCUIBoot(void) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.17.0)");
+        CCLogLine(@"CallCaption UI booted (single window v0.17.1)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

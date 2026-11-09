@@ -161,7 +161,7 @@ static void CCGenerateUplinkTTSStartNext(void) {
     NSString *text = g_enTTSQ.firstObject;
     [g_enTTSQ removeObjectAtIndex:0];
     CCGenerateUplinkTTSNow(text, ^{
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
                        g_stateQ, ^{ CCGenerateUplinkTTSStartNext(); });
     });
 }
@@ -173,6 +173,10 @@ static void CCGenerateUplinkTTSQueued(NSString *text) {
     if (g_enTTSBusy) return;
     g_enTTSBusy = YES;
     CCGenerateUplinkTTSStartNext();
+}
+
+static void CCGenerateUplinkTTSClear(void) {
+    [g_enTTSQ removeAllObjects];
 }
 
 // LCT 的上行注入：用 writeUtterance:toBufferCallback: 把英文 TTS 合成成 PCM，
@@ -325,6 +329,7 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
     BOOL useCloud;
     int failures;
     int consecutiveFailures;
+    int fastFailures;              // 短命会话（start 后 3 秒内被 1110/1101 杀掉）的次数
     NSUInteger callGen;
 }
 - (void)start;
@@ -348,6 +353,7 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
     running = YES;
     failures = 0;
     consecutiveFailures = 0;
+    fastFailures = 0;
     useCloud = NO;
     suspendedUntil = 0;
     nextRetryAt = 0;
@@ -405,7 +411,10 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
                 CCLocalASR *s = weakSelf;
                 if (!s || s->task != t) return;
                 s->starting = NO;
-                if (res) [s handleResult:res];
+                if (res) {
+                    [s handleResult:res];
+                    if (res.isFinal) return;   // final 已处理并重启新 task，忽略同一回调里的 trailing error
+                }
                 if (err) [s handleError:err];
             });
         }];
@@ -420,6 +429,7 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
 
 - (void)handleResult:(SFSpeechRecognitionResult *)res {
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (![[NSFileManager defaultManager] fileExistsAtPath:CC_ARM_PATH]) return;
     NSString *t = CCASRTrim(res.bestTranscription.formattedString);
     if (t.length) {
         if (!text.length)
@@ -429,6 +439,7 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
         lastTextAt = now;
         failures = 0;
         consecutiveFailures = 0;
+        if (now - sessionStart > 3.0) fastFailures = 0;   // 存活超过 3 秒才算健康会话
         NSString *tail = CCASRTail(text, delivered);
         if (tail.length && now - lastPartialAt > 0.30 &&
             ![tail isEqualToString:(lastPartial ?: @"")]) {
@@ -457,22 +468,26 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
     if (code != 301 && code != 216) {
         failures++;
         consecutiveFailures++;
-        if ((code == 1110 || code == 1101) && consecutiveFailures >= 3) {
-            // 如果全局只允许一条 SFSpeech，连续 1110 说明和 SpringBoard 抢不到。
-            // 暂停 20 秒，先保对方通道；到点自动再试，不永久放弃。
-            suspendedUntil = now + 20.0;
-            consecutiveFailures = 0;
-            CCLogf(@"local asr suspend 20s (possible global SFSpeech conflict)");
-            CCTransportSendLine(@"S|● 我方识别暂不可用，20 秒后自动重试");
+        if (code == 1110 || code == 1101) {
+            // 如果全局只允许一条 SFSpeech，我方 task 一启动就会被对方杀掉。
+            // 用“短命会话”计数识别这种冲突：start 后 3 秒内就 1110/1101，连续 3 次
+            // 就暂停 20 秒，先保对方通道；到点自动再试，不永久放弃。
+            if (now - sessionStart < 3.0) fastFailures++;
+            else fastFailures = 0;
+            if (fastFailures >= 3) {
+                suspendedUntil = now + 20.0;
+                fastFailures = 0;
+                CCLogf(@"local asr suspend 20s (possible global SFSpeech conflict)");
+                CCTransportSendLine(@"S|● 我方识别暂不可用，20 秒后自动重试");
+            }
         }
         if (!useCloud && failures >= 2) {
             useCloud = YES;
             CCLogf(@"local asr fallback to cloud");
         }
-        [self deliverNow];
-    } else if (rotating) {
-        [self deliverNow];
     }
+    // 301/216 也可能带着已经识别出的半句；先交付，再重启，不能默默吞掉。
+    [self deliverNow];
     task = nil;
     req = nil;
     starting = NO;
@@ -532,6 +547,8 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
 
 - (void)deliverNow {
     if (!text.length) return;
+    // 挂断后 arm 文件会被删除；不再往字幕/TTS 送任何迟到的句子。
+    if (![[NSFileManager defaultManager] fileExistsAtPath:CC_ARM_PATH]) return;
     NSString *full = text;
     NSString *tail = CCASRTail(full, delivered);
     if (!tail.length) return;
@@ -548,6 +565,7 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
             CCLocalASR *s = weakSelf;
             if (!s) return;
             if (!s->running || cg != s->callGen) return;
+            if (![[NSFileManager defaultManager] fileExistsAtPath:CC_ARM_PATH]) return;
             if (!out.length) {
                 if ([s->delivered isEqualToString:full]) s->delivered = prev;
                 s->nextDeliverAt = CFAbsoluteTimeGetCurrent() + 2.0;
@@ -617,6 +635,7 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
     suspendedUntil = 0;
     nextRetryAt = 0;
     nextDeliverAt = 0;
+    fastFailures = 0;
     CCLogf(@"local asr stopped");
 }
 
@@ -1735,6 +1754,7 @@ static void CheckArm(void) {
         if (armed && !lastArmed) {
             // 新通话：先停我方 ASR，再重建桥文件；ASR 只读文件，不碰 Tap。
             [g_localASR stop];
+            CCGenerateUplinkTTSClear();
             // 新通话：重置 Tap 探测，从 speaker(-2) 开始，最多试 -1 / -3。
             g_remote->tapProbeCount = 0;
             g_remote.tapPID = CC_TAP_PID_SPEAKER;
@@ -1742,6 +1762,21 @@ static void CheckArm(void) {
             // 0.17.1 在这里 stop 通道并直接 fopen，结果守护进程每 6~7 秒重启一次
             // （日志里 44 次 audioservice started），整条链路等于没有运行。
             NSFileManager *fm2 = [NSFileManager defaultManager];
+            // 清掉上一通可能残留的 TTS 文件，避免新通话一接通就冒出旧句子。
+            NSString *waDocs = CCFindWhatsAppDocs();
+            if (waDocs) {
+                [fm2 removeItemAtPath:[waDocs stringByAppendingPathComponent:@"cc_tts.wav"]
+                                error:nil];
+                [fm2 removeItemAtPath:[waDocs stringByAppendingPathComponent:@"cc_tts_zh.wav"]
+                                error:nil];
+                NSString *reset = [waDocs stringByAppendingPathComponent:@"cc_tts_reset"];
+                [@"" writeToFile:reset atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                chmod(reset.fileSystemRepresentation, 0666);
+            }
+            [fm2 removeItemAtPath:[CC_DIR stringByAppendingPathComponent:@"cc_tts.wav"]
+                            error:nil];
+            [fm2 removeItemAtPath:[CC_DIR stringByAppendingPathComponent:@"cc_tts_zh.wav"]
+                            error:nil];
             CCRemoteTeeClose();
             [fm2 removeItemAtPath:[CC_DIR stringByAppendingPathComponent:@"remote16k.wav"]
                             error:nil];
@@ -1757,6 +1792,7 @@ static void CheckArm(void) {
         lastArmed = armed;
         if (!armed) {
             [g_localASR stop];
+            CCGenerateUplinkTTSClear();
             [g_remote stop];
             [g_local stop];
             return;

@@ -1344,13 +1344,26 @@ static void CCTTSBufferStartNext(BOOL zh) {
     NSArray *item = q.firstObject;
     [q removeObjectAtIndex:0];
     CCTTSBufferNow(item[0], item[1], item[2], ^{
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
+        // 给守护进程复制 + AppProbe 读取留足时间，再写下一个文件
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.8 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{ CCTTSBufferStartNext(zh); });
     });
 }
 
+static void CCTTSBufferCancelPending(void) {
+    [g_ttsQEn removeAllObjects];
+    [g_ttsQZh removeAllObjects];
+}
+
 static void CCTTSBufferEnqueue(NSString *text, NSString *lang, NSString *fileName) {
     if (!text.length) return;
+    if (!g_callActive) return;               // 挂断后不再生成新的 TTS
+    if (![NSThread isMainThread]) {          // 翻译回调可能在后台队列；TTS 队列只允许主线程改
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CCTTSBufferEnqueue(text, lang, fileName);
+        });
+        return;
+    }
     BOOL zh = [lang hasPrefix:@"zh"];
     NSMutableArray *q = zh ? g_ttsQZh : g_ttsQEn;
     if (!q) {
@@ -1667,6 +1680,7 @@ static void CCRunSpeechSelfTest(BOOL onDevice) {
 @property (nonatomic) CFAbsoluteTime lastVoiceAt;
 @property (nonatomic) CFAbsoluteTime lastTextAt;
 @property (nonatomic) CFAbsoluteTime lastDeliverAt;
+@property (nonatomic) CFAbsoluteTime nextDeliverAt;
 @property (nonatomic) CFAbsoluteTime lastUIAt;
 @property (nonatomic) CFAbsoluteTime sessionStart;
 @property (nonatomic) CFAbsoluteTime callStart;
@@ -1813,6 +1827,7 @@ static void CCStreamDeliver(CCStream *st) {
     // 所有引擎都失败时把 delivered 退回去，下一段继续重试，别把这句话吞掉
     void (^onFail)(void) = ^{
         if ([st.delivered isEqualToString:full]) st.delivered = prevDelivered;
+        st.nextDeliverAt = CFAbsoluteTimeGetCurrent() + 2.0;   // 翻译失败退避，别每 200ms 打一次
         CCLogf(@"stream %@ translate failed, will retry", CCStreamTag(st));
     };
     if (st.isLocal) {
@@ -1894,6 +1909,10 @@ static void CCStreamStart(CCStream *st) {
         });
         return;
     }
+    if (st.onDevice && !st.recog.supportsOnDeviceRecognition) {
+        CCLogf(@"stream %@ on-device model unavailable, fallback to cloud", CCStreamTag(st));
+        st.onDevice = NO;
+    }
     SFSpeechAudioBufferRecognitionRequest *r =
         [[SFSpeechAudioBufferRecognitionRequest alloc] init];
     r.shouldReportPartialResults = YES;
@@ -1914,6 +1933,7 @@ static void CCStreamStart(CCStream *st) {
     st.delivered = @"";            // 新会话只包含新音频，旧文本不能用来做差集
     st.lastTextAt = 0;
     st.lastDeliverAt = CFAbsoluteTimeGetCurrent();   // 防止首个 partial 被 12s 超时立即送出
+    st.nextDeliverAt = 0;
     st.rotating = NO;
     st.sessionStart = CFAbsoluteTimeGetCurrent();
     CCLogf(@"stream %@ start onDevice=%d locale=%@ avail=%d supportOD=%d auth=%ld",
@@ -1991,7 +2011,12 @@ static void CCStreamFinishSession(CCStream *st) {
     if (st.failures > 0) {
         // 只换识别模式重试：绝不回落到“按时间切块”。
         // 用户铁律：宁可暂时没有识别结果，也不切用户说的话。
-        st.onDevice = !st.onDevice;
+        // on-device 第一次失败先在本地重试；连续两次才切云端，避免一次抖动就吃 5s 云延迟。
+        if (st.onDevice) {
+            if (st.failures >= 2) st.onDevice = NO;
+        } else {
+            st.onDevice = YES;
+        }
         CCLogf(@"stream %@ retry with onDevice=%d (failures=%d)",
                CCStreamTag(st), st.onDevice, st.failures);
     }
@@ -2015,7 +2040,8 @@ static void CCStreamReset(CCStream *st) {
     st.hadVoice = NO; st.rotating = NO; st.starting = NO; st.catchingUp = NO;
     st.failures = 0; st.legacy = NO;
     st.nextRetryAt = 0; st.restartScheduled = NO;
-    st.lastVoiceAt = 0; st.lastTextAt = 0; st.lastDeliverAt = 0; st.lastUIAt = 0;
+    st.lastVoiceAt = 0; st.lastTextAt = 0; st.lastDeliverAt = 0; st.nextDeliverAt = 0;
+    st.lastUIAt = 0;
     st.sessionStart = 0; st.gain = 1.0;
 }
 
@@ -2025,7 +2051,7 @@ static void CCStreamStop(CCStream *st) {
     st.path = nil; st.offset = 0;
     st.text = @""; st.delivered = @"";
     st.hadVoice = NO; st.rotating = NO; st.starting = NO; st.catchingUp = NO;
-    st.nextRetryAt = 0; st.restartScheduled = NO;
+    st.nextRetryAt = 0; st.restartScheduled = NO; st.nextDeliverAt = 0;
 }
 
 static void CCStreamTick(CCStream *st) {
@@ -2071,6 +2097,7 @@ static void CCStreamTick(CCStream *st) {
         st.pending = nil;
         st.hadVoice = NO; st.failures = 0;
         st.lastVoiceAt = 0; st.lastTextAt = 0; st.lastDeliverAt = 0;
+        st.nextDeliverAt = 0;
         st.sessionStart = 0; st.gain = 1.0;
         CCStreamStart(st);
     }
@@ -2125,7 +2152,7 @@ static void CCStreamTick(CCStream *st) {
 
     // v0.18 端点：标点稳定 0.3s / 静音 0.8s 且 >=3 词 / 短句 1.8s / 15s 上限且 >=4 词。
     // VAD 只决定什么时候翻译/播报，不影响抓音；音频仍然连续进识别器。
-    if (st.text.length) {
+    if (st.text.length && now >= st.nextDeliverAt) {
         NSString *tail = CCStreamNewTailStrict(st.text, st.delivered);
         if (tail.length) {
             double silence = st.lastVoiceAt > 0 ? now - st.lastVoiceAt : 0;
@@ -2161,6 +2188,7 @@ static void CCStreamCallActive(BOOL active) {
     CCStream *r = CCStreamFor(NO);
     CCStream *l = CCStreamFor(YES);
     if (active) {
+        CCTTSBufferCancelPending();   // 新通话不播上一通残留的 TTS
         CCStreamReset(r);
         CCStreamReset(l);
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
@@ -2174,6 +2202,7 @@ static void CCStreamCallActive(BOOL active) {
         CCLogf(@"stream: call active, cloudPref=%d remoteOnDevice=1 localInDaemon=1",
                cloud);
     } else {
+        CCTTSBufferCancelPending();
         CCStreamStop(r);
         CCStreamStop(l);
         CCLogf(@"stream: call ended");

@@ -382,6 +382,26 @@ static double g_duckRemote = 0.45;   // v0.18：中文播报时对方原音保�
 static double g_duckLocal = 0.30;
 static NSTimeInterval g_cfgMtime;
 
+// 守护进程在 arm 时写这个标记：新通话开始，丢掉上一通还没播完的 TTS 环形缓冲，
+// 避免接通瞬间冒出上一通的最后一句。
+static void CCResetTTSIfNeeded(void) {
+    @try {
+        NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                              NSUserDomainMask, YES) firstObject];
+        if (!docs.length) return;
+        NSString *marker = [docs stringByAppendingPathComponent:@"cc_tts_reset"];
+        if (![[NSFileManager defaultManager] fileExistsAtPath:marker]) return;
+        atomic_store(&g_ttsHead, 0);
+        atomic_store(&g_ttsTail, 0);
+        atomic_store(&g_ttsZhHead, 0);
+        atomic_store(&g_ttsZhTail, 0);
+        g_ttsMtime = 0;
+        g_ttsZhMtime = 0;
+        [[NSFileManager defaultManager] removeItemAtPath:marker error:nil];
+        CCAppLog(@"tts reset for new call");
+    } @catch (NSException *e) { }
+}
+
 static void CCLoadTTSIfNeeded(void) {
     @try {
         NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
@@ -616,6 +636,7 @@ static OSStatus CCHookedRender(AudioUnit unit, AudioUnitRenderActionFlags *flags
 
 // ---------- 后台汇报 ----------
 static void CCReport(void) {
+    CCResetTTSIfNeeded();
     CCLoadTTSIfNeeded();
     CCLoadZhTTSIfNeeded();
     CCLoadConfigIfNeeded();

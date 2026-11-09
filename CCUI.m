@@ -12,6 +12,7 @@
 #import <objc/runtime.h>
 #import <sys/stat.h>
 #import <stdio.h>
+#include <stdlib.h>
 
 static void CCTTSBuffer(NSString *text, NSString *lang, NSString *fileName);
 
@@ -1750,9 +1751,21 @@ static NSString *CCStreamNewTail(NSString *full, NSString *delivered) {
     return @"";
 }
 
-// v0.18 交付专用差集：ASR 改写前文时只取真正新增的后缀；
-// 如果 delivered 的尾部和 full 的头部能对上，说明只是句首被改写，不能整段重发。
-// 完全对不上就返回空，等下一次 partial/final——宁可晚一点，也不重复播报。
+// v0.18 交付专用差集：用词级 LCS 对齐已交付文本和当前文本。
+// 只交付“最后一个已对齐词之后”的新内容；ASR 改写句首/插入词时不会整段重发，
+// 也不会像简单前缀法那样把已经播过的半句再播一遍。
+static NSString *CCStreamWordKey(NSString *w) {
+    static NSCharacterSet *cs;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSMutableCharacterSet *m = [[NSCharacterSet punctuationCharacterSet] mutableCopy];
+        [m formUnionWithCharacterSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        cs = [m copy];
+    });
+    NSString *s = [[w lowercaseString] stringByTrimmingCharactersInSet:cs];
+    return s.length ? s : [w lowercaseString];
+}
+
 static NSString *CCStreamNewTailStrict(NSString *full, NSString *delivered) {
     if (!full.length) return @"";
     if (!delivered.length) return full;
@@ -1762,31 +1775,46 @@ static NSString *CCStreamNewTailStrict(NSString *full, NSString *delivered) {
     }
     NSArray *d = [delivered componentsSeparatedByString:@" "];
     NSArray *f = [full componentsSeparatedByString:@" "];
-    NSUInteger maxK = MIN(d.count, f.count);
-    NSUInteger best = 0;
-    for (NSUInteger k = 1; k <= maxK; k++) {
-        BOOL ok = YES;
-        for (NSUInteger i = 0; i < k; i++) {
-            NSString *a = [d[d.count - k + i] lowercaseString];
-            NSString *b = [f[i] lowercaseString];
-            if (![a isEqualToString:b]) { ok = NO; break; }
+    NSUInteger dc = d.count, fc = f.count;
+    if (!dc || !fc) return @"";
+    NSMutableArray *dkeys = [NSMutableArray arrayWithCapacity:dc];
+    NSMutableArray *fkeys = [NSMutableArray arrayWithCapacity:fc];
+    for (NSString *w in d) [dkeys addObject:CCStreamWordKey(w)];
+    for (NSString *w in f) [fkeys addObject:CCStreamWordKey(w)];
+    NSUInteger *dp = calloc((dc + 1) * (fc + 1), sizeof(NSUInteger));
+    if (!dp) return @"";
+    for (NSUInteger i = 1; i <= dc; i++) {
+        NSString *dk = dkeys[i - 1];
+        for (NSUInteger j = 1; j <= fc; j++) {
+            if ([dk isEqualToString:fkeys[j - 1]])
+                dp[i * (fc + 1) + j] = dp[(i - 1) * (fc + 1) + (j - 1)] + 1;
+            else {
+                NSUInteger a = dp[(i - 1) * (fc + 1) + j];
+                NSUInteger b = dp[i * (fc + 1) + (j - 1)];
+                dp[i * (fc + 1) + j] = a > b ? a : b;
+            }
         }
-        if (ok) best = k;
     }
-    if (best > 0) {
-        if (best >= f.count) return @"";
-        return [[f subarrayWithRange:NSMakeRange(best, f.count - best)]
-                componentsJoinedByString:@" "];
+    NSUInteger i = dc, j = fc;
+    NSInteger lastFull = -1;
+    while (i > 0 && j > 0) {
+        NSString *dk = dkeys[i - 1];
+        NSString *fk = fkeys[j - 1];
+        if ([dk isEqualToString:fk]) {
+            if (lastFull < 0) lastFull = (NSInteger)(j - 1);   // 从后往前第一个对齐点
+            i--; j--;
+        } else if (dp[(i - 1) * (fc + 1) + j] >= dp[i * (fc + 1) + (j - 1)]) {
+            i--;
+        } else {
+            j--;
+        }
     }
-    NSUInteger i = 0;
-    while (i < d.count && i < f.count &&
-           [[d[i] lowercaseString] isEqualToString:[f[i] lowercaseString]]) i++;
-    if (i > 0) {
-        if (i >= f.count) return @"";
-        return [[f subarrayWithRange:NSMakeRange(i, f.count - i)]
-                componentsJoinedByString:@" "];
-    }
-    return @"";
+    free(dp);
+    if (lastFull < 0) return @"";
+    NSUInteger start = (NSUInteger)lastFull + 1;
+    if (start >= fc) return @"";
+    return [[f subarrayWithRange:NSMakeRange(start, fc - start)]
+            componentsJoinedByString:@" "];
 }
 
 static void CCStreamShowPartial(CCStream *st, NSString *t) {
@@ -1832,19 +1860,23 @@ static void CCStreamDeliver(CCStream *st) {
     };
     if (st.isLocal) {
         CCTranslateEx(tail, @"zh", @"en", ^(NSString *out, NSString *engine) {
-            if (!out.length) { onFail(); return; }
-            CCUIDeliverLocalTranslated(out);
-            if (engine.length) CCUIDeliverLocalEngine(engine);
-            if (CCPrefBool(CC_K_TTS_ENABLED, YES))
-                CCTTSBuffer(out, @"en-US", @"cc_tts.wav");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (!out.length) { onFail(); return; }
+                CCUIDeliverLocalTranslated(out);
+                if (engine.length) CCUIDeliverLocalEngine(engine);
+                if (CCPrefBool(CC_K_TTS_ENABLED, YES))
+                    CCTTSBuffer(out, @"en-US", @"cc_tts.wav");
+            });
         });
     } else {
         CCTranslateEx(tail, @"en", @"zh", ^(NSString *out, NSString *engine) {
-            if (!out.length) { onFail(); return; }
-            CCUIDeliverRemoteTranslated(out);
-            if (engine.length) CCUIDeliverRemoteEngine(engine);
-            if (CCPrefBool(CC_K_TTS_ENABLED, YES))
-                CCTTSBuffer(out, @"zh-CN", @"cc_tts_zh.wav");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (!out.length) { onFail(); return; }
+                CCUIDeliverRemoteTranslated(out);
+                if (engine.length) CCUIDeliverRemoteEngine(engine);
+                if (CCPrefBool(CC_K_TTS_ENABLED, YES))
+                    CCTTSBuffer(out, @"zh-CN", @"cc_tts_zh.wav");
+            });
         });
     }
 }

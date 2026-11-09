@@ -15,6 +15,7 @@
 #import <signal.h>
 #import <sys/wait.h>
 #import <fcntl.h>
+#include <stdlib.h>
 
 static void CCLocalTeeWriteFloat(const float *src, UInt32 n);
 
@@ -290,24 +291,50 @@ static BOOL CCASREndsSentence(NSString *s) {
             c == 0x3002 || c == 0xFF1F || c == 0xFF01);   // 。？！
 }
 
-// 字符级差集：ASR 改写句首时，只交付真正新增的后缀；对不上就等下一次。
+// 字符级 LCS 差集：ASR 改写句首/插入字时，只交付最后一个已对齐字符之后的新内容，
+// 不会整句重发，也不会把已经说过的半句再播一遍。
 static NSString *CCASRTail(NSString *full, NSString *delivered) {
     if (!full.length) return @"";
     if (!delivered.length) return full;
     if ([full hasPrefix:delivered])
         return CCASRTrim([full substringFromIndex:delivered.length]);
-    NSUInteger maxK = MIN(delivered.length, full.length);
-    for (NSUInteger k = maxK; k > 0; k--) {
-        NSString *suffix = [delivered substringFromIndex:delivered.length - k];
-        if ([full hasPrefix:suffix])
-            return CCASRTrim([full substringFromIndex:k]);
+    NSUInteger dc = delivered.length, fc = full.length;
+    if (!dc || !fc) return @"";
+    unichar *d = malloc(dc * sizeof(unichar));
+    unichar *f = malloc(fc * sizeof(unichar));
+    if (!d || !f) { free(d); free(f); return @""; }
+    [delivered getCharacters:d range:NSMakeRange(0, dc)];
+    [full getCharacters:f range:NSMakeRange(0, fc)];
+    NSUInteger *dp = calloc((dc + 1) * (fc + 1), sizeof(NSUInteger));
+    if (!dp) { free(d); free(f); return @""; }
+    for (NSUInteger i = 1; i <= dc; i++) {
+        for (NSUInteger j = 1; j <= fc; j++) {
+            if (d[i - 1] == f[j - 1])
+                dp[i * (fc + 1) + j] = dp[(i - 1) * (fc + 1) + (j - 1)] + 1;
+            else {
+                NSUInteger a = dp[(i - 1) * (fc + 1) + j];
+                NSUInteger b = dp[i * (fc + 1) + (j - 1)];
+                dp[i * (fc + 1) + j] = a > b ? a : b;
+            }
+        }
     }
-    NSUInteger i = 0;
-    while (i < delivered.length && i < full.length &&
-           [delivered characterAtIndex:i] == [full characterAtIndex:i]) i++;
-    if (i > 0 && i < full.length)
-        return CCASRTrim([full substringFromIndex:i]);
-    return @"";
+    NSUInteger i = dc, j = fc;
+    NSInteger lastFull = -1;
+    while (i > 0 && j > 0) {
+        if (d[i - 1] == f[j - 1]) {
+            if (lastFull < 0) lastFull = (NSInteger)(j - 1);
+            i--; j--;
+        } else if (dp[(i - 1) * (fc + 1) + j] >= dp[i * (fc + 1) + (j - 1)]) {
+            i--;
+        } else {
+            j--;
+        }
+    }
+    free(dp); free(d); free(f);
+    if (lastFull < 0) return @"";
+    NSUInteger start = (NSUInteger)lastFull + 1;
+    if (start >= fc) return @"";
+    return CCASRTrim([full substringFromIndex:start]);
 }
 
 @interface CCLocalASR : NSObject {
@@ -321,6 +348,7 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
     unsigned long long offset;
     CFAbsoluteTime sessionStart;
     CFAbsoluteTime lastTextAt;
+    CFAbsoluteTime lastVoiceAt;
     CFAbsoluteTime lastDeliverAt;
     CFAbsoluteTime lastPartialAt;
     CFAbsoluteTime nextRetryAt;
@@ -343,6 +371,7 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
 - (void)handleError:(NSError *)err;
 - (void)scheduleRetry:(double)delay;
 - (void)feed;
+- (BOOL)hasRecentVoice;
 - (void)deliverNow;
 - (void)checkEndpoint:(CFAbsoluteTime)now;
 - (void)maybeRotate:(CFAbsoluteTime)now;
@@ -366,7 +395,7 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
     text = @"";
     delivered = @"";
     lastPartial = nil;
-    [self startTask];
+    // 不在这里直接起 task：等 tick 探测到有人声再起，避免整通电话空跑/抢会话。
 }
 
 - (void)startTask {
@@ -374,6 +403,7 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (now < suspendedUntil) return;
     NSString *loc = CCPrefStr(CC_K_LOCAL_LOCALE, @"zh-CN");
+    if (recog && ![[recog.locale localeIdentifier] isEqualToString:loc]) recog = nil;
     if (!recog) {
         recog = [[SFSpeechRecognizer alloc] initWithLocale:
                  [NSLocale localeWithLocaleIdentifier:loc]];
@@ -383,6 +413,7 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
         nextRetryAt = now + 2.0;
         return;
     }
+    if (!recog.supportsOnDeviceRecognition) useCloud = YES;
     SFSpeechAudioBufferRecognitionRequest *r =
         [[SFSpeechAudioBufferRecognitionRequest alloc] init];
     r.shouldReportPartialResults = YES;
@@ -399,6 +430,7 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
     delivered = @"";
     lastPartial = nil;
     lastTextAt = now;
+    lastVoiceAt = now;
     lastDeliverAt = now;
     lastPartialAt = 0;
     nextDeliverAt = 0;
@@ -435,20 +467,22 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
     if (![[NSFileManager defaultManager] fileExistsAtPath:CC_ARM_PATH]) return;
     NSString *t = CCASRTrim(res.bestTranscription.formattedString);
     if (t.length) {
-        if (!text.length)
-            CCLogf(@"local asr first partial after %.2fs onDevice=%d",
-                   now - sessionStart, !useCloud);
-        text = t;
-        lastTextAt = now;
         failures = 0;
         consecutiveFailures = 0;
         if (now - sessionStart > 3.0) fastFailures = 0;   // 存活超过 3 秒才算健康会话
-        NSString *tail = CCASRTail(text, delivered);
-        if (tail.length && now - lastPartialAt > 0.30 &&
-            ![tail isEqualToString:(lastPartial ?: @"")]) {
-            lastPartial = tail;
-            lastPartialAt = now;
-            CCTransportSendLine([@"LI|" stringByAppendingString:tail]);
+        if (![t isEqualToString:(text ?: @"")]) {
+            if (!text.length)
+                CCLogf(@"local asr first partial after %.2fs onDevice=%d",
+                       now - sessionStart, !useCloud);
+            text = t;
+            lastTextAt = now;               // 只有文本真的变了才算“还在说话”
+            NSString *tail = CCASRTail(text, delivered);
+            if (tail.length && now - lastPartialAt > 0.30 &&
+                ![tail isEqualToString:(lastPartial ?: @"")]) {
+                lastPartial = tail;
+                lastPartialAt = now;
+                CCTransportSendLine([@"LI|" stringByAppendingString:tail]);
+            }
         }
     }
     if (res.isFinal) {
@@ -458,7 +492,7 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
         req = nil;
         rotating = NO;
         starting = NO;
-        [self startTask];
+        nextRetryAt = now + 0.2;   // 交给 tick 的人声探测再起下一条，避免空跑
     }
 }
 
@@ -468,26 +502,27 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
     CCLogf(@"local asr err %ld %@ onDevice=%d",
            (long)code, err.localizedDescription ?: @"", !useCloud);
     if (!running) return;
+    BOOL unexpectedCancel = ((code == 301 || code == 216) && !rotating);
     if (code != 301 && code != 216) {
         failures++;
         consecutiveFailures++;
-        if (code == 1110 || code == 1101) {
-            // 如果全局只允许一条 SFSpeech，我方 task 一启动就会被对方杀掉。
-            // 用“短命会话”计数识别这种冲突：start 后 3 秒内就 1110/1101，连续 3 次
-            // 就暂停 20 秒，先保对方通道；到点自动再试，不永久放弃。
-            if (now - sessionStart < 3.0) fastFailures++;
-            else fastFailures = 0;
-            if (fastFailures >= 3) {
-                suspendedUntil = now + 20.0;
-                fastFailures = 0;
-                CCLogf(@"local asr suspend 20s (possible global SFSpeech conflict)");
-                CCTransportSendLine(@"S|● 我方识别暂不可用，20 秒后自动重试");
-            }
+    }
+    if (code == 1110 || code == 1101 || unexpectedCancel) {
+        // 如果全局只允许一条 SFSpeech，我方 task 一启动就会被对方杀掉。
+        // 用“短命会话”计数识别这种冲突：start 后 3 秒内就被 1110/1101/301 杀掉，
+        // 连续 3 次就暂停 20 秒，先保对方通道；到点自动再试，不永久放弃。
+        if (now - sessionStart < 3.0) fastFailures++;
+        else fastFailures = 0;
+        if (fastFailures >= 3) {
+            suspendedUntil = now + 20.0;
+            fastFailures = 0;
+            CCLogf(@"local asr suspend 20s (possible global SFSpeech conflict)");
+            CCTransportSendLine(@"S|● 我方识别暂不可用，20 秒后自动重试");
         }
-        if (!useCloud && failures >= 2) {
-            useCloud = YES;
-            CCLogf(@"local asr fallback to cloud");
-        }
+    }
+    if (code != 301 && code != 216 && !useCloud && failures >= 2) {
+        useCloud = YES;
+        CCLogf(@"local asr fallback to cloud");
     }
     // 301/216 也可能带着已经识别出的半句；先交付，再重启，不能默默吞掉。
     [self deliverNow];
@@ -500,6 +535,35 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
 
 - (void)scheduleRetry:(double)delay {
     nextRetryAt = CFAbsoluteTimeGetCurrent() + delay;
+}
+
+// 只探测文件尾部 0.1 秒有没有人声，不推进 offset、不丢音频。
+// 我方没说话时不起 SFSpeech task：既省云端/本地资源，也避免和对方通道抢会话。
+- (BOOL)hasRecentVoice {
+    NSString *p = [CC_DIR stringByAppendingPathComponent:@"local16k.wav"];
+    NSDictionary *at = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:nil];
+    if (!at) return NO;
+    unsigned long long size = [at[NSFileSize] unsignedLongLongValue];
+    if (size <= 44) return NO;
+    NSUInteger want = 16000;                // 0.5s @ 16k mono s16，短促的“嗯/好”也能抓到
+    if (size - 44 < (unsigned long long)want)
+        want = (NSUInteger)(size - 44) & ~(NSUInteger)1;
+    if (!want) return NO;
+    NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:p];
+    if (!fh) return NO;
+    NSData *d = nil;
+    @try {
+        [fh seekToFileOffset:size - want];
+        d = [fh readDataOfLength:want];
+    } @catch (NSException *e) { d = nil; }
+    [fh closeFile];
+    if (d.length < 2) return NO;
+    const int16_t *s = (const int16_t *)d.bytes;
+    NSUInteger n = d.length / 2;
+    double sum = 0;
+    for (NSUInteger i = 0; i < n; i++) sum += fabs((double)s[i]);
+    // 起识别门槛略高于静音判断，避免环境底噪一直把 task 拉起来。
+    return n && (sum / (double)n / 32768.0) > 0.008;
 }
 
 - (void)feed {
@@ -542,7 +606,13 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
     buf.frameLength = (AVAudioFrameCount)n;
     const int16_t *s = (const int16_t *)d.bytes;
     float *dst = buf.floatChannelData[0];
-    for (NSUInteger i = 0; i < n; i++) dst[i] = (float)s[i] / 32768.0f;
+    double sum = 0;
+    for (NSUInteger i = 0; i < n; i++) {
+        dst[i] = (float)s[i] / 32768.0f;
+        sum += fabs((double)s[i]);
+    }
+    if (n && (sum / (double)n / 32768.0) > 0.006)
+        lastVoiceAt = CFAbsoluteTimeGetCurrent();
     @try { [req appendAudioPCMBuffer:buf]; }
     @catch (NSException *e) { return; }
     offset += (unsigned long long)n * 2;
@@ -588,8 +658,8 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
     if (now < nextDeliverAt) return;
     NSString *tail = CCASRTail(text, delivered);
     if (!tail.length) return;
-    double silence = now - lastTextAt;
-    double stable = silence;
+    double silence = now - lastVoiceAt;   // 音频静音，不是“ASR 没回调”
+    double stable = now - lastTextAt;     // 文本最后一次变化
     NSUInteger units = CCASRUnits(tail);
     BOOL ended = NO;
     if (CCASREndsSentence(tail) && stable >= 0.30) ended = YES;
@@ -616,7 +686,21 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
     if (!running) return;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (now < suspendedUntil) return;
-    if (!req && now >= nextRetryAt) [self startTask];
+    if (!req && now >= nextRetryAt) {
+        // 先确认麦克风里有人声再起识别；音频一直在 local16k.wav 里，offset 没动。
+        if ([self hasRecentVoice]) {
+            // 每次起 task 最多回看 3 秒：句首一定在最近 0.5 秒探测窗内；如果 backlog
+            // 更长（长时间静音 / task 暂停），只处理最近 3 秒，避免喂几分钟静音。
+            NSString *p = [CC_DIR stringByAppendingPathComponent:@"local16k.wav"];
+            NSDictionary *at = [[NSFileManager defaultManager]
+                                attributesOfItemAtPath:p error:nil];
+            unsigned long long size = [at[NSFileSize] unsignedLongLongValue];
+            if (size > offset + 96000) offset = size - 96000;
+            [self startTask];
+        } else {
+            nextRetryAt = now + 0.2;
+        }
+    }
     if (!req || rotating) return;
     [self feed];
     [self checkEndpoint:now];

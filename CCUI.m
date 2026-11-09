@@ -609,14 +609,14 @@ static void LayoutBox(UIView *box, NSString *recog, NSString *trans, NSString *e
 
 static void ResetRemoteTimer(void) {
     [g_remoteHide invalidate];
-    g_remoteHide = [NSTimer timerWithTimeInterval:15.0 target:[CCUIHelper class]
+    g_remoteHide = [NSTimer timerWithTimeInterval:5.0 target:[CCUIHelper class]
                                           selector:@selector(hideCaption)
                                           userInfo:nil repeats:NO];
     [[NSRunLoop mainRunLoop] addTimer:g_remoteHide forMode:NSRunLoopCommonModes];
 }
 static void ResetLocalTimer(void) {
     [g_localHide invalidate];
-    g_localHide = [NSTimer timerWithTimeInterval:15.0 target:[CCUIHelper class]
+    g_localHide = [NSTimer timerWithTimeInterval:5.0 target:[CCUIHelper class]
                                          selector:@selector(hideCaption)
                                          userInfo:nil repeats:NO];
     [[NSRunLoop mainRunLoop] addTimer:g_localHide forMode:NSRunLoopCommonModes];
@@ -1594,7 +1594,7 @@ static void CCRunSpeechSelfTest(BOOL onDevice) {
         }];
 }
 
-#pragma mark - 0.15.4 流式识别（LCT 同款 SFSpeechAudioBufferRecognitionRequest）
+#pragma mark - 0.15.5 流式识别（LCT 同款 SFSpeechAudioBufferRecognitionRequest）
 //
 // 旧方案：每 2~6 秒切一块 WAV，串行跑 SFSpeechURLRecognitionRequest。
 //   - 6 秒硬切会把单词劈成两半，重叠去重靠“单词完全相等”，识别不一致就丢词；
@@ -1775,8 +1775,12 @@ static void CCStreamStart(CCStream *st) {
         st.locale = loc;
     }
     if (!st.recog) {
-        st.legacy = YES;
-        CCLogf(@"stream %@: no recognizer for %@, fallback chunk mode", CCStreamTag(st), loc);
+        st.failures++;
+        CCLogf(@"stream %@: no recognizer for %@, retry later", CCStreamTag(st), loc);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (g_callActive) CCStreamStart(st);
+        });
         return;
     }
     SFSpeechAudioBufferRecognitionRequest *r =
@@ -1860,18 +1864,13 @@ static void CCStreamFinishSession(CCStream *st) {
     st.rotating = NO;
     CCStreamDeliver(st);                   // 会话结束/轮换/出错前，先把已识别的部分送出去
     if (st.failures > 0) {
-        if (st.failures < 3) {
-            // 本地流式不可用就换云端，云端失败再换回本地（用户设置在两者都不通时让路）
-            st.onDevice = !st.onDevice;
-            CCLogf(@"stream %@ retry with onDevice=%d", CCStreamTag(st), st.onDevice);
-        } else {
-            st.legacy = YES;               // 两种流式都连续失败 → 退回旧分块识别
-            CCLogf(@"stream %@ -> legacy chunk mode after %d failures",
-                   CCStreamTag(st), st.failures);
-            return;
-        }
+        // 只换识别模式重试：绝不回落到“按时间切块”。
+        // 用户铁律：宁可暂时没有识别结果，也不切用户说的话。
+        st.onDevice = !st.onDevice;
+        CCLogf(@"stream %@ retry with onDevice=%d (failures=%d)",
+               CCStreamTag(st), st.onDevice, st.failures);
     }
-    double delay = st.failures ? 0.25 : 0.05;
+    double delay = st.failures ? MIN(4.0, 0.3 * (double)st.failures) : 0.05;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         CCStreamStart(st);
@@ -2089,7 +2088,7 @@ void CCUIBoot(void) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.15.4)");
+        CCLogLine(@"CallCaption UI booted (single window v0.15.5)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

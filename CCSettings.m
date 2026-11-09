@@ -3,6 +3,7 @@
 // 在 PSListController 之上覆盖自己的 UITableView，不用 PSSpecifier / 子页面。
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
+#import <stdio.h>
 
 #define CC_DOMAIN @"net.user.callcaption"
 #define CC_NOTIF  @"net.user.callcaption.prefschanged"
@@ -605,6 +606,27 @@ static void VoiceLists(NSString *prefix,
                              (__bridge CFPropertyListRef)(value ?: @""),
                              (__bridge CFStringRef)CC_DOMAIN);
     CFPreferencesAppSynchronize((__bridge CFStringRef)CC_DOMAIN);
+    // 关键修复：Settings.app 里的 CFPreferences 只写进 Preferences 自己的容器，
+    // SpringBoard / 守护进程读的是 /var/mobile/Library/Preferences 全局 plist，
+    // 所以“云端语音识别”等开关会出现“界面开着、日志里仍是 0”。
+    // 这里直接合并写全局 plist（Preferences 进程对预置偏好目录有权限）。
+    @try {
+        NSString *path = @"/var/mobile/Library/Preferences/net.user.callcaption.plist";
+        NSMutableDictionary *m = [NSMutableDictionary dictionaryWithContentsOfFile:path];
+        if (!m) m = [NSMutableDictionary dictionary];
+        m[key] = value ?: @"";
+        BOOL ok = [m writeToFile:path atomically:YES];
+        if (ok)
+            [[NSFileManager defaultManager] setAttributes:@{NSFilePosixPermissions: @0666}
+                                             ofItemAtPath:path error:nil];
+        FILE *fp = fopen("/tmp/ccsettings.log", "a");
+        if (fp) {
+            fprintf(fp, "[%s] set %s global=%d
+",
+                    [[[NSDate date] description] UTF8String], key.UTF8String, ok);
+            fclose(fp);
+        }
+    } @catch (NSException *e) { }
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
         (__bridge CFStringRef)CC_NOTIF, NULL, NULL, YES);
 }

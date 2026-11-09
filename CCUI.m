@@ -501,7 +501,7 @@ static UIView *MakeBox(NSString *recogHeader) {
 
     UILabel *sh = [[UILabel alloc] initWithFrame:CGRectZero];
     sh.tag = 1003;
-    sh.text = @"Did speak:";
+    sh.text = @"译文：";
     sh.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
     sh.textColor = GreenTitle();
     sh.textAlignment = NSTextAlignmentCenter;
@@ -1594,7 +1594,7 @@ static void CCRunSpeechSelfTest(BOOL onDevice) {
         }];
 }
 
-#pragma mark - 0.15.8 流式识别（LCT 同款 SFSpeechAudioBufferRecognitionRequest）
+#pragma mark - 0.15.9 流式识别（LCT 同款 SFSpeechAudioBufferRecognitionRequest）
 //
 // 旧方案：每 2~6 秒切一块 WAV，串行跑 SFSpeechURLRecognitionRequest。
 //   - 6 秒硬切会把单词劈成两半，重叠去重靠“单词完全相等”，识别不一致就丢词；
@@ -1638,7 +1638,7 @@ static void CCRunSpeechSelfTest(BOOL onDevice) {
 static CCStream *g_rs;
 static CCStream *g_ls;
 static NSTimer *g_streamTimer;
-// 0.15.8 诊断：先只跑“对方”一路流式，验证单任务是否稳定。
+// 0.15.9 诊断：先只跑“对方”一路流式，验证单任务是否稳定。
 // 本地方向的麦克风音频仍由守护进程连续写入 local16k.wav（没丢），只是暂停识别。
 static BOOL g_localStreamPaused = YES;
 
@@ -1687,7 +1687,10 @@ static NSString *CCStreamNewTail(NSString *full, NSString *delivered) {
 
 static void CCStreamShowPartial(CCStream *st, NSString *t) {
     if (!t.length) return;
-    NSString *show = t;
+    // 只显示“这一句还没翻译的部分”。以前显示整个 session 的累计 partial，
+    // 于是第一句、第二句、第三句会在框里越堆越长（用户看到的累计字幕）。
+    NSString *tail = CCStreamNewTail(t, st.delivered);
+    NSString *show = tail.length ? tail : t;
     if (show.length > 200) show = [show substringFromIndex:show.length - 200];
     if (st.isLocal) CCUIDeliverLocalOriginal(show);
     else CCUIDeliverRemoteOriginal(show);
@@ -1805,6 +1808,7 @@ static void CCStreamStart(CCStream *st) {
     st.text = @"";
     st.delivered = @"";            // 新会话只包含新音频，旧文本不能用来做差集
     st.lastTextAt = 0;
+    st.lastDeliverAt = CFAbsoluteTimeGetCurrent();   // 防止首个 partial 被 12s 超时立即送出
     st.rotating = NO;
     st.sessionStart = CFAbsoluteTimeGetCurrent();
     CCLogf(@"stream %@ start onDevice=%d locale=%@ avail=%d supportOD=%d auth=%ld",
@@ -2020,6 +2024,7 @@ static void CCStreamTick(CCStream *st) {
                          now - st.lastDeliverAt > 1.5);
         // 连续说不停顿也不能无限等：每 12 秒把已识别的部分先翻出去
         BOOL byTimeout = (st.text.length > 0 && st.lastTextAt > 0 &&
+                          st.lastDeliverAt > 0 &&
                           now - st.lastDeliverAt > 12.0 && words >= 2);
         if (bySilence || byStable || byTimeout) {
             st.hadVoice = (silence <= 0.55);
@@ -2112,7 +2117,7 @@ void CCUIBoot(void) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.15.8)");
+        CCLogLine(@"CallCaption UI booted (single window v0.15.9)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

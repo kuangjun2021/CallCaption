@@ -151,13 +151,43 @@ static NSString *CCFindWhatsAppDocs(void) {
     return nil;
 }
 
+// v0.18：英文 TTS 也串行写，防止同一秒两个翻译结果互相覆盖 cc_tts.wav。
+static BOOL CCGenerateUplinkTTSNow(NSString *text, void (^completion)(void));
+static NSMutableArray *g_enTTSQ;
+static BOOL g_enTTSBusy;
+
+static void CCGenerateUplinkTTSStartNext(void) {
+    if (!g_enTTSQ.count) { g_enTTSBusy = NO; return; }
+    NSString *text = g_enTTSQ.firstObject;
+    [g_enTTSQ removeObjectAtIndex:0];
+    CCGenerateUplinkTTSNow(text, ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
+                       g_stateQ, ^{ CCGenerateUplinkTTSStartNext(); });
+    });
+}
+
+static void CCGenerateUplinkTTSQueued(NSString *text) {
+    if (!text.length) return;
+    if (!g_enTTSQ) g_enTTSQ = [NSMutableArray array];
+    [g_enTTSQ addObject:text];
+    if (g_enTTSBusy) return;
+    g_enTTSBusy = YES;
+    CCGenerateUplinkTTSStartNext();
+}
+
 // LCT 的上行注入：用 writeUtterance:toBufferCallback: 把英文 TTS 合成成 PCM，
 // 转成 48k mono s16 写到 WhatsApp Documents/cc_tts.wav，
 // App 探针会把它混进麦克风上行 buffer（对方能听到英文）。
-static BOOL CCGenerateUplinkTTS(NSString *text) {
-    if (text.length == 0) return NO;
+static BOOL CCGenerateUplinkTTSNow(NSString *text, void (^completion)(void)) {
+    if (text.length == 0) {
+        if (completion) dispatch_async(g_stateQ, completion);
+        return NO;
+    }
     NSString *docs = CCFindWhatsAppDocs();
-    if (!docs) return NO;                 // 没有 App 探针文件目录，退回外放
+    if (!docs) {                          // 没有 App 探针文件目录，退回外放
+        if (completion) dispatch_async(g_stateQ, completion);
+        return NO;
+    }
     AVSpeechSynthesizer *synth = [[AVSpeechSynthesizer alloc] init];
     AVSpeechUtterance *u = [[AVSpeechUtterance alloc] initWithString:text];
     NSString *vid = CCPrefStr(CC_K_LOCAL_VOICE, @"");
@@ -166,6 +196,12 @@ static BOOL CCGenerateUplinkTTS(NSString *text) {
     NSMutableData *out = [NSMutableData data];
     __block double phase = 0.0;
     __block BOOL finished = NO;
+    __block BOOL cbDone = NO;
+    void (^finish)(void) = ^{
+        if (cbDone) return;
+        cbDone = YES;
+        if (completion) dispatch_async(g_stateQ, completion);
+    };
     __block AVSpeechSynthesizer *keep = synth;
     [synth writeUtterance:u toBufferCallback:^(AVAudioBuffer *buffer) {
         @autoreleasepool {
@@ -177,6 +213,7 @@ static BOOL CCGenerateUplinkTTS(NSString *text) {
                     finished = YES;
                     CCWriteUplinkWav(out);
                     keep = nil;
+                    finish();
                 }
                 return;
             }
@@ -210,11 +247,377 @@ static BOOL CCGenerateUplinkTTS(NSString *text) {
             finished = YES;
             CCWriteUplinkWav(out);
             keep = nil;
+            finish();
         }
     });
     CCLogf(@"uplink tts start: %@", text);
     return YES;
 }
+
+// 兼容旧调用：没有队列的即时合成（只在兜底外放时用）
+static BOOL CCGenerateUplinkTTS(NSString *text) {
+    return CCGenerateUplinkTTSNow(text, nil);
+}
+
+// ================= v0.18 守护进程内“我方”中文识别 =================
+// 只读 local16k.wav（守护进程自己连续写的 16k mono s16），绝不碰麦克风 Tap。
+// 与 SpringBoard 的对方识别是两个进程、两条 SFSpeech 连接，不会再互杀。
+static NSString *CCASRTrim(NSString *s) {
+    return [s stringByTrimmingCharactersInSet:
+            [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+static NSUInteger CCASRUnits(NSString *s) {
+    NSUInteger n = 0;
+    for (NSUInteger i = 0; i < s.length; i++) {
+        unichar c = [s characterAtIndex:i];
+        if (![[NSCharacterSet whitespaceAndNewlineCharacterSet] characterIsMember:c]) n++;
+    }
+    return n;
+}
+
+static BOOL CCASREndsSentence(NSString *s) {
+    if (!s.length) return NO;
+    unichar c = [s characterAtIndex:s.length - 1];
+    return (c == '.' || c == '?' || c == '!' ||
+            c == 0x3002 || c == 0xFF1F || c == 0xFF01);   // 。？！
+}
+
+// 字符级差集：ASR 改写句首时，只交付真正新增的后缀；对不上就等下一次。
+static NSString *CCASRTail(NSString *full, NSString *delivered) {
+    if (!full.length) return @"";
+    if (!delivered.length) return full;
+    if ([full hasPrefix:delivered])
+        return CCASRTrim([full substringFromIndex:delivered.length]);
+    NSUInteger maxK = MIN(delivered.length, full.length);
+    for (NSUInteger k = maxK; k > 0; k--) {
+        NSString *suffix = [delivered substringFromIndex:delivered.length - k];
+        if ([full hasPrefix:suffix])
+            return CCASRTrim([full substringFromIndex:k]);
+    }
+    NSUInteger i = 0;
+    while (i < delivered.length && i < full.length &&
+           [delivered characterAtIndex:i] == [full characterAtIndex:i]) i++;
+    if (i > 0 && i < full.length)
+        return CCASRTrim([full substringFromIndex:i]);
+    return @"";
+}
+
+@interface CCLocalASR : NSObject {
+@public
+    SFSpeechRecognizer *recog;
+    SFSpeechAudioBufferRecognitionRequest *req;
+    SFSpeechRecognitionTask *task;
+    NSString *text;
+    NSString *delivered;
+    NSString *lastPartial;
+    unsigned long long offset;
+    CFAbsoluteTime sessionStart;
+    CFAbsoluteTime lastTextAt;
+    CFAbsoluteTime lastDeliverAt;
+    CFAbsoluteTime lastPartialAt;
+    CFAbsoluteTime nextRetryAt;
+    CFAbsoluteTime nextDeliverAt;
+    CFAbsoluteTime suspendedUntil;
+    BOOL running;
+    BOOL starting;
+    BOOL rotating;
+    BOOL useCloud;
+    int failures;
+    int consecutiveFailures;
+    NSUInteger callGen;
+}
+- (void)start;
+- (void)stop;
+- (void)tick;
+- (void)startTask;
+- (void)handleResult:(SFSpeechRecognitionResult *)res;
+- (void)handleError:(NSError *)err;
+- (void)scheduleRetry:(double)delay;
+- (void)feed;
+- (void)deliverNow;
+- (void)checkEndpoint:(CFAbsoluteTime)now;
+- (void)maybeRotate:(CFAbsoluteTime)now;
+@end
+
+@implementation CCLocalASR
+
+- (void)start {
+    if (running) return;
+    if (!CCPrefBool(CC_K_LOCAL_ENABLED, YES)) return;
+    running = YES;
+    failures = 0;
+    consecutiveFailures = 0;
+    useCloud = NO;
+    suspendedUntil = 0;
+    nextRetryAt = 0;
+    nextDeliverAt = 0;
+    offset = 44;
+    callGen++;
+    text = @"";
+    delivered = @"";
+    lastPartial = nil;
+    [self startTask];
+}
+
+- (void)startTask {
+    if (!running || req || starting) return;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now < suspendedUntil) return;
+    NSString *loc = CCPrefStr(CC_K_LOCAL_LOCALE, @"zh-CN");
+    if (!recog) {
+        recog = [[SFSpeechRecognizer alloc] initWithLocale:
+                 [NSLocale localeWithLocaleIdentifier:loc]];
+    }
+    if (!recog || !recog.isAvailable) {
+        CCLogf(@"local asr: recognizer unavailable (%@), retry", loc);
+        nextRetryAt = now + 2.0;
+        return;
+    }
+    SFSpeechAudioBufferRecognitionRequest *r =
+        [[SFSpeechAudioBufferRecognitionRequest alloc] init];
+    r.shouldReportPartialResults = YES;
+    if (@available(iOS 13.0, *)) {
+        r.taskHint = SFSpeechRecognitionTaskHintDictation;
+        if (recog.supportsOnDeviceRecognition)
+            r.requiresOnDeviceRecognition = !useCloud;
+    }
+    if (@available(iOS 16.0, *)) r.addsPunctuation = YES;
+    req = r;
+    starting = YES;
+    sessionStart = now;
+    text = @"";
+    delivered = @"";
+    lastPartial = nil;
+    lastTextAt = now;
+    lastDeliverAt = now;
+    lastPartialAt = 0;
+    nextDeliverAt = 0;
+    CCLogf(@"local asr start onDevice=%d locale=%@ auth=%ld avail=%d supportOD=%d",
+           !useCloud, loc, (long)[SFSpeechRecognizer authorizationStatus],
+           recog.isAvailable, recog.supportsOnDeviceRecognition);
+
+    __weak CCLocalASR *weakSelf = self;
+    __block SFSpeechRecognitionTask *t = nil;
+    t = [recog recognitionTaskWithRequest:r
+        resultHandler:^(SFSpeechRecognitionResult *res, NSError *err) {
+            dispatch_async(g_stateQ, ^{
+                CCLocalASR *s = weakSelf;
+                if (!s || s->task != t) return;
+                s->starting = NO;
+                if (res) [s handleResult:res];
+                if (err) [s handleError:err];
+            });
+        }];
+    task = t;
+    if (!task) {
+        req = nil;
+        starting = NO;
+        CCLogf(@"local asr: task create failed");
+        nextRetryAt = now + 1.0;
+    }
+}
+
+- (void)handleResult:(SFSpeechRecognitionResult *)res {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    NSString *t = CCASRTrim(res.bestTranscription.formattedString);
+    if (t.length) {
+        text = t;
+        lastTextAt = now;
+        failures = 0;
+        consecutiveFailures = 0;
+        NSString *tail = CCASRTail(text, delivered);
+        if (tail.length && now - lastPartialAt > 0.30 &&
+            ![tail isEqualToString:(lastPartial ?: @"")]) {
+            lastPartial = tail;
+            lastPartialAt = now;
+            CCTransportSendLine([@"LI|" stringByAppendingString:tail]);
+        }
+    }
+    if (res.isFinal) {
+        CCLogf(@"local asr final %lu chars", (unsigned long)t.length);
+        [self deliverNow];
+        task = nil;
+        req = nil;
+        rotating = NO;
+        starting = NO;
+        [self startTask];
+    }
+}
+
+- (void)handleError:(NSError *)err {
+    NSInteger code = err.code;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    CCLogf(@"local asr err %ld %@ onDevice=%d",
+           (long)code, err.localizedDescription ?: @"", !useCloud);
+    if (!running) return;
+    if (code != 301 && code != 216) {
+        failures++;
+        consecutiveFailures++;
+        if ((code == 1110 || code == 1101) && consecutiveFailures >= 3) {
+            // 如果全局只允许一条 SFSpeech，连续 1110 说明和 SpringBoard 抢不到。
+            // 暂停 20 秒，先保对方通道；到点自动再试，不永久放弃。
+            suspendedUntil = now + 20.0;
+            consecutiveFailures = 0;
+            CCLogf(@"local asr suspend 20s (possible global SFSpeech conflict)");
+            CCTransportSendLine(@"S|● 我方识别暂不可用，20 秒后自动重试");
+        }
+        if (!useCloud && failures >= 2) {
+            useCloud = YES;
+            CCLogf(@"local asr fallback to cloud");
+        }
+        [self deliverNow];
+    } else if (rotating) {
+        [self deliverNow];
+    }
+    task = nil;
+    req = nil;
+    starting = NO;
+    rotating = NO;
+    if (running) nextRetryAt = now + (useCloud ? 1.5 : 0.6);
+}
+
+- (void)scheduleRetry:(double)delay {
+    nextRetryAt = CFAbsoluteTimeGetCurrent() + delay;
+}
+
+- (void)feed {
+    NSString *p = [CC_DIR stringByAppendingPathComponent:@"local16k.wav"];
+    NSDictionary *at = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:nil];
+    if (!at) return;
+    unsigned long long size = [at[NSFileSize] unsignedLongLongValue];
+    if (size <= 44) return;
+    if (offset < 44) offset = 44;
+    if (size < offset) {
+        // 文件被 arm 重建：从新文件头开始，旧文本作废
+        offset = 44;
+        text = @"";
+        delivered = @"";
+        lastPartial = nil;
+    }
+    if (size <= offset) return;
+    unsigned long long avail = size - offset;
+    if (avail > 32000ULL * 2) avail = 32000ULL * 2;   // 每拍最多 2 秒，积压会追上
+    avail &= ~1ULL;
+    if (!avail) return;
+    NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:p];
+    if (!fh) return;
+    NSData *d = nil;
+    @try {
+        [fh seekToFileOffset:offset];
+        d = [fh readDataOfLength:(NSUInteger)avail];
+    } @catch (NSException *e) { d = nil; }
+    [fh closeFile];
+    if (d.length < 2) return;
+    NSUInteger n = d.length / 2;
+    static AVAudioFormat *fmt;
+    if (!fmt) fmt = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32
+                                                     sampleRate:16000
+                                                       channels:1
+                                                    interleaved:NO];
+    AVAudioPCMBuffer *buf = [[AVAudioPCMBuffer alloc] initWithPCMFormat:fmt
+                                                         frameCapacity:(AVAudioFrameCount)n];
+    if (!buf) return;
+    buf.frameLength = (AVAudioFrameCount)n;
+    const int16_t *s = (const int16_t *)d.bytes;
+    float *dst = buf.floatChannelData[0];
+    for (NSUInteger i = 0; i < n; i++) dst[i] = (float)s[i] / 32768.0f;
+    @try { [req appendAudioPCMBuffer:buf]; }
+    @catch (NSException *e) { return; }
+    offset += (unsigned long long)n * 2;
+}
+
+- (void)deliverNow {
+    if (!text.length) return;
+    NSString *full = text;
+    NSString *tail = CCASRTail(full, delivered);
+    if (!tail.length) return;
+    NSString *prev = delivered;
+    delivered = full;
+    lastDeliverAt = CFAbsoluteTimeGetCurrent();
+    CCLogf(@"local asr deliver (silence %.2fs): %@",
+           lastDeliverAt - lastTextAt, tail);
+    CCTransportSendLine([@"LI|" stringByAppendingString:tail]);
+    NSUInteger cg = callGen;
+    __weak CCLocalASR *weakSelf = self;
+    CCTranslateEx(tail, @"zh", @"en", ^(NSString *out, NSString *engine) {
+        dispatch_async(g_stateQ, ^{
+            CCLocalASR *s = weakSelf;
+            if (!s) return;
+            if (!s->running || cg != s->callGen) return;
+            if (!out.length) {
+                if ([s->delivered isEqualToString:full]) s->delivered = prev;
+                s->nextDeliverAt = CFAbsoluteTimeGetCurrent() + 2.0;
+                CCLogf(@"local asr trans FAILED");
+                return;
+            }
+            if (engine.length)
+                CCTransportSendLine([@"LE|" stringByAppendingString:engine]);
+            CCTransportSendLine([@"LR|" stringByAppendingString:out]);
+            if (CCPrefBool(CC_K_TTS_ENABLED, YES))
+                CCGenerateUplinkTTSQueued(out);
+        });
+    });
+}
+
+- (void)checkEndpoint:(CFAbsoluteTime)now {
+    if (now < nextDeliverAt) return;
+    NSString *tail = CCASRTail(text, delivered);
+    if (!tail.length) return;
+    double silence = now - lastTextAt;
+    double stable = silence;
+    NSUInteger units = CCASRUnits(tail);
+    BOOL ended = NO;
+    if (CCASREndsSentence(tail) && stable >= 0.30) ended = YES;
+    else if (silence >= 0.80 && units >= 4) ended = YES;
+    else if (silence >= 1.80) ended = YES;
+    else if (lastDeliverAt > 0 && now - lastDeliverAt >= 15.0 && units >= 4) ended = YES;
+    if (ended) [self deliverNow];
+}
+
+- (void)maybeRotate:(CFAbsoluteTime)now {
+    if (!req || rotating) return;
+    double age = now - sessionStart;
+    if (age <= 55.0) return;
+    double stable = now - lastTextAt;
+    if (stable > 0.8 || age > 58.0) {
+        CCLogf(@"local asr rotate at %.0fs", age);
+        [self deliverNow];
+        rotating = YES;
+        [req endAudio];
+    }
+}
+
+- (void)tick {
+    if (!running) return;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now < suspendedUntil) return;
+    if (!req && now >= nextRetryAt) [self startTask];
+    if (!req || rotating) return;
+    [self feed];
+    [self checkEndpoint:now];
+    [self maybeRotate:now];
+}
+
+- (void)stop {
+    if (!running && !task && !req) return;
+    running = NO;
+    callGen++;
+    task = nil;
+    if (req) { [req endAudio]; req = nil; }
+    text = @"";
+    delivered = @"";
+    lastPartial = nil;
+    offset = 0;
+    starting = NO;
+    rotating = NO;
+    suspendedUntil = 0;
+    nextRetryAt = 0;
+    nextDeliverAt = 0;
+    CCLogf(@"local asr stopped");
+}
+
+@end
 
 // ---------- 通道 ----------
 
@@ -294,6 +697,7 @@ static BOOL CCGenerateUplinkTTS(NSString *text) {
 
 static CCChannel *g_remote;
 static CCChannel *g_local;
+static CCLocalASR *g_localASR;
 
 // ---------- 音频回调 ----------
 
@@ -1326,6 +1730,8 @@ static void CheckArm(void) {
         static BOOL lastArmed = NO;
         BOOL armed = [[NSFileManager defaultManager] fileExistsAtPath:CC_ARM_PATH];
         if (armed && !lastArmed) {
+            // 新通话：先停我方 ASR，再重建桥文件；ASR 只读文件，不碰 Tap。
+            [g_localASR stop];
             // 新通话：重置 Tap 探测，从 speaker(-2) 开始，最多试 -1 / -3。
             g_remote->tapProbeCount = 0;
             g_remote.tapPID = CC_TAP_PID_SPEAKER;
@@ -1347,6 +1753,7 @@ static void CheckArm(void) {
         }
         lastArmed = armed;
         if (!armed) {
+            [g_localASR stop];
             [g_remote stop];
             [g_local stop];
             return;
@@ -1387,6 +1794,15 @@ static void CheckArm(void) {
             }
         } else if (g_local->capturing) {
             [g_local stop];
+        }
+
+        // v0.18：我方中文识别在守护进程里独立跑（第二进程、第二条 SFSpeech），
+        // 只读 local16k.wav；Tap 继续连续写文件，识别失败不会影响抓音。
+        if (localOn && now >= g_localStartAfter + 0.5) {
+            if (!g_localASR) g_localASR = [CCLocalASR new];
+            [g_localASR start];
+        } else if (!localOn && g_localASR) {
+            [g_localASR stop];
         }
 
         NSArray<CCChannel *> *chans = @[g_remote, g_local];
@@ -1465,8 +1881,9 @@ static void CheckArm(void) {
             static NSString *lastCfg = nil;
             NSString *docs = CCFindWhatsAppDocs();
             if (docs) {
-                int rv = [CCPrefStr(@"RemoteOriginalVolume", @"30") intValue];
+                int rv = [CCPrefStr(@"RemoteOriginalVolume", @"45") intValue];
                 int lv = [CCPrefStr(@"LocalOriginalVolume", @"30") intValue];
+                if (rv == 30) rv = 45;   // 旧默认值迁移：中文播报时原音 30% 太轻，听不清对方后续
                 if (rv < 0) rv = 0; if (rv > 100) rv = 100;
                 if (lv < 0) lv = 0; if (lv > 100) lv = 100;
                 NSString *cfg = [NSString stringWithFormat:@"remote=%.2f\nlocal=%.2f\n",
@@ -1650,6 +2067,8 @@ int main(int argc, char *argv[]) {
         g_local.tag = @"local";
         [g_local configure];
 
+        g_localASR = [CCLocalASR new];
+
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
                                         NULL, &CCDaemonNotifCB, NULL, NULL,
                                         CFNotificationSuspensionBehaviorDeliverImmediately);
@@ -1670,6 +2089,17 @@ int main(int argc, char *argv[]) {
             CheckArm();
         });
         dispatch_resume(timer);
+
+        // 我方 ASR 的读文件/喂音频节拍：150ms 一次，比 500ms 主 tick 更跟手。
+        dispatch_source_t asrTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,
+                                                            0, 0, g_stateQ);
+        dispatch_source_set_timer(asrTimer, DISPATCH_TIME_NOW,
+                                  (uint64_t)150 * NSEC_PER_MSEC,
+                                  (uint64_t)50 * NSEC_PER_MSEC);
+        dispatch_source_set_event_handler(asrTimer, ^{
+            [g_localASR tick];
+        });
+        dispatch_resume(asrTimer);
 
         // 即使 run loop 没有任何 source，也绝不退出：
         // 退出会被 launchd 立即重启，形成 logs 里每 6~7 秒一次的重启循环。

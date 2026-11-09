@@ -1329,9 +1329,51 @@ static void CCWriteWav48kFile(NSString *path, NSData *pcm) {
     chmod(path.fileSystemRepresentation, 0666);
 }
 
+// v0.18：TTS 文件按方向串行写入。AVSpeechSynthesizer 是异步的，两个翻译结果
+// 在同一秒完成时，后一个会覆盖前一个文件（0.17.0 日志里 18:50:06 的 90258 字节
+// 英文 TTS 就是这样丢的）。这里保证：上一个文件写完、守护进程复制、AppProbe
+// 读取之后，才允许写下一个；不丢句，也不改 AppProbe。
+static void CCTTSBufferNow(NSString *text, NSString *lang, NSString *fileName,
+                           void (^completion)(void));
+static NSMutableArray *g_ttsQEn, *g_ttsQZh;
+static BOOL g_ttsBusyEn, g_ttsBusyZh;
+
+static void CCTTSBufferStartNext(BOOL zh) {
+    NSMutableArray *q = zh ? g_ttsQZh : g_ttsQEn;
+    if (!q.count) { if (zh) g_ttsBusyZh = NO; else g_ttsBusyEn = NO; return; }
+    NSArray *item = q.firstObject;
+    [q removeObjectAtIndex:0];
+    CCTTSBufferNow(item[0], item[1], item[2], ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ CCTTSBufferStartNext(zh); });
+    });
+}
+
+static void CCTTSBufferEnqueue(NSString *text, NSString *lang, NSString *fileName) {
+    if (!text.length) return;
+    BOOL zh = [lang hasPrefix:@"zh"];
+    NSMutableArray *q = zh ? g_ttsQZh : g_ttsQEn;
+    if (!q) {
+        q = [NSMutableArray array];
+        if (zh) g_ttsQZh = q; else g_ttsQEn = q;
+    }
+    [q addObject:@[text, lang, fileName]];
+    if (zh ? g_ttsBusyZh : g_ttsBusyEn) return;
+    if (zh) g_ttsBusyZh = YES; else g_ttsBusyEn = YES;
+    CCTTSBufferStartNext(zh);
+}
+
 // TTS 合成成 48k PCM，写到 CC_DIR/<fileName>；守护进程再复制给 App 探针做混音
 static void CCTTSBuffer(NSString *text, NSString *lang, NSString *fileName) {
-    if (!text.length) return;
+    CCTTSBufferEnqueue(text, lang, fileName);
+}
+
+static void CCTTSBufferNow(NSString *text, NSString *lang, NSString *fileName,
+                           void (^completion)(void)) {
+    if (!text.length) {
+        if (completion) dispatch_async(dispatch_get_main_queue(), completion);
+        return;
+    }
     CCLogf(@"tts synth start %@ [%lu chars] %@", lang, (unsigned long)text.length,
            text.length > 40 ? [text substringToIndex:40] : text);
     AVSpeechSynthesizer *synth = [[AVSpeechSynthesizer alloc] init];
@@ -1343,6 +1385,12 @@ static void CCTTSBuffer(NSString *text, NSString *lang, NSString *fileName) {
     NSMutableData *out = [NSMutableData data];
     __block double phase = 0;
     __block BOOL done = NO;
+    __block BOOL cbDone = NO;
+    void (^finish)(void) = ^{
+        if (cbDone) return;
+        cbDone = YES;
+        if (completion) dispatch_async(dispatch_get_main_queue(), completion);
+    };
     __block AVSpeechSynthesizer *keep = synth;
     [synth writeUtterance:u toBufferCallback:^(AVAudioBuffer *buffer) {
         @autoreleasepool {
@@ -1359,6 +1407,7 @@ static void CCTTSBuffer(NSString *text, NSString *lang, NSString *fileName) {
                     CCLogf(@"tts %@ -> %@ %lu bytes", lang, fileName,
                            (unsigned long)out.length);
                     keep = nil;
+                    finish();
                 }
                 return;
             }
@@ -1404,6 +1453,7 @@ static void CCTTSBuffer(NSString *text, NSString *lang, NSString *fileName) {
             }
             CCLogf(@"tts timeout %@ %lu bytes", fileName, (unsigned long)out.length);
             keep = nil;
+            finish();
         }
     });
 }
@@ -1638,8 +1688,9 @@ static void CCRunSpeechSelfTest(BOOL onDevice) {
 static CCStream *g_rs;
 static CCStream *g_ls;
 static NSTimer *g_streamTimer;
-// 0.17.1 诊断：先只跑“对方”一路流式，验证单任务是否稳定。
-// 本地方向的麦克风音频仍由守护进程连续写入 local16k.wav（没丢），只是暂停识别。
+// v0.18：我方中文识别移到守护进程（第二进程），SpringBoard 只跑对方一路。
+// 同一进程两路 SFSpeech 在 iOS 16.4 会互相 1110/301（0.17.0 日志已证实），
+// 分进程后各走各的 XPC 连接；抓音仍由守护进程连续写 local16k.wav，一个字节不动。
 static BOOL g_localStreamPaused = YES;
 
 static CCStream *CCStreamFor(BOOL local) {
@@ -1685,6 +1736,45 @@ static NSString *CCStreamNewTail(NSString *full, NSString *delivered) {
     return @"";
 }
 
+// v0.18 交付专用差集：ASR 改写前文时只取真正新增的后缀；
+// 如果 delivered 的尾部和 full 的头部能对上，说明只是句首被改写，不能整段重发。
+// 完全对不上就返回空，等下一次 partial/final——宁可晚一点，也不重复播报。
+static NSString *CCStreamNewTailStrict(NSString *full, NSString *delivered) {
+    if (!full.length) return @"";
+    if (!delivered.length) return full;
+    if ([full hasPrefix:delivered]) {
+        return [[full substringFromIndex:delivered.length]
+                stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    }
+    NSArray *d = [delivered componentsSeparatedByString:@" "];
+    NSArray *f = [full componentsSeparatedByString:@" "];
+    NSUInteger maxK = MIN(d.count, f.count);
+    NSUInteger best = 0;
+    for (NSUInteger k = 1; k <= maxK; k++) {
+        BOOL ok = YES;
+        for (NSUInteger i = 0; i < k; i++) {
+            NSString *a = [d[d.count - k + i] lowercaseString];
+            NSString *b = [f[i] lowercaseString];
+            if (![a isEqualToString:b]) { ok = NO; break; }
+        }
+        if (ok) best = k;
+    }
+    if (best > 0) {
+        if (best >= f.count) return @"";
+        return [[f subarrayWithRange:NSMakeRange(best, f.count - best)]
+                componentsJoinedByString:@" "];
+    }
+    NSUInteger i = 0;
+    while (i < d.count && i < f.count &&
+           [[d[i] lowercaseString] isEqualToString:[f[i] lowercaseString]]) i++;
+    if (i > 0) {
+        if (i >= f.count) return @"";
+        return [[f subarrayWithRange:NSMakeRange(i, f.count - i)]
+                componentsJoinedByString:@" "];
+    }
+    return @"";
+}
+
 static void CCStreamShowPartial(CCStream *st, NSString *t) {
     if (!t.length) return;
     // 只显示“这一句还没翻译的部分”。以前显示整个 session 的累计 partial，
@@ -1712,12 +1802,12 @@ static void CCStreamDeliver(CCStream *st) {
     if (!g_callActive) { st.delivered = st.text ?: @""; return; }
     NSString *full = st.text ?: @"";
     if (!full.length) return;
-    NSString *tail = CCStreamNewTail(full, st.delivered);
+    NSString *tail = CCStreamNewTailStrict(full, st.delivered);
+    if (!tail.length) return;          // 对不上就等下一次，绝不把新内容吞掉
     NSString *prevDelivered = st.delivered;
     st.delivered = full;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     st.lastDeliverAt = now;
-    if (!tail.length) return;
     CCLogf(@"stream %@ deliver (silence %.2fs): %@", CCStreamTag(st),
            st.lastVoiceAt > 0 ? now - st.lastVoiceAt : 0, tail);
     // 所有引擎都失败时把 delivered 退回去，下一段继续重试，别把这句话吞掉
@@ -1892,6 +1982,12 @@ static void CCStreamFinishSession(CCStream *st) {
     st.starting = NO;
     st.rotating = NO;
     CCStreamDeliver(st);                   // 会话结束/轮换/出错前，先把已识别的部分送出去
+    if (!g_callActive) {                   // 挂断后不再 retry（日志里 19:22:43 还在重试）
+        st.failures = 0;
+        st.nextRetryAt = 0;
+        st.restartScheduled = NO;
+        return;
+    }
     if (st.failures > 0) {
         // 只换识别模式重试：绝不回落到“按时间切块”。
         // 用户铁律：宁可暂时没有识别结果，也不切用户说的话。
@@ -2027,24 +2123,37 @@ static void CCStreamTick(CCStream *st) {
 
     CCStreamFeed(st, s, cnt);
 
-    // 端点：识别器的句末标点 / 自然停顿 1.0 秒 / 连续说话最多 10 秒。
-    // LCT 的 assistant 里同样有 silence timeout；这是没有 Siri 端点时最接近的做法。
+    // v0.18 端点：标点稳定 0.3s / 静音 0.8s 且 >=3 词 / 短句 1.8s / 15s 上限且 >=4 词。
+    // VAD 只决定什么时候翻译/播报，不影响抓音；音频仍然连续进识别器。
     if (st.text.length) {
-        NSString *tail = CCStreamNewTail(st.text, st.delivered);
-        BOOL ended = (tail.length && CCStreamHasSentenceEnd(tail));
-        double silence = st.lastVoiceAt > 0 ? now - st.lastVoiceAt : 0;
-        if (!ended && tail.length >= 2 && silence > 1.0) ended = YES;
-        if (!ended && tail.length >= 4 && st.lastDeliverAt > 0 &&
-            now - st.lastDeliverAt > 10.0) ended = YES;
-        if (ended) CCStreamDeliver(st);
+        NSString *tail = CCStreamNewTailStrict(st.text, st.delivered);
+        if (tail.length) {
+            double silence = st.lastVoiceAt > 0 ? now - st.lastVoiceAt : 0;
+            double stable = st.lastTextAt > 0 ? now - st.lastTextAt : 0;
+            NSUInteger words = 0;
+            for (NSString *w in [tail componentsSeparatedByString:@" "])
+                if (w.length) words++;
+            BOOL ended = NO;
+            if (CCStreamHasSentenceEnd(tail) && stable >= 0.30) ended = YES;
+            else if (silence >= 0.80 && words >= 3) ended = YES;
+            else if (silence >= 1.80) ended = YES;
+            else if (st.lastDeliverAt > 0 && now - st.lastDeliverAt >= 15.0 &&
+                     words >= 4) ended = YES;
+            if (ended) CCStreamDeliver(st);
+        }
     }
 
-    // Apple 单会话约 1 分钟：55 秒时收句并轮换，间隙音频进 pending
-    if (st.task && now - st.sessionStart > 55.0 && !st.rotating) {
-        CCLogf(@"stream %@ rotate at 55s", CCStreamTag(st));
-        CCStreamDeliver(st);
-        st.rotating = YES;
-        [st.req endAudio];
+    // Apple 单会话约 1 分钟：优先在自然停顿处轮换，避免把一句话从中间切断。
+    if (st.task && !st.rotating) {
+        double age = now - st.sessionStart;
+        double stable = st.lastTextAt > 0 ? now - st.lastTextAt : age;
+        if (age > 55.0 && (stable > 0.8 || age > 58.0)) {
+            CCLogf(@"stream %@ rotate at %.0fs (stable %.2fs)",
+                   CCStreamTag(st), age, stable);
+            CCStreamDeliver(st);
+            st.rotating = YES;
+            [st.req endAudio];
+        }
     }
 }
 
@@ -2058,11 +2167,12 @@ static void CCStreamCallActive(BOOL active) {
         r.callStart = now;
         l.callStart = now;
         BOOL cloud = CCPrefBool(CC_K_CLOUD_ASR, YES);
-        // 对方方向：云端正向优先（实测云端可用；本地流式 1110），失败会自动退本地
-        r.onDevice = NO;
-        l.onDevice = !cloud;
-        CCLogf(@"stream: call active, cloud=%d remoteCloudFirst=1 localPaused=%d",
-               cloud, g_localStreamPaused);
+        // v0.18：对方方向默认 on-device（0.28-0.45s 首字），连续失败才由 retry 自动切云端。
+        // 0.17.x 强制 cloud 每次新建会话首字 4.9-6.0s，这是延迟高的主因之一。
+        r.onDevice = YES;
+        l.onDevice = YES;
+        CCLogf(@"stream: call active, cloudPref=%d remoteOnDevice=1 localInDaemon=1",
+               cloud);
     } else {
         CCStreamStop(r);
         CCStreamStop(l);

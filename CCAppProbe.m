@@ -378,7 +378,7 @@ static _Atomic(uint32_t) g_ttsZhHead, g_ttsZhTail;
 static NSTimeInterval g_ttsZhMtime;
 
 // 原音音量：0.0~1.0（0 = TTS 播放时原音静音）
-static double g_duckRemote = 0.30;
+static double g_duckRemote = 0.45;   // v0.18：中文播报时对方原音保留 45%，还能听见后续
 static double g_duckLocal = 0.30;
 static NSTimeInterval g_cfgMtime;
 

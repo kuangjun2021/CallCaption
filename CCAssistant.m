@@ -142,6 +142,18 @@ static NSString *CCTextFromObject(id o) {
     } @catch (NSException *e) { CCLogA(@"package exc %@", e.reason); }
 }
 
+- (void)coreEmbeddedSpeechRecognizer:(id)r didRecognizeTokens:(NSArray *)tokens {
+    [self localSpeechRecognizer:r didRecognizeTokens:tokens];
+}
+- (void)coreEmbeddedSpeechRecognizer:(id)r didCompletionRecognitionWithStatistics:(NSDictionary *)stats error:(NSError *)err {
+    [self localSpeechRecognizer:r didCompletionRecognitionWithStatistics:stats error:err];
+}
+- (void)coreEmbeddedSpeechRecognizer:(id)r didProcessAudioDuration:(double)d {
+    [self localSpeechRecognizer:r didProcessAudioDuration:d];
+}
+- (void)coreEmbeddedSpeechRecognizer:(id)r didRecognizePackage:(id)package {
+    [self localSpeechRecognizer:r didRecognizePackage:package];
+}
 - (void)localSpeechRecognizer:(id)r didRecognizeRawEagerRecognitionCandidate:(id)cand {
     @try {
         NSString *txt = CCTextFromObject(cand);
@@ -185,6 +197,32 @@ static void CCSetArg(NSInvocation *inv, NSUInteger idx, const char *type,
 @property (nonatomic) BOOL feedLogged;
 @end
 
+static void CCSetObjSel(id o, NSString *selName, id v) {
+    SEL s = NSSelectorFromString(selName);
+    if (s && [o respondsToSelector:s])
+        [o performSelector:s withObject:v];
+}
+static void CCSetBoolSel(id o, NSString *selName, BOOL v) {
+    SEL s = NSSelectorFromString(selName);
+    if (!s || ![o respondsToSelector:s]) return;
+    NSMethodSignature *sig = [o methodSignatureForSelector:s];
+    if (!sig) return;
+    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+    inv.target = o; inv.selector = s;
+    [inv setArgument:&v atIndex:2];
+    [inv invoke];
+}
+static void CCSetDoubleSel(id o, NSString *selName, double v) {
+    SEL s = NSSelectorFromString(selName);
+    if (!s || ![o respondsToSelector:s]) return;
+    NSMethodSignature *sig = [o methodSignatureForSelector:s];
+    if (!sig) return;
+    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+    inv.target = o; inv.selector = s;
+    [inv setArgument:&v atIndex:2];
+    [inv invoke];
+}
+
 @implementation CCAssistantRunner
 
 + (instancetype)shared {
@@ -199,6 +237,7 @@ static void CCSetArg(NSInvocation *inv, NSUInteger idx, const char *type,
     if (tried) return;
     tried = YES;
     const char *cands[] = {
+        "/System/Library/PrivateFrameworks/CoreEmbeddedSpeechRecognition.framework/CoreEmbeddedSpeechRecognition",
         "/System/Library/PrivateFrameworks/SiriCore.framework/SiriCore",
         "/System/Library/PrivateFrameworks/AssistantServices.framework/AssistantServices",
         "/System/Library/PrivateFrameworks/SpeechRecognitionCore.framework/SpeechRecognitionCore",
@@ -214,8 +253,13 @@ static void CCSetArg(NSInvocation *inv, NSUInteger idx, const char *type,
 
 - (void)logEnvironment {
     [self loadSiriFrameworks];
-    Class cls = NSClassFromString(@"SiriCoreLocalSpeechRecognizer");
-    CCLogA(@"env: SiriCoreLocalSpeechRecognizer=%@", cls ? @"YES" : @"NO");
+    Class cls = NSClassFromString(@"CoreEmbeddedSpeechRecognizer");
+    CCLogA(@"env: CoreEmbeddedSpeechRecognizer=%@ CESRSpeechParameters=%@",
+           cls ? @"YES" : @"NO",
+           NSClassFromString(@"CESRSpeechParameters") ? @"YES" : @"NO");
+    Class oldCls = NSClassFromString(@"SiriCoreLocalSpeechRecognizer");
+    CCLogA(@"env: SiriCoreLocalSpeechRecognizer=%@", oldCls ? @"YES" : @"NO");
+    cls = oldCls;
     if (cls) {
         SEL s16 = NSSelectorFromString(@"startSpeechRecognitionWithLanguage:interactionIdentifier:task:context:narrowband:detectUtterances:maximumRecognitionDuration:farField:secureOfflineOnly:censorSpeech:originalAudioFileURL:overrides:modelOverrideURL:applicationName:shouldStoreAudioOnDevice:didStartHandler:");
         SEL s13 = NSSelectorFromString(@"startSpeechRecognitionWithLanguage:task:context:narrowband:detectUtterances:maximumRecognitionDuration:farField:secureOfflineOnly:censorSpeech:originalAudioFileURL:overrides:modelOverrideURL:didStartHandler:");
@@ -233,9 +277,75 @@ static void CCSetArg(NSInvocation *inv, NSUInteger idx, const char *type,
            NSClassFromString(@"SASSpeechPacket") ? @"YES" : @"NO");
 }
 
+- (BOOL)startCoreEmbedded:(Class)cls {
+    CCAssistantDelegate *d = [CCAssistantDelegate new];
+    self.delegate = d;
+    id rec = [[cls alloc] init];
+    if (!rec) { CCLogA(@"core: init failed"); return NO; }
+    @try { [rec setValue:d forKey:@"delegate"]; }
+    @catch (NSException *e) { CCLogA(@"core: set delegate exc %@", e.reason); }
+    self.recognizer = rec;
+
+    Class pc = NSClassFromString(@"CESRSpeechParameters");
+    SEL builderSel = NSSelectorFromString(@"newWithBuilder:");
+    id params = nil;
+    if (pc && [pc respondsToSelector:builderSel]) {
+        void (^build)(id) = [^(id b) {
+            CCSetObjSel(b, @"setLanguage:", @"en-US");
+            CCSetObjSel(b, @"setTask:", @"dictation");
+            CCSetObjSel(b, @"setApplicationName:", @"CallCaption");
+            CCSetBoolSel(b, @"setNarrowband:", YES);
+            CCSetBoolSel(b, @"setDetectUtterances:", YES);
+            CCSetBoolSel(b, @"setSecureOfflineOnly:", YES);
+            CCSetBoolSel(b, @"setCensorSpeech:", NO);
+            CCSetBoolSel(b, @"setFarField:", NO);
+            CCSetBoolSel(b, @"setShouldStoreAudioOnDevice:", NO);
+            CCSetBoolSel(b, @"setEnableAutoPunctuation:", YES);
+            CCSetDoubleSel(b, @"setMaximumRecognitionDuration:", 60.0);
+        } copy];
+        @try { params = [pc performSelector:builderSel withObject:build]; }
+        @catch (NSException *e) { CCLogA(@"core: params exc %@", e.reason); }
+    }
+    CCLogA(@"core: params=%@", params ? @"OK" : @"nil");
+
+    SEL startSel = NSSelectorFromString(@"startSpeechRecognitionWithParameters:didStartHandler:");
+    if (!params || ![rec respondsToSelector:startSel]) {
+        CCLogA(@"core: start selector/params missing");
+        return NO;
+    }
+    void (^started)(BOOL) = [^(BOOL ok) {
+        CCLogA(@"core: didStartHandler ok=%d", ok);
+    } copy];
+    @try {
+        [rec performSelector:startSel withObject:params withObject:started];
+        CCLogA(@"core: start invoked");
+    } @catch (NSException *e) {
+        CCLogA(@"core: start exc %@", e.reason);
+        return NO;
+    }
+
+    self.running = YES;
+    self.offset = 44;
+    self.packetNumber = 0;
+    self.feedLogged = NO;
+#ifndef CC_ASSISTANT_EMBED
+    self.feedTimer = [NSTimer scheduledTimerWithTimeInterval:0.10
+                                                      target:self
+                                                    selector:@selector(feedTick:)
+                                                    userInfo:nil repeats:YES];
+    [[NSRunLoop mainRunLoop] addTimer:self.feedTimer forMode:NSRunLoopCommonModes];
+#endif
+    return YES;
+}
+
 - (BOOL)startRecognizer {
     if (self.running) return YES;
     [self loadSiriFrameworks];
+    Class coreCls = NSClassFromString(@"CoreEmbeddedSpeechRecognizer");
+    if (coreCls) {
+        CCLogA(@"start: using CoreEmbeddedSpeechRecognizer");
+        return [self startCoreEmbedded:coreCls];
+    }
     Class cls = NSClassFromString(@"SiriCoreLocalSpeechRecognizer");
     if (!cls) { CCLogA(@"start: class missing"); return NO; }
 

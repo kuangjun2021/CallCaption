@@ -44,13 +44,15 @@ KILLALL=/var/jb/usr/bin/killall
 [ -x "$KILLALL" ] || KILLALL=killall
 "$KILLALL" -9 CallCaptionAudioService 2>/dev/null || true
 
-# 清掉 0.16.1 遗留的 SiriHelper LaunchDaemon（现在由音频守护进程 posix_spawn）
-rm -f "$JB/Library/LaunchDaemons/net.user.callcaption.sirihelper.plist" 2>/dev/null || true
-launchctl bootout system/net.user.callcaption.sirihelper 2>/dev/null || true
-
-# Stage A Siri helper 二进制（由音频守护进程 posix_spawn）
+# Siri helper：LaunchDaemon（照 LCT livecallhelper 的方式由 launchd 启动，拿到完整沙盒/权限上下文）
 H="$JB/usr/local/bin/CallCaptionSiriHelper"
+P="$JB/Library/LaunchDaemons/net.user.callcaption.sirihelper.plist"
 chown 0:0 "$H" 2>/dev/null || true
 chmod 0755 "$H" 2>/dev/null || true
+chown 0:0 "$P" 2>/dev/null || true
+chmod 0644 "$P" 2>/dev/null || true
+"$KILLALL" -9 CallCaptionSiriHelper 2>/dev/null || true
+launchctl bootout system/net.user.callcaption.sirihelper 2>/dev/null || true
+launchctl bootstrap system "$P" >/dev/null 2>&1   || launchctl load "$P" >/dev/null 2>&1   || true
 
 exit 0

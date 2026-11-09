@@ -50,7 +50,7 @@ CallCaptionSiriHelper_FILES = CCAssistant.m
 CallCaptionSiriHelper_FRAMEWORKS = Foundation
 CallCaptionSiriHelper_CFLAGS = -fobjc-arc -DCC_ASSISTANT_TOOL -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function -Wno-arc-performSelector-leaks -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
 CallCaptionSiriHelper_LDFLAGS = -Wl,-fixup_chains -Wl,-undefined,dynamic_lookup
-CallCaptionSiriHelper_CODESIGN_FLAGS = -Sentitlements/CallCaptionAudioService.plist
+CallCaptionSiriHelper_CODESIGN_FLAGS = -Sentitlements/CallCaptionSiriHelper.plist
 CallCaptionSiriHelper_INSTALL_PATH = /usr/local/bin
 
 

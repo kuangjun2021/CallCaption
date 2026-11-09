@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>net.user.callcaption.sirihelper</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/var/jb/usr/local/bin/CallCaptionSiriHelper</string>
+	</array>
+	<key>ProcessType</key>
+	<string>Interactive</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+	<key>EnablePressuredExit</key>
+	<false/>
+	<key>UserName</key>
+	<string>mobile</string>
+</dict>
+</plist>

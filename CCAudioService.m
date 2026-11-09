@@ -36,7 +36,7 @@ static void CCLocalTeeWriteFloat(const float *src, UInt32 n);
 
 static dispatch_queue_t g_stateQ;
 static CFAbsoluteTime g_muteUntil;         // 英文 TTS 播放期间静音，防回声自激
-// v0.16.13：守护进程只做“音频桥”——麦克风 Tap + 16k WAV 写入 + TTS 文件复制。
+// v0.16.14：守护进程只做“音频桥”——麦克风 Tap + 16k WAV 写入 + TTS 文件复制。
 // 识别/翻译/TTS 合成全部在 SpringBoard（唯一可用 SFSpeech 上下文）。
 // 守护进程里那套 SFSpeech 从来没被喂过音频，只会触发看门狗反复重启 Tap，
 // 把 local16k.wav 切成一段段空洞——这就是“我方漏句”的直接原因。
@@ -1330,7 +1330,7 @@ static void CheckArm(void) {
             g_remote->tapProbeCount = 0;
             g_remote.tapPID = CC_TAP_PID_SPEAKER;
             // 清掉上一通的 16k 桥文件：关闭后删除，下次写入自动重建并截断。
-            // 0.16.13 在这里 stop 通道并直接 fopen，结果守护进程每 6~7 秒重启一次
+            // 0.16.14 在这里 stop 通道并直接 fopen，结果守护进程每 6~7 秒重启一次
             // （日志里 44 次 audioservice started），整条链路等于没有运行。
             NSFileManager *fm2 = [NSFileManager defaultManager];
             CCRemoteTeeClose();
@@ -1346,7 +1346,6 @@ static void CheckArm(void) {
             CCLogf(@"arm: bridge wav cleared (local tap in 1.0s)");
         }
         lastArmed = armed;
-        CCManageSiriHelper(armed);
         if (!armed) {
             [g_remote stop];
             [g_local stop];
@@ -1585,7 +1584,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.16.13)");
+        CCLogLine(@"audioservice started (v0.16.14)");
         // LCT 的 livecallhelper 在识别前会配置 AVAudioSession（SoloAmbient/Default）；
         // 我们的守护进程以前没做这一步，补上。
         @try {

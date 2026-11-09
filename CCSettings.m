@@ -621,8 +621,7 @@ static void VoiceLists(NSString *prefix,
                                              ofItemAtPath:path error:nil];
         FILE *fp = fopen("/tmp/ccsettings.log", "a");
         if (fp) {
-            fprintf(fp, "[%s] set %s global=%d
-",
+            fprintf(fp, "[%s] set %s global=%d\n",
                     [[[NSDate date] description] UTF8String], key.UTF8String, ok);
             fclose(fp);
         }

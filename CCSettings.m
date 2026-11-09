@@ -118,6 +118,99 @@ typedef NS_ENUM(NSInteger, CCPrefsItemKind) {
 }
 @end
 
+// ---------- 音色选择 + 试听 ----------
+// 系统 AVSpeechSynthesisVoice 列表 + 点一下立即用该音色朗读示例，选中即保存。
+
+@interface CCVoicePickerController : UIViewController <UITableViewDataSource, UITableViewDelegate>
+@property (nonatomic, copy) NSArray<NSString *> *values;
+@property (nonatomic, copy) NSArray<NSString *> *titles;
+@property (nonatomic, copy) NSString *current;
+@property (nonatomic, copy) NSString *sampleText;
+@property (nonatomic, copy) NSString *fallbackLang;
+@property (nonatomic, copy) void (^onPick)(NSString *value);
+@property (nonatomic, strong) UITableView *table;
+@property (nonatomic, strong) AVSpeechSynthesizer *synth;
+@end
+
+@implementation CCVoicePickerController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"选择播报音色";
+    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    self.navigationItem.rightBarButtonItem =
+        [[UIBarButtonItem alloc] initWithTitle:@"完成" style:UIBarButtonItemStyleDone
+                                        target:self action:@selector(closeTapped)];
+    self.table = [[UITableView alloc] initWithFrame:self.view.bounds
+                                              style:UITableViewStyleInsetGrouped];
+    self.table.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    self.table.dataSource = self;
+    self.table.delegate = self;
+    [self.view addSubview:self.table];
+    self.synth = [[AVSpeechSynthesizer alloc] init];
+}
+
+- (void)closeTapped {
+    [self.synth stopSpeakingAtBoundary:AVSpeechBoundaryImmediate];
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 1; }
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
+    return (NSInteger)self.values.count;
+}
+- (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)s {
+    return @"点任意一行立即试听";
+}
+- (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)s {
+    return @"试听会直接用该音色朗读一段示例；点过即选中并保存，按“完成”返回。";
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    static NSString *cid = @"voice";
+    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:cid];
+    if (!cell)
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+                                      reuseIdentifier:cid];
+    NSUInteger i = (NSUInteger)ip.row;
+    NSString *val = i < self.values.count ? self.values[i] : @"";
+    cell.textLabel.text = i < self.titles.count ? self.titles[i] : val;
+    cell.textLabel.font = [UIFont systemFontOfSize:16];
+    cell.textLabel.numberOfLines = 1;
+    cell.detailTextLabel.text = (i == 0) ? @"不指定，按语言自动选择" : @"点一下试听";
+    cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+    cell.detailTextLabel.font = [UIFont systemFontOfSize:12];
+    cell.accessoryType = [val isEqualToString:(self.current ?: @"")]
+        ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    [tv deselectRowAtIndexPath:ip animated:YES];
+    NSUInteger i = (NSUInteger)ip.row;
+    if (i >= self.values.count) return;
+    self.current = self.values[i];
+    [tv reloadData];
+    if (self.onPick) self.onPick(self.current);
+    [self previewVoice:self.current];
+}
+
+- (void)previewVoice:(NSString *)identifier {
+    [self.synth stopSpeakingAtBoundary:AVSpeechBoundaryImmediate];
+    NSString *text = self.sampleText.length ? self.sampleText
+                                            : @"你好，这是语音试听。";
+    AVSpeechUtterance *u = [[AVSpeechUtterance alloc] initWithString:text];
+    AVSpeechSynthesisVoice *v = identifier.length
+        ? [AVSpeechSynthesisVoice voiceWithIdentifier:identifier] : nil;
+    if (v) u.voice = v;
+    else if (self.fallbackLang.length)
+        u.voice = [AVSpeechSynthesisVoice voiceWithLanguage:self.fallbackLang];
+    u.rate = 0.48;
+    [self.synth speakUtterance:u];
+}
+
+@end
+
 __attribute__((visibility("default")))
 @interface CCSettingsController : UIViewController
     <UITableViewDataSource, UITableViewDelegate, UITextFieldDelegate>
@@ -603,7 +696,12 @@ static void VoiceLists(NSString *prefix,
         return;
     }
     if (row.kind == CCPrefsItemKindChoice) {
-        [self presentChoices:row cell:[tv cellForRowAtIndexPath:ip]];
+        if ([row.key isEqualToString:@"TTSVoice"] ||
+            [row.key isEqualToString:@"LocalVoice"]) {
+            [self presentVoicePicker:row];
+        } else {
+            [self presentChoices:row cell:[tv cellForRowAtIndexPath:ip]];
+        }
         return;
     }
     if (row.kind == CCPrefsItemKindAction) {
@@ -637,6 +735,26 @@ static void VoiceLists(NSString *prefix,
 - (BOOL)textFieldShouldReturn:(UITextField *)tf {
     [tf resignFirstResponder];
     return YES;
+}
+
+- (void)presentVoicePicker:(CCPrefsItem *)row {
+    CCVoicePickerController *vc = [[CCVoicePickerController alloc] init];
+    vc.values = row.choiceValues ?: @[];
+    vc.titles = row.choiceTitles ?: @[];
+    vc.current = [self stringFor:row];
+    BOOL zh = [row.key isEqualToString:@"TTSVoice"];
+    vc.sampleText = zh ? @"你好，这是通话翻译的语音试听，很高兴为你服务。"
+                       : @"Hello, this is a preview of the call translation voice.";
+    vc.fallbackLang = zh ? @"zh-CN" : @"en-US";
+    __weak CCSettingsController *ws = self;
+    vc.onPick = ^(NSString *val) {
+        [ws setPrefValue:val forKey:row.key];
+        [ws.ccTable reloadData];
+    };
+    UINavigationController *nav =
+        [[UINavigationController alloc] initWithRootViewController:vc];
+    nav.modalPresentationStyle = UIModalPresentationPageSheet;
+    [self presentViewController:nav animated:YES completion:nil];
 }
 
 - (void)presentChoices:(CCPrefsItem *)row cell:(UITableViewCell *)cell {

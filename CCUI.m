@@ -1576,7 +1576,7 @@ static void CCRunSpeechSelfTest(BOOL onDevice) {
         }];
 }
 
-#pragma mark - 0.15.1 流式识别（LCT 同款 SFSpeechAudioBufferRecognitionRequest）
+#pragma mark - 0.15.2 流式识别（LCT 同款 SFSpeechAudioBufferRecognitionRequest）
 //
 // 旧方案：每 2~6 秒切一块 WAV，串行跑 SFSpeechURLRecognitionRequest。
 //   - 6 秒硬切会把单词劈成两半，重叠去重靠“单词完全相等”，识别不一致就丢词；
@@ -1601,6 +1601,7 @@ static void CCRunSpeechSelfTest(BOOL onDevice) {
 @property (nonatomic) CFAbsoluteTime lastDeliverAt;
 @property (nonatomic) CFAbsoluteTime lastUIAt;
 @property (nonatomic) CFAbsoluteTime sessionStart;
+@property (nonatomic) CFAbsoluteTime callStart;
 @property (nonatomic) BOOL hadVoice;
 @property (nonatomic) BOOL rotating;
 @property (nonatomic) BOOL starting;
@@ -1774,7 +1775,10 @@ static void CCStreamStart(CCStream *st) {
     st.lastTextAt = 0;
     st.rotating = NO;
     st.sessionStart = CFAbsoluteTimeGetCurrent();
-    CCLogf(@"stream %@ start onDevice=%d locale=%@", CCStreamTag(st), st.onDevice, loc);
+    CCLogf(@"stream %@ start onDevice=%d locale=%@ avail=%d supportOD=%d auth=%ld",
+           CCStreamTag(st), st.onDevice, loc, st.recog.isAvailable,
+           st.recog.supportsOnDeviceRecognition,
+           (long)[SFSpeechRecognizer authorizationStatus]);
 
     __weak CCStream *weakSt = st;
     st.task = [st.recog recognitionTaskWithRequest:r
@@ -1838,10 +1842,12 @@ static void CCStreamFinishSession(CCStream *st) {
     st.rotating = NO;
     CCStreamDeliver(st);                   // 会话结束/轮换/出错前，先把已识别的部分送出去
     if (st.failures > 0) {
-        if (!st.onDevice) {
-            st.onDevice = YES;             // 云端失败 → 本地
-        } else if (st.failures >= 3) {
-            st.legacy = YES;               // 本地也连续失败 → 退回旧分块识别
+        if (st.failures < 3) {
+            // 本地流式不可用就换云端，云端失败再换回本地（用户设置在两者都不通时让路）
+            st.onDevice = !st.onDevice;
+            CCLogf(@"stream %@ retry with onDevice=%d", CCStreamTag(st), st.onDevice);
+        } else {
+            st.legacy = YES;               // 两种流式都连续失败 → 退回旧分块识别
             CCLogf(@"stream %@ -> legacy chunk mode after %d failures",
                    CCStreamTag(st), st.failures);
             return;
@@ -1892,6 +1898,18 @@ static void CCStreamTick(CCStream *st) {
     if (!at) return;
     unsigned long long size = [at[NSFileSize] unsignedLongLongValue];
     if (size <= 44) return;
+
+    // 通话刚开始时，上一通的桥文件可能还在盘上（守护进程 0.5 秒后才 arm 重建）。
+    // 先等它变成新文件，别把上一通的话喂进新会话（日志里 1110 连败的根因）。
+    if (!st.path) {
+        NSTimeInterval mt = [at[NSFileModificationDate] timeIntervalSince1970];
+        NSTimeInterval nowEpoch = [[NSDate date] timeIntervalSince1970];
+        CFAbsoluteTime nowAbs = CFAbsoluteTimeGetCurrent();
+        if (mt > 0 && nowEpoch - mt > 1.5 && st.callStart > 0 &&
+            nowAbs - st.callStart < 3.0) {
+            return;
+        }
+    }
 
     if (!st.path || ![st.path isEqualToString:p] || size < st.offset) {
         st.path = p;
@@ -1984,6 +2002,9 @@ static void CCStreamCallActive(BOOL active) {
     if (active) {
         CCStreamReset(r);
         CCStreamReset(l);
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        r.callStart = now;
+        l.callStart = now;
         BOOL cloud = CCPrefBool(CC_K_CLOUD_ASR, YES);
         r.onDevice = !cloud;
         l.onDevice = !cloud;
@@ -2050,7 +2071,7 @@ void CCUIBoot(void) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.15.1)");
+        CCLogLine(@"CallCaption UI booted (single window v0.15.2)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

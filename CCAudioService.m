@@ -1207,6 +1207,17 @@ static void CheckArm(void) {
             // 新通话：重置 Tap 探测，从 speaker(-2) 开始，最多试 -1 / -3。
             g_remote->tapProbeCount = 0;
             g_remote.tapPID = CC_TAP_PID_SPEAKER;
+            // 立刻重建 16k 桥文件，清掉上一通残留。否则 SpringBoard 的流式识别
+            // 会在通话第一拍读到旧音频（日志里出现过 backlog 152 秒 → 1110 连败）。
+            [g_remote stop];
+            CCRemoteTeeClose();
+            CCRemoteTeeOpen();
+            if (CCPrefBool(CC_K_LOCAL_ENABLED, YES)) {
+                [g_local stop];
+                CCLocalTeeClose();
+                CCLocalTeeOpen();
+            }
+            CCLogf(@"arm: bridge wav reset");
         }
         lastArmed = armed;
         if (!armed) {
@@ -1434,7 +1445,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.15.1)");
+        CCLogLine(@"audioservice started (v0.15.2)");
         // LCT 的 livecallhelper 在识别前会配置 AVAudioSession（SoloAmbient/Default）；
         // 我们的守护进程以前没做这一步，补上。
         @try {

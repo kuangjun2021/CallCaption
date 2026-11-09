@@ -296,15 +296,19 @@ static void CCSetDoubleSel(id o, NSString *selName, double v) {
 - (BOOL)startCoreEmbedded:(Class)cls {
     CCAssistantDelegate *d = [CCAssistantDelegate new];
     self.delegate = d;
+    CCLogA(@"core: preparing delegate protocols");
     // 有些版本会用 conformsToProtocol 检查 delegate，运行时补上协议声明
     Protocol *p1 = objc_getProtocol("CoreEmbeddedSpeechRecognizerDelegate");
     if (p1) class_addProtocol([d class], p1);
     Protocol *p2 = objc_getProtocol("SiriCoreLocalSpeechRecognizerDelegate");
     if (p2) class_addProtocol([d class], p2);
 
+    CCLogA(@"core: allocating recognizer");
     id rec = [cls alloc];
+    CCLogA(@"core: allocated %p", rec);
     SEL initSel = NSSelectorFromString(@"initWithDelegate:instanceUUID:");
     if (rec && [rec respondsToSelector:initSel]) {
+        CCLogA(@"core: getting init signature");
         NSMethodSignature *isig = [rec methodSignatureForSelector:initSel];
         if (isig) {
             NSInvocation *iinv = [NSInvocation invocationWithMethodSignature:isig];
@@ -323,6 +327,7 @@ static void CCSetDoubleSel(id o, NSString *selName, double v) {
             }
             CCLogA(@"core: init sig ret=%s arg2=%s arg3=%s",
                    [isig methodReturnType], [isig getArgumentTypeAtIndex:2], t3);
+            CCLogA(@"core: invoking init");
             @try {
                 [iinv invoke];
                 __unsafe_unretained id out = nil;

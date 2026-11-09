@@ -44,4 +44,9 @@ KILLALL=/var/jb/usr/bin/killall
 [ -x "$KILLALL" ] || KILLALL=killall
 "$KILLALL" -9 CallCaptionAudioService 2>/dev/null || true
 
+# Stage A Siri helper 二进制（由音频守护进程 posix_spawn）
+H="$JB/usr/local/bin/CallCaptionSiriHelper"
+chown 0:0 "$H" 2>/dev/null || true
+chmod 0755 "$H" 2>/dev/null || true
+
 exit 0

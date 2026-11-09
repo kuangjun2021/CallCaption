@@ -9,6 +9,10 @@
 #import <Speech/Speech.h>
 #import <objc/runtime.h>
 #import <sys/stat.h>
+#import <spawn.h>
+#import <signal.h>
+#import <sys/wait.h>
+#import <fcntl.h>
 
 static void CCLocalTeeWriteFloat(const float *src, UInt32 n);
 
@@ -29,10 +33,8 @@ static void CCLocalTeeWriteFloat(const float *src, UInt32 n);
 #define CC_AQ_PROP_TAP       0x71746F62    // 'qtob'
 
 static dispatch_queue_t g_stateQ;
-extern void CCAssistantEmbedInit(void);
-extern void CCAssistantEmbedTick(void);
 static CFAbsoluteTime g_muteUntil;         // 英文 TTS 播放期间静音，防回声自激
-// v0.16.6：守护进程只做“音频桥”——麦克风 Tap + 16k WAV 写入 + TTS 文件复制。
+// v0.16.7：守护进程只做“音频桥”——麦克风 Tap + 16k WAV 写入 + TTS 文件复制。
 // 识别/翻译/TTS 合成全部在 SpringBoard（唯一可用 SFSpeech 上下文）。
 // 守护进程里那套 SFSpeech 从来没被喂过音频，只会触发看门狗反复重启 Tap，
 // 把 local16k.wav 切成一段段空洞——这就是“我方漏句”的直接原因。
@@ -1244,9 +1246,46 @@ static void CCWriteChunkWav(NSString *path, NSData *pcm) {
 
 // ---------- armed 文件监视 ----------
 
+// Stage A：Siri 本地识别跑在独立 helper 进程里，卡死/崩溃不拖垮音频守护进程
+static pid_t g_siriPid = 0;
+static CFAbsoluteTime g_siriLastSpawn = 0;
+static void CCManageSiriHelper(BOOL armed) {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (armed) {
+        if (g_siriPid > 0 && kill(g_siriPid, 0) == 0) return;
+        if (g_siriPid > 0) { waitpid(g_siriPid, NULL, WNOHANG); g_siriPid = 0; }
+        if (now - g_siriLastSpawn < 8.0) return;
+        g_siriLastSpawn = now;
+        const char *path = "/var/jb/usr/local/bin/CallCaptionSiriHelper";
+        if (access(path, X_OK) != 0) {
+            CCLogf(@"sirihelper missing");
+            return;
+        }
+        posix_spawn_file_actions_t acts;
+        posix_spawn_file_actions_init(&acts);
+        posix_spawn_file_actions_addopen(&acts, 1, "/dev/null", O_WRONLY, 0);
+        posix_spawn_file_actions_addopen(&acts, 2, "/dev/null", O_WRONLY, 0);
+        pid_t pid = 0;
+        char *argv[] = { (char *)path, NULL };
+        extern char **environ;
+        int rc = posix_spawn(&pid, path, &acts, NULL, argv, environ);
+        posix_spawn_file_actions_destroy(&acts);
+        if (rc == 0) {
+            g_siriPid = pid;
+            CCLogf(@"sirihelper spawned pid=%d", pid);
+        } else {
+            CCLogf(@"sirihelper spawn failed %d", rc);
+        }
+    } else if (g_siriPid > 0) {
+        kill(g_siriPid, SIGKILL);
+        waitpid(g_siriPid, NULL, WNOHANG);
+        CCLogf(@"sirihelper killed pid=%d", g_siriPid);
+        g_siriPid = 0;
+    }
+}
+
 static void CheckArm(void) {
     @try {
-        CCAssistantEmbedTick();
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
         if (now - g_lastPrefsLoad > 2.0) {
             g_lastPrefsLoad = now;
@@ -1269,7 +1308,7 @@ static void CheckArm(void) {
             g_remote->tapProbeCount = 0;
             g_remote.tapPID = CC_TAP_PID_SPEAKER;
             // 清掉上一通的 16k 桥文件：关闭后删除，下次写入自动重建并截断。
-            // 0.16.6 在这里 stop 通道并直接 fopen，结果守护进程每 6~7 秒重启一次
+            // 0.16.7 在这里 stop 通道并直接 fopen，结果守护进程每 6~7 秒重启一次
             // （日志里 44 次 audioservice started），整条链路等于没有运行。
             NSFileManager *fm2 = [NSFileManager defaultManager];
             CCRemoteTeeClose();
@@ -1285,6 +1324,7 @@ static void CheckArm(void) {
             CCLogf(@"arm: bridge wav cleared (local tap in 1.0s)");
         }
         lastArmed = armed;
+        CCManageSiriHelper(armed);
         if (!armed) {
             [g_remote stop];
             [g_local stop];
@@ -1523,8 +1563,7 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
-        CCLogLine(@"audioservice started (v0.16.6)");
-        CCAssistantEmbedInit();
+        CCLogLine(@"audioservice started (v0.16.7)");
         // LCT 的 livecallhelper 在识别前会配置 AVAudioSession（SoloAmbient/Default）；
         // 我们的守护进程以前没做这一步，补上。
         @try {

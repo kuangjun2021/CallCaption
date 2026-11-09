@@ -27,6 +27,9 @@ fi
 # 升级时让新二进制立即生效（launchd KeepAlive 会自动拉起新版）
 killall -9 CallCaptionAudioService 2>/dev/null || true
 
+# 新版 assistantd 注入（Stage A）：重启 Siri 守护进程让 dylib 立刻加载
+killall -9 assistantd 2>/dev/null || true
+
 # 立即加载（部分环境不支持 bootstrap，则等用户空间重启自动加载）
 launchctl bootstrap system "$JB/Library/LaunchDaemons/net.user.callcaption.audioservice.plist" >/dev/null 2>&1 \
   || launchctl load "$JB/Library/LaunchDaemons/net.user.callcaption.audioservice.plist" >/dev/null 2>&1 \

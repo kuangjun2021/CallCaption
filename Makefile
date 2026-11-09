@@ -5,7 +5,7 @@ INSTALL_TARGET_PROCESSES = SpringBoard mediaserverd
 
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME = CallCaption CallCaptionAudioHook CallCaptionAppProbe
+TWEAK_NAME = CallCaption CallCaptionAudioHook CallCaptionAppProbe CallCaptionAssistant
 CallCaption_FILES = Tweak.x CCSupport.m CCTranslator.m CCEngine.m CCUI.m CCMicCapture.m CCSettings.m
 CallCaption_FRAMEWORKS = Foundation UIKit AudioToolbox CoreTelephony AVFoundation Speech CoreFoundation CallKit
 CallCaption_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-command-line-argument -Wno-unused-function -fno-objc-msgsend-selector-stubs -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
@@ -22,6 +22,12 @@ CallCaptionAppProbe_FILES = CCAppProbe.m
 CallCaptionAppProbe_FRAMEWORKS = Foundation AudioToolbox
 CallCaptionAppProbe_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function -fno-objc-msgsend-selector-stubs -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
 CallCaptionAppProbe_LDFLAGS = -Wl,-fixup_chains
+
+# Stage A：assistantd 内本地 Siri 识别器验证（独立 dylib，全部私有 API 动态调用）
+CallCaptionAssistant_FILES = CCAssistant.m
+CallCaptionAssistant_FRAMEWORKS = Foundation
+CallCaptionAssistant_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
+CallCaptionAssistant_LDFLAGS = -Wl,-fixup_chains -Wl,-undefined,dynamic_lookup
 
 BUNDLE_NAME = CallCaptionPrefs
 CallCaptionPrefs_FILES = CallCaptionRootListController.m CCSettings.m

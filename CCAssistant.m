@@ -195,6 +195,7 @@ static void CCSetArg(NSInvocation *inv, NSUInteger idx, const char *type,
 @property (nonatomic) long long packetNumber;
 @property (nonatomic) BOOL running;
 @property (nonatomic) BOOL feedLogged;
+@property (nonatomic) CFAbsoluteTime nextTryAt;
 @end
 
 static void CCSetObjSel(id o, NSString *selName, id v) {
@@ -280,10 +281,45 @@ static void CCSetDoubleSel(id o, NSString *selName, double v) {
 - (BOOL)startCoreEmbedded:(Class)cls {
     CCAssistantDelegate *d = [CCAssistantDelegate new];
     self.delegate = d;
-    id rec = [[cls alloc] init];
+    id rec = [cls alloc];
+    SEL initSel = NSSelectorFromString(@"initWithDelegate:instanceUUID:");
+    if (rec && [rec respondsToSelector:initSel]) {
+        NSMethodSignature *isig = [rec methodSignatureForSelector:initSel];
+        if (isig) {
+            NSInvocation *iinv = [NSInvocation invocationWithMethodSignature:isig];
+            iinv.target = rec;
+            iinv.selector = initSel;
+            id dd = d;
+            [iinv setArgument:&dd atIndex:2];
+            const char *t3 = [isig getArgumentTypeAtIndex:3];
+            uuid_t uu; uuid_generate(uu);
+            if (t3[0] == '*' || t3[0] == '^') {
+                void *p = uu;
+                [iinv setArgument:&p atIndex:3];
+            } else {
+                unsigned char b = 0;
+                [iinv setArgument:&b atIndex:3];
+            }
+            @try {
+                [iinv invoke];
+                __unsafe_unretained id out = nil;
+                [iinv getReturnValue:&out];
+                rec = out;
+                CCLogA(@"core: initWithDelegate uuid type=%s -> %@", t3,
+                       rec ? @"OK" : @"nil");
+            } @catch (NSException *e) {
+                CCLogA(@"core: initWithDelegate exc %@", e.reason);
+            }
+        }
+    } else {
+        rec = [rec init];
+        CCLogA(@"core: falling back to init -> %@", rec ? @"OK" : @"nil");
+    }
     if (!rec) { CCLogA(@"core: init failed"); return NO; }
-    @try { [rec setValue:d forKey:@"delegate"]; }
-    @catch (NSException *e) { CCLogA(@"core: set delegate exc %@", e.reason); }
+    if (![rec valueForKey:@"delegate"]) {
+        @try { [rec setValue:d forKey:@"delegate"]; }
+        @catch (NSException *e) { CCLogA(@"core: set delegate exc %@", e.reason); }
+    }
     self.recognizer = rec;
 
     Class pc = NSClassFromString(@"CESRSpeechParameters");
@@ -571,7 +607,9 @@ void CCAssistantEmbedTick(void) {
     @autoreleasepool {
         CCAssistantRunner *r = [CCAssistantRunner shared];
         BOOL armed = [[NSFileManager defaultManager] fileExistsAtPath:CC_ASSIST_ARM];
-        if (armed && !r.running) {
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (armed && !r.running && now >= r.nextTryAt) {
+            r.nextTryAt = now + 5.0;   // 失败后 5 秒再试，别每 0.5 秒刷一次
             CCLogA(@"arm detected, starting Siri local recognizer");
             [r startRecognizer];
         } else if (!armed && r.running) {

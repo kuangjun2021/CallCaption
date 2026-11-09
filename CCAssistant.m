@@ -25,6 +25,9 @@
 #define CC_ASSIST_FALLBACK @"/tmp/ccassistant.log"
 #define CC_ASSIST_ARM  @"/var/mobile/Library/CallCaption/armed"
 #define CC_ASSIST_WAV  @"/var/mobile/Library/CallCaption/remote16k.wav"
+#ifdef CC_ASSISTANT_EMBED
+#define CC_ASSIST_PROBE @"/var/mobile/Library/CallCaption/probe.log"
+#endif
 
 static void CCLogA(NSString *fmt, ...) {
     @autoreleasepool {
@@ -46,6 +49,17 @@ static void CCLogA(NSString *fmt, ...) {
             fclose(fp);
             chmod(paths[i], 0666);
         }
+#ifdef CC_ASSISTANT_EMBED
+        // 同时写进用户平时发送的 probe.log，省得再找 assistant.log
+        NSString *pl = [NSString stringWithFormat:@"[Siri] %@
+", msg];
+        FILE *pfp = fopen(CC_ASSIST_PROBE.fileSystemRepresentation, "a");
+        if (pfp) {
+            fputs(pl.UTF8String, pfp);
+            fclose(pfp);
+            chmod(CC_ASSIST_PROBE.fileSystemRepresentation, 0666);
+        }
+#endif
     }
 }
 
@@ -300,11 +314,13 @@ static void CCSetArg(NSInvocation *inv, NSUInteger idx, const char *type,
     self.offset = 44;
     self.packetNumber = 0;
     self.feedLogged = NO;
+#ifndef CC_ASSISTANT_EMBED
     self.feedTimer = [NSTimer scheduledTimerWithTimeInterval:0.10
                                                       target:self
                                                     selector:@selector(feedTick:)
                                                     userInfo:nil repeats:YES];
     [[NSRunLoop mainRunLoop] addTimer:self.feedTimer forMode:NSRunLoopCommonModes];
+#endif
     return YES;
 }
 
@@ -325,6 +341,10 @@ static void CCSetArg(NSInvocation *inv, NSUInteger idx, const char *type,
 }
 
 - (void)feedTick:(NSTimer *)t {
+    [self feedOnce];
+}
+
+- (void)feedOnce {
     @try {
         NSDictionary *at = [[NSFileManager defaultManager] attributesOfItemAtPath:CC_ASSIST_WAV error:nil];
         if (!at) return;
@@ -403,7 +423,36 @@ static void CCSetArg(NSInvocation *inv, NSUInteger idx, const char *type,
 }
 @end
 
-#ifdef CC_ASSISTANT_TOOL
+#ifdef CC_ASSISTANT_EMBED
+// 嵌入模式：编进 CallCaptionAudioService，由守护进程的 CheckArm 每 0.5 秒调用
+void CCAssistantEmbedInit(void) {
+    @autoreleasepool {
+        [[NSFileManager defaultManager] createDirectoryAtPath:CC_ASSIST_DIR
+                                  withIntermediateDirectories:YES
+                                                   attributes:@{NSFilePosixPermissions: @0777}
+                                                        error:nil];
+        CCLogA(@"=== CallCaption Siri embed init pid=%d ===", getpid());
+        [[CCAssistantRunner shared] logEnvironment];
+    }
+}
+
+void CCAssistantEmbedTick(void) {
+    @autoreleasepool {
+        CCAssistantRunner *r = [CCAssistantRunner shared];
+        BOOL armed = [[NSFileManager defaultManager] fileExistsAtPath:CC_ASSIST_ARM];
+        if (armed && !r.running) {
+            CCLogA(@"arm detected, starting Siri local recognizer");
+            [r startRecognizer];
+        } else if (!armed && r.running) {
+            CCLogA(@"disarm detected, stopping");
+            [r stopRecognizer];
+        }
+        if (r.running) [r feedOnce];
+    }
+}
+#endif
+
+#if defined(CC_ASSISTANT_TOOL)
 // 独立守护进程模式：不依赖 assistantd 注入，用自己进程的 Siri 权限
 int main(int argc, char *argv[]) {
     @autoreleasepool {
@@ -427,7 +476,7 @@ int main(int argc, char *argv[]) {
     }
     return 0;
 }
-#else
+#elif !defined(CC_ASSISTANT_EMBED)
 __attribute__((constructor))
 static void CCAssistantInit(void) {
     @autoreleasepool {

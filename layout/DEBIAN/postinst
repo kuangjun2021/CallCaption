@@ -44,11 +44,4 @@ KILLALL=/var/jb/usr/bin/killall
 [ -x "$KILLALL" ] || KILLALL=killall
 "$KILLALL" -9 CallCaptionAudioService 2>/dev/null || true
 
-# Stage A：Siri 本地识别 helper（独立守护进程，不依赖 assistantd 注入）
-H="$JB/usr/local/bin/CallCaptionSiriHelper"
-chown 0:0 "$H" 2>/dev/null || true
-chmod 0755 "$H" 2>/dev/null || true
-"$KILLALL" -9 CallCaptionSiriHelper 2>/dev/null || true
-launchctl bootstrap system "$JB/Library/LaunchDaemons/net.user.callcaption.sirihelper.plist" >/dev/null 2>&1   || launchctl load "$JB/Library/LaunchDaemons/net.user.callcaption.sirihelper.plist" >/dev/null 2>&1   || true
-
 exit 0

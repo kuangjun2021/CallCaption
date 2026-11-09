@@ -1185,13 +1185,13 @@ static void CCRemoteFileTick(void) {
         unsigned long long size = [at[NSFileSize] unsignedLongLongValue];
         if (size <= 44) return;
         if (!g_sbPath || ![g_sbPath isEqualToString:p] || size < g_sbOffset) {
-            BOOL fresh = (g_sbPath == nil);
             g_sbPath = p;
-            // 新通话第一拍：如果读到上一通留下的整段音频，直接跳到末尾，避免 120 秒巨型块
-            g_sbOffset = (fresh && size > 16000 * 2 * 10) ? size : 44;
+            g_sbOffset = 44;           // 文件每次通话都重新创建，从第一个字节读，不跳音频
             g_sbChunk = [NSMutableData data]; g_sbLastText = nil;
         }
         if (size <= g_sbOffset) return;
+        // 识别中先不读：音频留在文件里，忙完再补，绝不裁剪丢弃
+        if (g_sbBusy) return;
         NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:p];
         if (!fh) return;
         [fh seekToFileOffset:g_sbOffset];
@@ -1216,24 +1216,25 @@ static void CCRemoteFileTick(void) {
             }
         }
 
-        // 识别任务在跑时不让块无限增长（之前出现过 54 秒的巨型块 → 301 取消）
-        if (g_sbBusy) {
-            NSUInteger maxBytes = 16000 * 2 * 6;
-            if (g_sbChunk.length > maxBytes)
-                g_sbChunk = [[g_sbChunk subdataWithRange:
-                              NSMakeRange(g_sbChunk.length - maxBytes, maxBytes)] mutableCopy];
-            return;
-        }
-
         double dur = (double)g_sbChunk.length / 32000.0;
         double silence = g_sbLastVoiceAt > 0
             ? CFAbsoluteTimeGetCurrent() - g_sbLastVoiceAt : 0;
         BOOL voiceEnded = g_sbHadVoice && silence > 0.6;
         if (!(dur >= 6.0 || (dur >= 2.0 && voiceEnded))) return;
 
-        NSData *pcm = [g_sbChunk copy];
-        NSUInteger keep = 16000 * 2;                        // 1 秒重叠
-        g_sbChunk = [[pcm subdataWithRange:NSMakeRange(pcm.length - keep, keep)] mutableCopy];
+        // 积压很多时只取前 12 秒，其余留在 chunk 里下一轮继续识别（不丢弃）
+        NSUInteger hardMax = 16000 * 2 * 12;
+        NSData *pcm;
+        if (g_sbChunk.length > hardMax) {
+            pcm = [g_sbChunk subdataWithRange:NSMakeRange(0, hardMax)];
+            g_sbChunk = [[g_sbChunk subdataWithRange:
+                          NSMakeRange(hardMax, g_sbChunk.length - hardMax)] mutableCopy];
+        } else {
+            pcm = [g_sbChunk copy];
+            NSUInteger keep = MIN((NSUInteger)(16000 * 2), pcm.length);  // 1 秒重叠
+            g_sbChunk = [[pcm subdataWithRange:
+                          NSMakeRange(pcm.length - keep, keep)] mutableCopy];
+        }
         g_sbHadVoice = NO;
         g_sbLastVoiceAt = 0;
 
@@ -1428,12 +1429,12 @@ static void CCLocalFileTick(void) {
         unsigned long long size = [at[NSFileSize] unsignedLongLongValue];
         if (size <= 44) return;
         if (!g_lbPath || ![g_lbPath isEqualToString:p] || size < g_lbOffset) {
-            BOOL fresh = (g_lbPath == nil);
             g_lbPath = p;
-            g_lbOffset = (fresh && size > 16000 * 2 * 10) ? size : 44;
+            g_lbOffset = 44;
             g_lbChunk = [NSMutableData data]; g_lbLastText = nil;
         }
         if (size <= g_lbOffset) return;
+        if (g_lbBusy) return;              // 识别中先不读，音频留在文件里
         NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:p];
         if (!fh) return;
         [fh seekToFileOffset:g_lbOffset];
@@ -1455,23 +1456,24 @@ static void CCLocalFileTick(void) {
             g_lbLastVoiceAt = CFAbsoluteTimeGetCurrent();
         }
 
-        if (g_lbBusy) {
-            NSUInteger maxBytes = 16000 * 2 * 6;
-            if (g_lbChunk.length > maxBytes)
-                g_lbChunk = [[g_lbChunk subdataWithRange:
-                              NSMakeRange(g_lbChunk.length - maxBytes, maxBytes)] mutableCopy];
-            return;
-        }
-
         double dur = (double)g_lbChunk.length / 32000.0;
         double silence = g_lbLastVoiceAt > 0
             ? CFAbsoluteTimeGetCurrent() - g_lbLastVoiceAt : 0;
         BOOL voiceEnded = g_lbHadVoice && silence > 0.6;
         if (!(dur >= 6.0 || (dur >= 2.0 && voiceEnded))) return;
 
-        NSData *pcm = [g_lbChunk copy];
-        NSUInteger keep = 16000 * 2;
-        g_lbChunk = [[pcm subdataWithRange:NSMakeRange(pcm.length - keep, keep)] mutableCopy];
+        NSUInteger hardMax = 16000 * 2 * 12;
+        NSData *pcm;
+        if (g_lbChunk.length > hardMax) {
+            pcm = [g_lbChunk subdataWithRange:NSMakeRange(0, hardMax)];
+            g_lbChunk = [[g_lbChunk subdataWithRange:
+                          NSMakeRange(hardMax, g_lbChunk.length - hardMax)] mutableCopy];
+        } else {
+            pcm = [g_lbChunk copy];
+            NSUInteger keep = MIN((NSUInteger)(16000 * 2), pcm.length);
+            g_lbChunk = [[pcm subdataWithRange:
+                          NSMakeRange(pcm.length - keep, keep)] mutableCopy];
+        }
         g_lbHadVoice = NO;
         g_lbLastVoiceAt = 0;
 
@@ -1574,7 +1576,7 @@ static void CCRunSpeechSelfTest(BOOL onDevice) {
         }];
 }
 
-#pragma mark - 0.15.0 流式识别（LCT 同款 SFSpeechAudioBufferRecognitionRequest）
+#pragma mark - 0.15.1 流式识别（LCT 同款 SFSpeechAudioBufferRecognitionRequest）
 //
 // 旧方案：每 2~6 秒切一块 WAV，串行跑 SFSpeechURLRecognitionRequest。
 //   - 6 秒硬切会把单词劈成两半，重叠去重靠“单词完全相等”，识别不一致就丢词；
@@ -1602,6 +1604,7 @@ static void CCRunSpeechSelfTest(BOOL onDevice) {
 @property (nonatomic) BOOL hadVoice;
 @property (nonatomic) BOOL rotating;
 @property (nonatomic) BOOL starting;
+@property (nonatomic) BOOL catchingUp;
 @property (nonatomic) BOOL onDevice;
 @property (nonatomic) BOOL legacy;
 @property (nonatomic) int failures;
@@ -1651,7 +1654,7 @@ static NSString *CCStreamNewTail(NSString *full, NSString *delivered) {
     while (i < a.count && i < b.count &&
            [[a[i] lowercaseString] isEqualToString:[b[i] lowercaseString]]) i++;
     if (i < b.count) {
-        if (i == 0 && b.count > 12) i = b.count - 12;
+        // 完全对不上（ASR 整段改写）：宁可整段重译一次，也不掐头去尾丢内容
         return [[b subarrayWithRange:NSMakeRange(i, b.count - i)]
                 componentsJoinedByString:@" "];
     }
@@ -1670,15 +1673,21 @@ static void CCStreamDeliver(CCStream *st) {
     NSString *full = st.text ?: @"";
     if (!full.length) return;
     NSString *tail = CCStreamNewTail(full, st.delivered);
+    NSString *prevDelivered = st.delivered;
     st.delivered = full;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     st.lastDeliverAt = now;
     if (!tail.length) return;
     CCLogf(@"stream %@ deliver (silence %.2fs): %@", CCStreamTag(st),
            st.lastVoiceAt > 0 ? now - st.lastVoiceAt : 0, tail);
+    // 所有引擎都失败时把 delivered 退回去，下一段继续重试，别把这句话吞掉
+    void (^onFail)(void) = ^{
+        if ([st.delivered isEqualToString:full]) st.delivered = prevDelivered;
+        CCLogf(@"stream %@ translate failed, will retry", CCStreamTag(st));
+    };
     if (st.isLocal) {
         CCTranslateEx(tail, @"zh", @"en", ^(NSString *out, NSString *engine) {
-            if (!out.length) return;
+            if (!out.length) { onFail(); return; }
             CCUIDeliverLocalTranslated(out);
             if (engine.length) CCUIDeliverLocalEngine(engine);
             if (CCPrefBool(CC_K_TTS_ENABLED, YES))
@@ -1686,7 +1695,7 @@ static void CCStreamDeliver(CCStream *st) {
         });
     } else {
         CCTranslateEx(tail, @"en", @"zh", ^(NSString *out, NSString *engine) {
-            if (!out.length) return;
+            if (!out.length) { onFail(); return; }
             CCUIDeliverRemoteTranslated(out);
             if (engine.length) CCUIDeliverRemoteEngine(engine);
             if (CCPrefBool(CC_K_TTS_ENABLED, YES))
@@ -1714,14 +1723,14 @@ static void CCStreamFeedRaw(CCStream *st, const int16_t *s, NSUInteger n) {
 
 static void CCStreamFeed(CCStream *st, const int16_t *s, NSUInteger n) {
     if (!n) return;
-    if (st.req) {
+    // 轮换/重建会话期间 request 已 endAudio，不能再往里塞；音频进 pending，绝不丢
+    if (st.req && !st.rotating) {
         CCStreamFeedRaw(st, s, n);
         return;
     }
-    // 会话切换的间隙：音频先存着，新 request 就绪后补喂，避免丢字
     if (!st.pending) st.pending = [NSMutableData data];
     [st.pending appendBytes:s length:n * 2];
-    NSUInteger cap = 16000 * 2 * 6;
+    NSUInteger cap = 16000 * 2 * 30;      // 最多缓存 30 秒，足够覆盖任何会话切换
     if (st.pending.length > cap) {
         st.pending = [[st.pending subdataWithRange:
                        NSMakeRange(st.pending.length - cap, cap)] mutableCopy];
@@ -1827,8 +1836,8 @@ static void CCStreamFinishSession(CCStream *st) {
     st.req = nil;
     st.starting = NO;
     st.rotating = NO;
+    CCStreamDeliver(st);                   // 会话结束/轮换/出错前，先把已识别的部分送出去
     if (st.failures > 0) {
-        CCStreamDeliver(st);               // 重启前先把已识别的部分送出去，别丢
         if (!st.onDevice) {
             st.onDevice = YES;             // 云端失败 → 本地
         } else if (st.failures >= 3) {
@@ -1851,7 +1860,7 @@ static void CCStreamReset(CCStream *st) {
     st.path = nil; st.offset = 0;
     st.text = @""; st.delivered = @"";
     st.pending = nil;
-    st.hadVoice = NO; st.rotating = NO; st.starting = NO;
+    st.hadVoice = NO; st.rotating = NO; st.starting = NO; st.catchingUp = NO;
     st.failures = 0; st.legacy = NO;
     st.lastVoiceAt = 0; st.lastTextAt = 0; st.lastDeliverAt = 0; st.lastUIAt = 0;
     st.sessionStart = 0; st.gain = 1.0;
@@ -1862,7 +1871,7 @@ static void CCStreamStop(CCStream *st) {
     st.task = nil; st.req = nil; st.pending = nil;
     st.path = nil; st.offset = 0;
     st.text = @""; st.delivered = @"";
-    st.hadVoice = NO; st.rotating = NO; st.starting = NO;
+    st.hadVoice = NO; st.rotating = NO; st.starting = NO; st.catchingUp = NO;
 }
 
 static void CCStreamTick(CCStream *st) {
@@ -1885,10 +1894,10 @@ static void CCStreamTick(CCStream *st) {
     if (size <= 44) return;
 
     if (!st.path || ![st.path isEqualToString:p] || size < st.offset) {
-        BOOL fresh = (st.path == nil);
         st.path = p;
-        st.offset = (fresh && size > 16000 * 2 * 8) ? size : 44;
-        // 新通话/文件重建：识别会话、文本全部重来
+        // 文件在通话开始（arm）时由守护进程重新创建并截断，44 起就是本通电话的第一个字节。
+        // 不按“文件已经多大”判断新旧——那会吞掉开头真实说的话。
+        st.offset = 44;
         if (st.task) [st.task cancel];
         st.task = nil; st.req = nil;
         st.text = @""; st.delivered = @"";
@@ -1902,10 +1911,26 @@ static void CCStreamTick(CCStream *st) {
     if (!st.task && !st.starting) CCStreamStart(st);
     if (size <= st.offset) return;
 
+    // 积压（例如 SpringBoard 重启后文件里已有整通录音）时按约 5 倍实时补读，
+    // 只是分几次喂，绝不跳过、绝不丢样本。
+    unsigned long long backlog = size - st.offset;
+    unsigned long long maxRead = 32000ULL * 3;      // 每拍最多 3 秒
+    if (backlog > 32000ULL * 4) {
+        maxRead = 32000ULL;                         // 积压 >4 秒时每拍 1 秒
+        if (!st.catchingUp) {
+            st.catchingUp = YES;
+            CCLogf(@"stream %@ backlog %.1fs, catching up", CCStreamTag(st),
+                   (double)backlog / 32000.0);
+        }
+    } else {
+        st.catchingUp = NO;
+    }
+    if (backlog > maxRead) backlog = maxRead;
+
     NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:p];
     if (!fh) return;
     [fh seekToFileOffset:st.offset];
-    NSData *d = [fh readDataToEndOfFile];
+    NSData *d = [fh readDataOfLength:(NSUInteger)backlog];
     [fh closeFile];
     NSUInteger n = d.length & ~(NSUInteger)1;
     if (n == 0) return;
@@ -1935,7 +1960,10 @@ static void CCStreamTick(CCStream *st) {
         BOOL bySilence = (silence > 0.55);
         BOOL byStable = (st.text.length > 0 && stable > 0.9 &&
                          now - st.lastDeliverAt > 1.2);
-        if (bySilence || byStable) {
+        // 连续说不停顿也不能无限等：每 12 秒把已识别的部分先翻出去
+        BOOL byTimeout = (st.text.length > 0 && st.lastTextAt > 0 &&
+                          now - st.lastDeliverAt > 12.0);
+        if (bySilence || byStable || byTimeout) {
             st.hadVoice = (silence <= 0.55);
             CCStreamDeliver(st);
         }
@@ -2022,7 +2050,7 @@ void CCUIBoot(void) {
                 CCLogf(@"ui boot exc: %@", e.reason);
             }
         });
-        CCLogLine(@"CallCaption UI booted (single window v0.15.0)");
+        CCLogLine(@"CallCaption UI booted (single window v0.15.1)");
     } @catch (NSException *e) {
         CCMark(@"ui BOOT EXCEPTION!");
     }

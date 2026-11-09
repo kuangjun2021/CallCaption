@@ -281,7 +281,7 @@ static CCCB *CCMakeCB(AudioUnit unit, UInt32 bus,
     if (c->fmt.rate <= 0) c->fmt.rate = 48000;
     if (c->fmt.ch == 0) c->fmt.ch = 1;
     if (c->fmt.bits == 0) c->fmt.bits = 32;
-    c->cap = (UInt32)(c->fmt.rate * 10);   // 10 秒环：报告线程偶发卡顿也不丢字
+    c->cap = (UInt32)(c->fmt.rate * 30);   // 30 秒环：报告线程偶发卡顿也不丢字
     c->ring = calloc(c->cap, sizeof(float));
     if (!c->ring) { free(c); return NULL; }
 

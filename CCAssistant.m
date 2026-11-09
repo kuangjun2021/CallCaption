@@ -368,6 +368,9 @@ static void CCSetDoubleSel(id o, NSString *selName, double v) {
             CCSetObjSel(b, @"setLanguage:", @"en-US");
             CCSetObjSel(b, @"setTask:", @"dictation");
             CCSetObjSel(b, @"setApplicationName:", @"CallCaption");
+            CCSetObjSel(b, @"setRequestIdentifier:", [[NSUUID UUID] UUIDString]);
+            CCSetObjSel(b, @"setInputOrigin:", @"CallCaption");
+            CCSetBoolSel(b, @"setIsSpeechAPIRequest:", YES);
             CCSetBoolSel(b, @"setNarrowband:", YES);
             CCSetBoolSel(b, @"setDetectUtterances:", YES);
             CCSetBoolSel(b, @"setSecureOfflineOnly:", YES);
@@ -670,6 +673,12 @@ int main(int argc, char *argv[]) {
                                                    attributes:@{NSFilePosixPermissions: @0777}
                                                         error:nil];
         CCLogA(@"=== CallCaptionSiriHelper started pid=%d ===", getpid());
+        @try {
+            NSString *pidp = [CC_ASSIST_DIR stringByAppendingPathComponent:@"sirihelper.pid"];
+            NSString *pids = [NSString stringWithFormat:@"%d", getpid()];
+            [pids writeToFile:pidp atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            chmod(pidp.fileSystemRepresentation, 0666);
+        } @catch (NSException *e) { }
         CCAssistantRunner *r = [CCAssistantRunner shared];
         [r logEnvironment];
         [NSTimer scheduledTimerWithTimeInterval:1.0

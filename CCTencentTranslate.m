@@ -164,6 +164,7 @@ static void CCTencentResetUplinkMarker(void) {
     BOOL connected;
     BOOL tencentTTS;                 // v0.19.2：我方英文播报是否用腾讯 TTS
     BOOL liteRetried;                // v0.19.5：lite 6001 先原样重试一次
+    int sampleRate;                  // v0.19.7：16000 / 8000
     NSUInteger gen;
     int failures;
     CFAbsoluteTime lastPartialAt;
@@ -206,6 +207,10 @@ static void CCTencentResetUplinkMarker(void) {
     if ((self = [super init])) {
         isLocal = local;
         tencentTTS = local && pTencentTTS;
+        sampleRate = [CCPrefStr(CC_K_TC_SAMPLE_RATE, @"16000") intValue];
+        if (sampleRate != 8000) sampleRate = 16000;
+        // 腾讯英文 TTS 的 PCM 按 16k 处理；开 TTS 时强制 16k，避免重采样错位
+        if (tencentTTS) sampleRate = 16000;
         tag = local ? @"local" : @"remote";
         self->appid = [pAppid copy];
         self->secretid = [pSecretid copy];
@@ -244,7 +249,7 @@ static void CCTencentResetUplinkMarker(void) {
     p[@"trans_model"] = model;
     p[@"enable_tts"] = tencentTTS ? @"1" : @"0";
     p[@"codec"] = @"pcm";
-    p[@"sample_rate"] = @"16000";
+    p[@"sample_rate"] = sampleRate == 8000 ? @"8000" : @"16000";
     p[@"vad_silence_time"] = CCVadSilence();
     p[@"max_speak_time"] = CCMaxSpeak();
     p[@"filter_punc"] = @"0";
@@ -254,10 +259,10 @@ static void CCTencentResetUplinkMarker(void) {
         if (volume.length) p[@"volume"] = volume;
         if (speed.length) p[@"speed"] = speed;
     }
-    CCLogf(@"tencent %@ connect model=%@ source=%@ target=%@ tts=%@ voice=%@ vad=%@ maxsp=%@",
+    CCLogf(@"tencent %@ connect model=%@ source=%@ target=%@ tts=%@ voice=%@ vad=%@ maxsp=%@ rate=%d",
            tag, model, source, target, tencentTTS ? @"tencent" : @"off",
            tencentTTS ? (voiceType ?: @"?") : @"-",
-           p[@"vad_silence_time"], p[@"max_speak_time"]);
+           p[@"vad_silence_time"], p[@"max_speak_time"], sampleRate);
     return CCSignQuery(p, appid, secretkey);
 }
 
@@ -456,7 +461,10 @@ static void CCTencentResetUplinkMarker(void) {
     timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
     if (!timer) return;
     __weak CCTencentSession *weakSelf = self;
-    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC),
+    // v0.19.7：两条 WS 错开 100ms 发送，避免每 200ms 同时灌两包，
+    // 双开时上行突发减半。
+    uint64_t first = isLocal ? 100 * NSEC_PER_MSEC : 0;
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, first),
                               200 * NSEC_PER_MSEC, 50 * NSEC_PER_MSEC);
     dispatch_source_set_event_handler(timer, ^{
         CCTencentSession *s = weakSelf;
@@ -496,7 +504,17 @@ static void CCTencentResetUplinkMarker(void) {
     NSUInteger got = CCRingRead(isLocal ? &g_localRing : &g_remoteRing, buf, 3200);
     if (got > 0) sentReal++; else sentReal = 0;
     if (got < 3200) memset(buf + got, 0, (3200 - got) * sizeof(int16_t));
-    NSData *d = [NSData dataWithBytes:buf length:sizeof(buf)];
+    NSData *d = nil;
+    if (sampleRate == 8000) {
+        // v0.19.7：ring 仍是 16k；发 8k 时每 200ms 取 3200 个 16k 样本，
+        // 两两平均成 1600 个 8k 样本（3200 字节），双开时总带宽减半。
+        int16_t out[1600];
+        for (NSUInteger i = 0; i < 1600; i++)
+            out[i] = (int16_t)(((int)buf[2 * i] + (int)buf[2 * i + 1]) / 2);
+        d = [NSData dataWithBytes:out length:sizeof(out)];
+    } else {
+        d = [NSData dataWithBytes:buf length:sizeof(buf)];
+    }
     NSURLSessionWebSocketTask *t = task;
     NSURLSessionWebSocketMessage *m =
         [[NSURLSessionWebSocketMessage alloc] initWithData:d];

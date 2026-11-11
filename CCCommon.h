@@ -49,6 +49,7 @@
 #define CC_K_ENGLISH_TTS      @"EnglishTTSEngine"     // local / tencent / off，默认 local
 #define CC_K_TC_VAD_SILENCE   @"TencentVadSilence"    // 500..2000 ms
 #define CC_K_TC_MAX_SPEAK     @"TencentMaxSpeak"      // 5000..90000 ms
+#define CC_K_TC_SAMPLE_RATE   @"TencentSampleRate"    // 16000 / 8000，双开卡时用 8000
 
 // ---------- 进程判断 ----------
 void CCProcessInit(void);

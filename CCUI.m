@@ -1340,8 +1340,9 @@ static NSUInteger g_zhTTSGen;
 static void CCZhTTSStartNext(void);
 
 static double CCZhTTSEst(NSString *s) {
-    double d = 0.9 + 0.075 * (double)s.length;
-    return d > 15.0 ? 15.0 : d;
+    // 中文 TTS 实测约 0.2–0.25s/字；用 0.22 估算，6 秒闸门才不会低估。
+    double d = 0.5 + 0.22 * (double)s.length;
+    return d > 20.0 ? 20.0 : d;
 }
 
 static double CCZhTTSTotal(void) {

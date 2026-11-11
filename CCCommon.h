@@ -50,7 +50,9 @@
 #define CC_K_TC_VAD_SILENCE   @"TencentVadSilence"    // 500..2000 ms
 #define CC_K_TC_MAX_SPEAK     @"TencentMaxSpeak"      // 5000..90000 ms
 #define CC_K_TC_SAMPLE_RATE   @"TencentSampleRate"    // 16000 / 8000，双开卡时用 8000
-#define CC_K_TC_LOCAL_ENGINE  @"TencentLocalEngine"   // sfspeech（混合，单 WS）/ tencent（双 WS）
+#define CC_K_TC_LOCAL_ENGINE  @"TencentLocalEngine"   // 旧混合 A 设置，B1 不再使用
+#define CC_K_REMOTE_TRANSLATE_ENGINE @"RemoteTranslateEngine"  // google / deepl / bing / ai
+#define CC_K_LOCAL_TRANSLATE_ENGINE  @"LocalTranslateEngine"   // deepl / google / bing / ai
 
 // ---------- 进程判断 ----------
 void CCProcessInit(void);
@@ -72,6 +74,8 @@ void CCUIDeliverState(NSString *state);
 void CCUIClearCaptions(void);                      // 通话开始/结束清空字幕
 void CCUIEnqueueRemoteTTS(NSString *text);          // v0.19.1：把腾讯译文送进下行 TTS 队列
 void CCUIEnqueueLocalEnglishTTS(NSString *text);    // v0.19.2：本机英文 TTS，写入 cc_tts.wav 供上行混音
+void CCUIRemoteFinalText(NSString *text);           // v0.20.0 B1：来电 ASR 最终文本 -> Google/DeepL -> 中文字幕/TTS
+void CCUILocalFinalText(NSString *text);            // v0.20.0 B1：去电 ASR 最终文本 -> DeepL/Google -> 英文字幕/TTS
 NSString *CCFindWhatsAppDocs(void);                 // v0.19.1：守护进程/腾讯模块共用
 // 兼容旧接口
 void CCUIDeliverCaption(NSString *translated);
@@ -105,6 +109,10 @@ void CCTranslate(NSString *text, NSString *fromLang, NSString *toLang,
 // 带实际引擎回报的版本：engine = deepl/google/bing/ai/cache
 void CCTranslateEx(NSString *text, NSString *fromLang, NSString *toLang,
                    void (^done)(NSString *translated, NSString *engine));
+// v0.20.0 B1：指定引擎（google/deepl/bing/ai），供来电/去电分别使用
+void CCTranslateWithEngine(NSString *text, NSString *fromLang, NSString *toLang,
+                           NSString *engine,
+                           void (^done)(NSString *translated, NSString *engine));
 
 // ---------- 音频抓取 / 识别 / TTS（mediaserverd 侧，旧架构） ----------
 void CCEngineBoot(void);                       // 预分配环缓冲、创建识别器/TTS

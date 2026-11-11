@@ -537,8 +537,9 @@ static void CCTranslateTry(NSArray<NSString *> *order, NSUInteger idx,
     else TranslateGoogle(text, fromLang, toLang, cb);
 }
 
-void CCTranslateEx(NSString *text, NSString *fromLang, NSString *toLang,
-                   void (^done)(NSString *translated, NSString *engine)) {
+void CCTranslateWithEngine(NSString *text, NSString *fromLang, NSString *toLang,
+                           NSString *engineIn,
+                           void (^done)(NSString *translated, NSString *engine)) {
     CacheInit();
     if (text.length == 0) { if (done) done(nil, nil); return; }
 
@@ -551,7 +552,8 @@ void CCTranslateEx(NSString *text, NSString *fromLang, NSString *toLang,
             return;
         }
 
-        NSString *engine = CCPrefStr(CC_K_ENGINE, @"auto").lowercaseString;
+        NSString *engine = engineIn.length ? engineIn.lowercaseString
+                                           : CCPrefStr(CC_K_ENGINE, @"auto").lowercaseString;
         // 兼容旧设置：Bing 免费端点已下线，统一走 MyMemory。
         if ([engine isEqualToString:@"bing"]) engine = @"mymemory";
         NSString *dk = DeepLKey();
@@ -599,6 +601,12 @@ void CCTranslateEx(NSString *text, NSString *fromLang, NSString *toLang,
 
         CCTranslateTry(order, 0, text, fromLang, toLang, done);
     });
+}
+
+void CCTranslateEx(NSString *text, NSString *fromLang, NSString *toLang,
+                   void (^done)(NSString *translated, NSString *engine)) {
+    CCTranslateWithEngine(text, fromLang, toLang,
+                          CCPrefStr(CC_K_ENGINE, @"auto"), done);
 }
 
 void CCTranslate(NSString *text, NSString *fromLang, NSString *toLang,

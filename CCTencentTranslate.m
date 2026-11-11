@@ -88,14 +88,14 @@ static NSString *CCPct(NSString *s) {
 }
 
 static NSString *CCSignQuery(NSDictionary<NSString *, NSString *> *params,
-                             NSString *appid, NSString *secretKey) {
+                             NSString *appid, NSString *secretKey,
+                             NSString *pathTemplate) {
     NSArray *keys = [[params allKeys] sortedArrayUsingSelector:@selector(compare:)];
     NSMutableArray *pairs = [NSMutableArray arrayWithCapacity:keys.count];
     for (NSString *k in keys)
         [pairs addObject:[NSString stringWithFormat:@"%@=%@", CCPct(k), CCPct(params[k])]];
     NSString *query = [pairs componentsJoinedByString:@"&"];
-    NSString *hostPath = [NSString stringWithFormat:
-                          @"asr.cloud.tencent.com/asr/speech_translate/%@", appid];
+    NSString *hostPath = [NSString stringWithFormat:pathTemplate, appid];
     NSString *src = [NSString stringWithFormat:@"%@?%@", hostPath, query];
     unsigned char digest[CC_SHA1_DIGEST_LENGTH];
     CCHmac(kCCHmacAlgSHA1,
@@ -165,6 +165,7 @@ static void CCTencentResetUplinkMarker(void) {
     BOOL connected;
     BOOL tencentTTS;                 // v0.19.2：我方英文播报是否用腾讯 TTS
     BOOL liteRetried;                // v0.19.5：lite 6001 先原样重试一次
+    BOOL asrMode;                    // v0.20.0 B1：腾讯实时 ASR（不翻译）
     int sampleRate;                  // v0.19.7：16000 / 8000
     NSUInteger gen;
     int failures;
@@ -177,6 +178,8 @@ static void CCTencentResetUplinkMarker(void) {
     double nextRetryDelay;           // v0.19.3：6001 时快速重连
     NSString *lastPartialSrc;
     NSString *lastPartialTgt;
+    NSString *lastASRFinal;          // v0.20.0 B1：同一句 final 只发一次
+    NSInteger lastASRIndex;          // v0.20.0 B1：ASR 句序号
     NSMutableData *audioPending;
     FILE *uplinkFp;
     NSString *uplinkPath;
@@ -189,9 +192,11 @@ static void CCTencentResetUplinkMarker(void) {
                    voiceType:(NSString *)pVoiceType
                       volume:(NSString *)pVolume
                        speed:(NSString *)pSpeed
-                  tencentTTS:(BOOL)pTencentTTS;
+                  tencentTTS:(BOOL)pTencentTTS
+                     asrMode:(BOOL)pAsrMode;
 - (void)start;
 - (void)stop;
+- (void)handleASRResult:(NSDictionary *)res;
 @end
 
 @implementation CCTencentSession
@@ -204,19 +209,15 @@ static void CCTencentResetUplinkMarker(void) {
                    voiceType:(NSString *)pVoiceType
                       volume:(NSString *)pVolume
                        speed:(NSString *)pSpeed
-                  tencentTTS:(BOOL)pTencentTTS {
+                  tencentTTS:(BOOL)pTencentTTS
+                     asrMode:(BOOL)pAsrMode {
     if ((self = [super init])) {
         isLocal = local;
         tencentTTS = local && pTencentTTS;
-        sampleRate = [CCPrefStr(CC_K_TC_SAMPLE_RATE, @"16000") intValue];
-        if (sampleRate != 8000) sampleRate = 16000;
-        // 腾讯英文 TTS 的 PCM 按 16k 处理；开 TTS 时强制 16k，避免重采样错位
-        if (tencentTTS) sampleRate = 16000;
-        // 混合模式只有一条腾讯 WS，不需要 8k 省带宽；强制 16k 保英文识别质量
-        if (!local &&
-            [CCPrefStr(CC_K_TC_LOCAL_ENGINE, @"sfspeech") isEqualToString:@"sfspeech"])
-            sampleRate = 16000;
+        asrMode = pAsrMode;
+        sampleRate = 16000;   // B1 ASR 只支持 16k
         tag = local ? @"local" : @"remote";
+        lastASRIndex = -1;
         self->appid = [pAppid copy];
         self->secretid = [pSecretid copy];
         self->secretkey = [pSecretkey copy];
@@ -249,6 +250,20 @@ static void CCTencentResetUplinkMarker(void) {
     p[@"nonce"] = nonce;
     p[@"voice_id"] = vid;
     p[@"voice_format"] = @"1";
+    if (asrMode) {
+        // v0.20.0 B1：腾讯实时 ASR（只识别，不翻译）
+        p[@"engine_model_type"] = model;   // 16k_en / 16k_zh
+        p[@"needvad"] = @"1";
+        p[@"vad_silence_time"] = CCVadSilence();
+        p[@"max_speak_time"] = CCMaxSpeak();
+        p[@"filter_punc"] = @"0";
+        p[@"convert_num_mode"] = @"1";
+        CCLogf(@"tencent asr %@ connect engine=%@ source=%@ target=%@ vad=%@ maxsp=%@",
+               tag, model, source, target,
+               p[@"vad_silence_time"], p[@"max_speak_time"]);
+        return CCSignQuery(p, appid, secretkey,
+                           @"asr.cloud.tencent.com/asr/v2/%@");
+    }
     p[@"source"] = source;
     p[@"target"] = target;
     p[@"trans_model"] = model;
@@ -268,7 +283,8 @@ static void CCTencentResetUplinkMarker(void) {
            tag, model, source, target, tencentTTS ? @"tencent" : @"off",
            tencentTTS ? (voiceType ?: @"?") : @"-",
            p[@"vad_silence_time"], p[@"max_speak_time"], sampleRate);
-    return CCSignQuery(p, appid, secretkey);
+    return CCSignQuery(p, appid, secretkey,
+                       @"asr.cloud.tencent.com/asr/speech_translate/%@");
 }
 
 - (void)start {
@@ -390,11 +406,17 @@ static void CCTencentResetUplinkMarker(void) {
     if (code != 0) {
         NSString *m = obj[@"message"] ?: @"";
         CCLogf(@"tencent %@ err code=%ld %@", tag, (long)code, m);
-        if (final == 1) [self fail:[NSString stringWithFormat:@"code %ld", (long)code]];
+        if (asrMode || final == 1)
+            [self fail:[NSString stringWithFormat:@"code %ld", (long)code]];
         return;
     }
 
     NSDictionary *res = obj[@"result"];
+    if (asrMode) {
+        if ([res isKindOfClass:[NSDictionary class]]) [self handleASRResult:res];
+        if (final == 1 && !ending) [self fail:@"stream final"];
+        return;
+    }
     if ([res isKindOfClass:[NSDictionary class]]) [self handleResult:res];
 
     if (final == 1 && (!isLocal || !tencentTTS)) {
@@ -403,6 +425,52 @@ static void CCTencentResetUplinkMarker(void) {
     } else if (final == 2 && isLocal && tencentTTS) {
         if (!ending) [self fail:@"stream final2"];
     }
+}
+
+- (void)handleASRResult:(NSDictionary *)res {
+    if (ending || !atomic_load(&g_tcActive)) return;
+    NSInteger slice = [res[@"slice_type"] integerValue];
+    NSString *text = [res[@"voice_text_str"] isKindOfClass:[NSString class]]
+                     ? res[@"voice_text_str"] : @"";
+    text = [text stringByTrimmingCharactersInSet:
+            [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!text.length) {
+        // 少数情况下 final 帧不带 text，用上一帧的原文兜底
+        if (slice == 2 && lastPartialSrc.length) text = lastPartialSrc;
+        else return;
+    }
+
+    NSInteger idx = [res[@"index"] integerValue];
+    if (idx != lastASRIndex) {
+        lastASRIndex = idx;
+        lastASRFinal = nil;
+    }
+
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    lastTextAt = now;
+    sentReal = 0;
+
+    if (slice == 2) {
+        // 稳态最终句：只翻这一次，避免“碎片翻译 + 再总结”。
+        if (lastASRFinal && [text isEqualToString:lastASRFinal]) return;
+        lastASRFinal = [text copy];
+        lastPartialSrc = nil;
+        lastPartialTgt = nil;
+        CCLogf(@"tencent asr %@ final: %@", tag,
+               text.length > 60 ? [text substringToIndex:60] : text);
+        CCASendLine([(isLocal ? @"LI|" : @"I|") stringByAppendingString:text]);
+        // 最终翻译请求交给 SpringBoard：来电 Google、去电 DeepL
+        CCASendLine([(isLocal ? @"LQ|" : @"RQ|") stringByAppendingString:text]);
+        return;
+    }
+
+    // 非稳态只更新识别原文，不做翻译、不出 TTS。
+    if (now - lastPartialAt < 0.15) return;
+    lastPartialAt = now;
+    if (lastPartialSrc && [text isEqualToString:lastPartialSrc]) return;
+    lastPartialSrc = [text copy];
+    lastPartialTgt = nil;
+    CCASendLine([(isLocal ? @"LI|" : @"I|") stringByAppendingString:text]);
 }
 
 - (void)handleResult:(NSDictionary *)res {
@@ -492,6 +560,9 @@ static void CCTencentResetUplinkMarker(void) {
                atomic_load(&inFlight), sentReal,
                lastTextAt > 0 ? now - lastTextAt : 0);
     }
+    // v0.20.0 B1：ASR 只允许一个发送在途，避免服务端慢时把几十秒音频
+    // 排进 socket，恢复时突发触发 4000/6000。慢的时候 ring 会积压。
+    if (asrMode && atomic_load(&inFlight) > 0) return;
     // v0.19.8：看门狗改成“只记录、不重连”，并且只统计真正的语音包。
     // 0.19.6/0.19.7 的 12 秒重连会把上一通/本条流的内容直接丢掉；
     // 用户明确要求“不能漏掉通话内容”，所以这里不再自动 reconnect。
@@ -675,48 +746,36 @@ void CCTencentStart(void) {
     }
     BOOL remoteOn = CCPrefBool(CC_K_REMOTE_ENABLED, YES);
     BOOL localOn = CCPrefBool(CC_K_LOCAL_ENABLED, YES);
-    NSString *localEngine = CCPrefStr(CC_K_TC_LOCAL_ENGINE, @"sfspeech");
-    BOOL localTencent = localOn && ![localEngine isEqualToString:@"sfspeech"];
-    // 混合模式（remote 腾讯 + local SFSpeech）不开 local 腾讯 WS；
-    // 如果连 remote 也关了，就完全不需要腾讯会话。
-    if (!remoteOn && !localTencent) return;
+    if (!remoteOn && !localOn) return;
 
     CCRingInit(&g_remoteRing, 16000 * 10);
     CCRingInit(&g_localRing, 16000 * 10);
     CCRingClear(&g_remoteRing);
     CCRingClear(&g_localRing);
-    atomic_store(&g_tcLocalOn, localTencent ? 1 : 0);
+    atomic_store(&g_tcLocalOn, localOn ? 1 : 0);
     atomic_store(&g_tcActive, 1);
     if (!g_sessions) g_sessions = [NSMutableArray array];
 
-    NSString *remoteModel = CCPrefStr(CC_K_TC_REMOTE_MODEL, @"hunyuan-translation");
-    if (![remoteModel isEqualToString:@"hunyuan-translation"])
-        remoteModel = @"hunyuan-translation";   // lite 不支持 en->zh
-    NSString *localModel = CCPrefStr(CC_K_TC_LOCAL_MODEL, @"hunyuan-translation-lite");
-    NSString *localVoice = CCPrefStr(CC_K_TC_LOCAL_VOICE, @"501009");
-    NSString *localVol = CCPrefStr(CC_K_TC_LOCAL_VOLUME, @"6");
-    NSString *localSpeed = CCPrefStr(CC_K_TC_LOCAL_SPEED, @"0");
-    NSString *enTTS = CCPrefStr(CC_K_ENGLISH_TTS, @"local");
-    BOOL tencentTTS = [enTTS isEqualToString:@"tencent"];
+    // v0.20.0 B1：腾讯只做实时 ASR，翻译交给 SpringBoard（来电 Google / 去电 DeepL）。
+    NSString *remoteModel = @"16k_en";
+    NSString *localModel = @"16k_zh";
 
     if (remoteOn) {
         CCTencentSession *s = [[CCTencentSession alloc] initWithLocal:NO
             appid:appid secretid:sid secretkey:skey model:remoteModel
-            voiceType:@"" volume:@"" speed:@"" tencentTTS:NO];
+            voiceType:@"" volume:@"" speed:@"" tencentTTS:NO asrMode:YES];
         [g_sessions addObject:s];
         dispatch_async(s->q, ^{ [s start]; });
     }
-    if (localTencent) {
+    if (localOn) {
         CCTencentSession *s = [[CCTencentSession alloc] initWithLocal:YES
             appid:appid secretid:sid secretkey:skey model:localModel
-            voiceType:localVoice volume:localVol speed:localSpeed
-            tencentTTS:tencentTTS];
+            voiceType:@"" volume:@"" speed:@"" tencentTTS:NO asrMode:YES];
         [g_sessions addObject:s];
         dispatch_async(s->q, ^{ [s start]; });
     }
-    CCLogf(@"tencent started remote=%d localTencent=%d engine=%@ en_tts=%@",
-           remoteOn, localTencent, localEngine, enTTS);
-    CCASendState(@"● 腾讯翻译已启动");
+    CCLogf(@"tencent asr started remote=%d local=%d", remoteOn, localOn);
+    CCASendState(@"● 腾讯 ASR 已启动");
 }
 
 void CCTencentStop(void) {

@@ -1034,6 +1034,40 @@ void CCUIEnqueueRemoteTTS(NSString *text) {
     CCTTSBuffer(text, @"zh-CN", @"cc_tts_zh.wav");
 }
 
+// v0.20.0 B1：来电 ASR 最终文本 -> 独立翻译引擎（默认 Google）-> 中文字幕/TTS。
+void CCUIRemoteFinalText(NSString *text) {
+    if (!text.length) return;
+    NSString *eng = CCPrefStr(CC_K_REMOTE_TRANSLATE_ENGINE, @"google");
+    CCTranslateWithEngine(text, @"en", @"zh", eng,
+                          ^(NSString *out, NSString *used) {
+        if (!out.length) return;
+        CCUIDeliverRemoteTranslated(out);
+        if (used.length) CCUIDeliverRemoteEngine(used);
+        if (!CCPrefBool(CC_K_TTS_ENABLED, YES)) return;
+        NSString *low = [[text lowercaseString]
+            stringByTrimmingCharactersInSet:[NSCharacterSet punctuationCharacterSet]];
+        NSSet *fillers = [NSSet setWithObjects:
+                          @"hmm", @"um", @"uh", @"er", @"ah", @"oh", @"huh", @"mm", nil];
+        if (low.length <= 2 || [fillers containsObject:low]) return;
+        CCTTSBuffer(out, @"zh-CN", @"cc_tts_zh.wav");
+    });
+}
+
+// v0.20.0 B1：去电 ASR 最终文本 -> 独立翻译引擎（默认 DeepL）-> 英文字幕/TTS。
+void CCUILocalFinalText(NSString *text) {
+    if (!text.length) return;
+    NSString *eng = CCPrefStr(CC_K_LOCAL_TRANSLATE_ENGINE, @"deepl");
+    CCTranslateWithEngine(text, @"zh", @"en", eng,
+                          ^(NSString *out, NSString *used) {
+        if (!out.length) return;
+        CCUIDeliverLocalTranslated(out);
+        if (used.length) CCUIDeliverLocalEngine(used);
+        if (!CCPrefBool(CC_K_TTS_ENABLED, YES)) return;
+        if ([CCPrefStr(CC_K_ENGLISH_TTS, @"local") isEqualToString:@"off"]) return;
+        CCTTSBuffer(out, @"en-US", @"cc_tts.wav");
+    });
+}
+
 // v0.19.2：本机英文播报。同步合成到 CC_DIR/cc_tts.wav，守护进程复制给
 // AppProbe，再混进上行。与 0.17.0 同一条已验证链路，延迟远低于腾讯 TTS。
 void CCUIEnqueueLocalEnglishTTS(NSString *text) {
@@ -2074,8 +2108,8 @@ static void CCStreamStop(CCStream *st) {
 }
 
 static BOOL CCTencentHybridLocal(void) {
-    if (!CCPrefBool(CC_K_TC_ENABLED, NO)) return NO;
-    return [CCPrefStr(CC_K_TC_LOCAL_ENGINE, @"sfspeech") isEqualToString:@"sfspeech"];
+    // v0.20.0 B1：ASR 在守护进程里跑，SpringBoard 不再跑任何 SFSpeech。
+    return NO;
 }
 
 static void CCStreamTick(CCStream *st) {

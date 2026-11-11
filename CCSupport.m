@@ -357,7 +357,8 @@ static void SBDeliverLine(NSString *line) {
     // 防御：同一内容行 1.2 秒内重复到达时丢弃，避免任何识别/翻译异常把字幕计时器无限重置。
     BOOL content = [line hasPrefix:@"R|"] || [line hasPrefix:@"RP|"] ||
                    [line hasPrefix:@"I|"] || [line hasPrefix:@"LR|"] ||
-                   [line hasPrefix:@"LRP|"] || [line hasPrefix:@"LI|"];
+                   [line hasPrefix:@"LRP|"] || [line hasPrefix:@"LI|"] ||
+                   [line hasPrefix:@"RQ|"] || [line hasPrefix:@"LQ|"];
     static NSString *lastLine = nil;
     static CFAbsoluteTime lastLineAt = 0;
     CFAbsoluteTime nowLine = CFAbsoluteTimeGetCurrent();
@@ -397,6 +398,10 @@ static void SBDeliverLine(NSString *line) {
         CCUIDeliverRemoteEngine([line substringFromIndex:3]);
     } else if ([line hasPrefix:@"LE|"]) {
         CCUIDeliverLocalEngine([line substringFromIndex:3]);
+    } else if ([line hasPrefix:@"RQ|"]) {
+        CCUIRemoteFinalText([line substringFromIndex:3]);
+    } else if ([line hasPrefix:@"LQ|"]) {
+        CCUILocalFinalText([line substringFromIndex:3]);
     } else if ([line hasPrefix:@"S|"]) {
         CCUIDeliverState([line substringFromIndex:2]);
     }

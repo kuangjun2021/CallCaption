@@ -1414,6 +1414,67 @@ static void CCManageSiriHelper(BOOL armed) {
     }
 }
 
+// v0.20.3：0.20.0 的音频路径不动；只加“挂断后释放会话”。
+// 0.20.0 在 boot 激活 SoloAmbient 并一直持有，微信可能被占用；
+// 这里保持 boot 激活（通话效果与 0.20.0 一致），挂断时释放。
+static BOOL g_daemonAudioActive;
+static void CCAudioSessionSetActive(BOOL active) {
+    if (active == g_daemonAudioActive) return;
+    @try {
+        AVAudioSession *sess = [AVAudioSession sharedInstance];
+        NSError *err = nil;
+        if (active) {
+            [sess setCategory:AVAudioSessionCategorySoloAmbient
+                         mode:AVAudioSessionModeDefault
+                      options:0
+                        error:nil];
+            if (![sess setActive:YES error:&err]) {
+                CCLogf(@"audio session activate failed: %@", err.localizedDescription);
+                return;
+            }
+            g_daemonAudioActive = YES;
+            CCLogf(@"audio session: active");
+        } else {
+            if (![sess setActive:NO
+                     withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
+                           error:&err]) {
+                CCLogf(@"audio session deactivate failed: %@", err.localizedDescription);
+                return;
+            }
+            g_daemonAudioActive = NO;
+            CCLogf(@"audio session: inactive (notify others)");
+        }
+    } @catch (NSException *e) {
+        CCLogf(@"audio session exc %@", e.reason);
+    }
+}
+
+// v0.20.3：在 0.20.0 原有位置写音量配置，只额外带 call=1/0。
+// call=0 由 !armed 分支写，AppProbe 挂断后立即停止录音/混音。
+static void CCWriteAppCfg(BOOL armed) {
+    static NSString *lastCfg = nil;
+    NSString *docs = CCFindWhatsAppDocs();
+    if (!docs) return;
+    int rv = [CCPrefStr(@"RemoteOriginalVolume", @"30") intValue];
+    int lv = [CCPrefStr(@"LocalOriginalVolume", @"30") intValue];
+    if (rv < 0) rv = 0; if (rv > 100) rv = 100;
+    if (lv < 0) lv = 0; if (lv > 100) lv = 100;
+    BOOL rOn = CCPrefBool(CC_K_REMOTE_ENABLED, YES);
+    BOOL lOn = CCPrefBool(CC_K_LOCAL_ENABLED, YES);
+    NSString *cfg = [NSString stringWithFormat:
+                     @"remote=%.2f\nlocal=%.2f\nremoteon=%d\nlocalon=%d\ncall=%d\n",
+                     rv / 100.0, lv / 100.0, rOn ? 1 : 0, lOn ? 1 : 0,
+                     armed ? 1 : 0];
+    if (![cfg isEqualToString:lastCfg]) {
+        NSString *p = [docs stringByAppendingPathComponent:@"cc_cfg.txt"];
+        [cfg writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        chmod(p.fileSystemRepresentation, 0666);
+        lastCfg = cfg;
+        CCLogf(@"app cfg remote=%d local=%d on=%d/%d call=%d", rv, lv,
+               rOn ? 1 : 0, lOn ? 1 : 0, armed ? 1 : 0);
+    }
+}
+
 static void CheckArm(void) {
     @try {
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
@@ -1436,6 +1497,8 @@ static void CheckArm(void) {
         BOOL wasArmed = lastArmed;
         if (armed && !lastArmed) {
             // 新通话：重置 Tap 探测，从 speaker(-2) 开始，最多试 -1 / -3。
+            // boot 已激活；只有上一通挂断释放过，这里才重新激活。
+            CCAudioSessionSetActive(YES);
             g_remote->tapProbeCount = 0;
             g_remoteCallStarted = YES;
             g_remote.tapPID = CC_TAP_PID_SPEAKER;
@@ -1495,6 +1558,8 @@ static void CheckArm(void) {
         }
         lastArmed = armed;
         if (!armed) {
+            // v0.20.3：挂断这一拍就把 call=0 写给 AppProbe，并释放会话。
+            CCWriteAppCfg(NO);
             // 挂断后让 AppProbe 丢掉还没播完的中文 TTS / 上行 PCM，避免拖到下一通。
             // 只在 armed → unarmed 的那一拍写标记，不要每 500ms 重复写。
             g_remoteCallStarted = NO;
@@ -1512,6 +1577,7 @@ static void CheckArm(void) {
             }
             [g_remote stop];
             [g_local stop];
+            if (wasArmed) CCAudioSessionSetActive(NO);
             return;
         }
 
@@ -1623,33 +1689,9 @@ static void CheckArm(void) {
             }
         }
 
-        // 把两个“原音音量”设置写给 App 探针（App 沙盒读不到 /var/mobile 的 prefs）
-        {
-            static NSString *lastCfg = nil;
-            NSString *docs = CCFindWhatsAppDocs();
-            if (docs) {
-                int rv = [CCPrefStr(@"RemoteOriginalVolume", @"30") intValue];
-                int lv = [CCPrefStr(@"LocalOriginalVolume", @"30") intValue];
-                if (rv < 0) rv = 0; if (rv > 100) rv = 100;
-                if (lv < 0) lv = 0; if (lv > 100) lv = 100;
-                // v0.19.4：带上两个方向开关。音量=0 时 AppProbe 会全程静音
-                // 该方向原声（只播译文）；方向关闭时不能静音，否则普通通话
-                // 会被误伤。
-                BOOL rOn = CCPrefBool(CC_K_REMOTE_ENABLED, YES);
-                BOOL lOn = CCPrefBool(CC_K_LOCAL_ENABLED, YES);
-                NSString *cfg = [NSString stringWithFormat:
-                                 @"remote=%.2f\nlocal=%.2f\nremoteon=%d\nlocalon=%d\n",
-                                 rv / 100.0, lv / 100.0, rOn ? 1 : 0, lOn ? 1 : 0];
-                if (![cfg isEqualToString:lastCfg]) {
-                    NSString *p = [docs stringByAppendingPathComponent:@"cc_cfg.txt"];
-                    [cfg writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:nil];
-                    chmod(p.fileSystemRepresentation, 0666);
-                    lastCfg = cfg;
-                    CCLogf(@"app cfg remote=%d local=%d on=%d/%d", rv, lv,
-                           rOn ? 1 : 0, lOn ? 1 : 0);
-                }
-            }
-        }
+        // 把两个“原音音量”设置和 call=1 写给 App 探针（App 沙盒读不到
+        // /var/mobile 的 prefs）。保持在 0.20.0 原来的位置：通道/pump 之后。
+        CCWriteAppCfg(YES);
 
         // SpringBoard 合成好的 TTS 复制到 WhatsApp Documents：
         //   cc_tts.wav          = 英文（我方说话 → 对方听），0.19.0 保持 0.17.0 原样
@@ -1770,13 +1812,12 @@ int main(int argc, char *argv[]) {
         // LCT 的 livecallhelper 在识别前会配置 AVAudioSession（SoloAmbient/Default）；
         // 我们的守护进程以前没做这一步，补上。
         @try {
+            // v0.20.3：保持 0.20.0 的 boot 激活（通话效果一致），
+            // 挂断时由 CheckArm 释放，解决微信被占用。
+            CCAudioSessionSetActive(YES);
             AVAudioSession *sess = [AVAudioSession sharedInstance];
-            [sess setCategory:AVAudioSessionCategorySoloAmbient
-                         mode:AVAudioSessionModeDefault
-                      options:0
-                        error:nil];
-            [sess setActive:YES error:nil];
-            CCLogf(@"audio session: cat=%@ mode=%@", sess.category, sess.mode);
+            CCLogf(@"audio session: cat=%@ mode=%@ (boot active, release on hangup)",
+                   sess.category, sess.mode);
         } @catch (NSException *e) {
             CCLogf(@"audio session exc %@", e.reason);
         }

@@ -150,13 +150,13 @@ static void CCTencentResetUplinkMarker(void) {
     NSString *uplinkPath;
 }
 - (instancetype)initWithLocal:(BOOL)local
-                        appid:(NSString *)appid
-                     secretid:(NSString *)secretid
-                     secretkey:(NSString *)secretkey
-                       model:(NSString *)model
-                   voiceType:(NSString *)voiceType
-                      volume:(NSString *)volume
-                       speed:(NSString *)speed;
+                        appid:(NSString *)pAppid
+                     secretid:(NSString *)pSecretid
+                     secretkey:(NSString *)pSecretkey
+                       model:(NSString *)pModel
+                   voiceType:(NSString *)pVoiceType
+                      volume:(NSString *)pVolume
+                       speed:(NSString *)pSpeed;
 - (void)start;
 - (void)stop;
 @end
@@ -164,23 +164,23 @@ static void CCTencentResetUplinkMarker(void) {
 @implementation CCTencentSession
 
 - (instancetype)initWithLocal:(BOOL)local
-                        appid:(NSString *)appid
-                     secretid:(NSString *)secretid
-                     secretkey:(NSString *)secretkey
-                       model:(NSString *)model
-                   voiceType:(NSString *)voiceType
-                      volume:(NSString *)volume
-                       speed:(NSString *)speed {
+                        appid:(NSString *)pAppid
+                     secretid:(NSString *)pSecretid
+                     secretkey:(NSString *)pSecretkey
+                       model:(NSString *)pModel
+                   voiceType:(NSString *)pVoiceType
+                      volume:(NSString *)pVolume
+                       speed:(NSString *)pSpeed {
     if ((self = [super init])) {
         isLocal = local;
         tag = local ? @"local" : @"remote";
-        self->appid = [appid copy];
-        self->secretid = [secretid copy];
-        self->secretkey = [secretkey copy];
-        self->model = [model copy];
-        self->voiceType = [voiceType copy];
-        self->volume = [volume copy];
-        self->speed = [speed copy];
+        self->appid = [pAppid copy];
+        self->secretid = [pSecretid copy];
+        self->secretkey = [pSecretkey copy];
+        self->model = [pModel copy];
+        self->voiceType = [pVoiceType copy];
+        self->volume = [pVolume copy];
+        self->speed = [pSpeed copy];
         self->source = local ? [CCPrefStr(CC_K_TC_LOCAL_SOURCE, @"zh") copy] : @"en";
         self->target = local ? @"en" : @"zh";
         q = dispatch_queue_create(local ? "callcaption.tc.local"

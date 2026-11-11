@@ -16,6 +16,7 @@
 #import <os/log.h>
 #import <math.h>
 #import <stdio.h>
+#import <string.h>
 #import <unistd.h>
 #import <sys/stat.h>
 #import <dlfcn.h>
@@ -377,9 +378,12 @@ static NSTimeInterval g_ttsZhMtime;
 static NSString *g_ttsZhLastFile;   // 0.19.0：zh 序列文件按名字递增装载
 static unsigned long long g_uplinkOffset;   // 0.19.1：腾讯英文 TTS 的 48k PCM 流
 
-// 原音音量：0.0~1.0（0 = TTS 播放时原音静音）
+// 原音音量：0.0~1.0。v0.19.4：0 表示该方向全程静音（只播译文）；
+// 1~100 表示只在 TTS 播放时压低。
 static double g_duckRemote = 0.30;
 static double g_duckLocal = 0.30;
+static BOOL g_remoteOn = YES;
+static BOOL g_localOn = YES;
 static NSTimeInterval g_cfgMtime;
 
 static void CCLoadTTSIfNeeded(void) {
@@ -572,8 +576,11 @@ static void CCLoadConfigIfNeeded(void) {
             if (v > 1) v = 1;
             if ([kv[0] isEqualToString:@"remote"]) g_duckRemote = v;
             if ([kv[0] isEqualToString:@"local"]) g_duckLocal = v;
+            if ([kv[0] isEqualToString:@"remoteon"]) g_remoteOn = [kv[1] boolValue];
+            if ([kv[0] isEqualToString:@"localon"]) g_localOn = [kv[1] boolValue];
         }
-        CCAppLog(@"cfg remote=%.2f local=%.2f", g_duckRemote, g_duckLocal);
+        CCAppLog(@"cfg remote=%.2f local=%.2f on=%d/%d", g_duckRemote, g_duckLocal,
+                 g_remoteOn, g_localOn);
     } @catch (NSException *e) { }
 }
 
@@ -664,10 +671,23 @@ static void CCMixRingInto(float *ring, uint32_t cap,
     if (mixed && counter) atomic_fetch_add(counter, 1);
 }
 
+static void CCZeroBuffers(AudioBufferList *ioData) {
+    if (!ioData) return;
+    for (UInt32 i = 0; i < ioData->mNumberBuffers; i++) {
+        AudioBuffer *b = &ioData->mBuffers[i];
+        if (b->mData && b->mDataByteSize) memset(b->mData, 0, b->mDataByteSize);
+    }
+}
+
 static void CCMixZhDownlink(CCCB *c, AudioBufferList *ioData, UInt32 frames) {
-    if (!g_ttsZhRing || !c || !ioData || frames == 0 || ioData->mNumberBuffers == 0) return;
+    if (!c || !ioData || frames == 0 || ioData->mNumberBuffers == 0) return;
     AudioBuffer *b = &ioData->mBuffers[0];
     if (!b->mData || b->mDataByteSize < 2) return;
+    // v0.19.4：音量=0 且对方方向开启 → 全程静音原声，只留中文 TTS。
+    // 先静音再混音；CCRecordCB 已经录过原始对方声音，ASR 不受影响。
+    BOOL forceMute = g_remoteOn && g_duckRemote <= 0.001;
+    if (forceMute) CCZeroBuffers(ioData);
+    if (!g_ttsZhRing) return;
     UInt32 ch, bits, flags;
     if (!CCResolveFmt(b->mDataByteSize / frames, c->fmt.ch, c->fmt.bits, c->fmt.flags,
                       &ch, &bits, &flags)) return;
@@ -679,9 +699,14 @@ static void CCMixZhDownlink(CCCB *c, AudioBufferList *ioData, UInt32 frames) {
 }
 
 static void CCMixEnUplink(AudioUnit unit, AudioBufferList *ioData, UInt32 frames) {
-    if (!g_ttsRing || !ioData || frames == 0 || ioData->mNumberBuffers == 0) return;
+    if (!ioData || frames == 0 || ioData->mNumberBuffers == 0) return;
     AudioBuffer *b = &ioData->mBuffers[0];
     if (!b->mData || b->mDataByteSize < 2) return;
+    // v0.19.4：我方原音=0 且我方方向开启 → 全程静音麦克风，只留英文 TTS。
+    // 本地识别走守护进程 mic tap，不受这里影响。
+    BOOL forceMute = g_localOn && g_duckLocal <= 0.001;
+    if (forceMute) CCZeroBuffers(ioData);
+    if (!g_ttsRing) return;
     CCFmt *f = CCFindFmt(unit);
     UInt32 ch, bits, flags;
     if (!CCResolveFmt(b->mDataByteSize / frames, f ? f->ch : 0, f ? f->bits : 0,

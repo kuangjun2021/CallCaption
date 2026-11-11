@@ -1519,14 +1519,21 @@ static void CheckArm(void) {
                 int lv = [CCPrefStr(@"LocalOriginalVolume", @"30") intValue];
                 if (rv < 0) rv = 0; if (rv > 100) rv = 100;
                 if (lv < 0) lv = 0; if (lv > 100) lv = 100;
-                NSString *cfg = [NSString stringWithFormat:@"remote=%.2f\nlocal=%.2f\n",
-                                 rv / 100.0, lv / 100.0];
+                // v0.19.4：带上两个方向开关。音量=0 时 AppProbe 会全程静音
+                // 该方向原声（只播译文）；方向关闭时不能静音，否则普通通话
+                // 会被误伤。
+                BOOL rOn = CCPrefBool(CC_K_REMOTE_ENABLED, YES);
+                BOOL lOn = CCPrefBool(CC_K_LOCAL_ENABLED, YES);
+                NSString *cfg = [NSString stringWithFormat:
+                                 @"remote=%.2f\nlocal=%.2f\nremoteon=%d\nlocalon=%d\n",
+                                 rv / 100.0, lv / 100.0, rOn ? 1 : 0, lOn ? 1 : 0];
                 if (![cfg isEqualToString:lastCfg]) {
                     NSString *p = [docs stringByAppendingPathComponent:@"cc_cfg.txt"];
                     [cfg writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:nil];
                     chmod(p.fileSystemRepresentation, 0666);
                     lastCfg = cfg;
-                    CCLogf(@"app cfg remote=%d local=%d", rv, lv);
+                    CCLogf(@"app cfg remote=%d local=%d on=%d/%d", rv, lv,
+                           rOn ? 1 : 0, lOn ? 1 : 0);
                 }
             }
         }

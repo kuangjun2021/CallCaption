@@ -128,6 +128,9 @@ BOOL CCPrefBool(NSString *key, BOOL def) {
 NSString *CCPrefStr(NSString *key, NSString *def) {
     id v = CCPref(key);
     if ([v isKindOfClass:[NSString class]] && ((NSString *)v).length > 0) return v;
+    // v0.19.4：设置页的滑杆用 NSNumber 存值，这里以前只认 NSString，
+    // 导致“原音音量=0”“腾讯音量/语速”被静默忽略、一直用默认值。
+    if ([v isKindOfClass:[NSNumber class]]) return [(NSNumber *)v stringValue];
     return def;
 }
 

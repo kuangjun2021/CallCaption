@@ -316,11 +316,9 @@ static OSStatus CCHookedSetProp(AudioUnit unit, AudioUnitPropertyID prop,
             for (int i = 0; i < seenCount; i++) {
                 if (seen[i][0] == u && seen[i][1] == scope && seen[i][2] == elem) { dup = YES; break; }
             }
-            if (!dup) {
-                if (seenCount < 64) {
-                    seen[seenCount][0] = u; seen[seenCount][1] = scope; seen[seenCount][2] = elem;
-                    seenCount++;
-                }
+            if (!dup && seenCount < 64) {
+                seen[seenCount][0] = u; seen[seenCount][1] = scope; seen[seenCount][2] = elem;
+                seenCount++;
                 CCAppLog(@"fmt u%x s%u e%u rate%.0f ch%u bits%u fl0x%x",
                          u, scope, elem, a->mSampleRate, a->mChannelsPerFrame,
                          a->mBitsPerChannel, a->mFormatFlags);
@@ -457,6 +455,9 @@ static void CCLoadUplinkStreamIfNeeded(void) {
         if (!space) return;
         unsigned long long avail = size - g_uplinkOffset;
         unsigned long long want = MIN(avail, (unsigned long long)space * 2ULL);
+        // v0.19.2：一次最多读 8192 个样本（约 170ms），避免在音频回调里
+        // 一口气读十几秒文件把 render 线程卡住；下一拍继续，赶得上实时。
+        if (want > 16384ULL) want = 16384ULL;
         want &= ~1ULL;
         if (!want) return;
         NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:p];

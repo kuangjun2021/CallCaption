@@ -58,6 +58,11 @@ static void CCRingPush(CCTCRing *r, const int16_t *s, NSUInteger n) {
     atomic_store(&r->head, head + (uint32_t)n);
 }
 
+static uint32_t CCRingUsed(CCTCRing *r) {
+    if (!r->buf) return 0;
+    return atomic_load(&r->head) - atomic_load(&r->tail);
+}
+
 static NSUInteger CCRingRead(CCTCRing *r, int16_t *dst, NSUInteger max) {
     if (!r->buf || !dst || !max || !r->cap) return 0;
     uint32_t head = atomic_load(&r->head);
@@ -117,6 +122,21 @@ static void CCASendState(NSString *text) {
     CCASendLine([@"S|" stringByAppendingString:text]);
 }
 
+// v0.19.2：断句参数从设置读取并夹到腾讯允许的范围。
+static NSString *CCVadSilence(void) {
+    NSInteger v = [CCPrefStr(CC_K_TC_VAD_SILENCE, @"600") integerValue];
+    if (v < 500) v = 500;
+    if (v > 2000) v = 2000;
+    return [NSString stringWithFormat:@"%ld", (long)v];
+}
+
+static NSString *CCMaxSpeak(void) {
+    NSInteger v = [CCPrefStr(CC_K_TC_MAX_SPEAK, @"6000") integerValue];
+    if (v < 5000) v = 5000;
+    if (v > 90000) v = 90000;
+    return [NSString stringWithFormat:@"%ld", (long)v];
+}
+
 static void CCTencentResetUplinkMarker(void) {
     @try {
         NSString *docs = CCFindWhatsAppDocs();
@@ -142,9 +162,14 @@ static void CCTencentResetUplinkMarker(void) {
     BOOL running;
     BOOL ending;
     BOOL connected;
+    BOOL tencentTTS;                 // v0.19.2：我方英文播报是否用腾讯 TTS
     NSUInteger gen;
     int failures;
     CFAbsoluteTime lastPartialAt;
+    CFAbsoluteTime lastBacklogLog;
+    CFAbsoluteTime lrAt;             // v0.19.2：LR| 时刻，量首包 TTS 延迟
+    NSString *lastPartialSrc;
+    NSString *lastPartialTgt;
     NSMutableData *audioPending;
     FILE *uplinkFp;
     NSString *uplinkPath;
@@ -156,7 +181,8 @@ static void CCTencentResetUplinkMarker(void) {
                        model:(NSString *)pModel
                    voiceType:(NSString *)pVoiceType
                       volume:(NSString *)pVolume
-                       speed:(NSString *)pSpeed;
+                       speed:(NSString *)pSpeed
+                  tencentTTS:(BOOL)pTencentTTS;
 - (void)start;
 - (void)stop;
 @end
@@ -170,9 +196,11 @@ static void CCTencentResetUplinkMarker(void) {
                        model:(NSString *)pModel
                    voiceType:(NSString *)pVoiceType
                       volume:(NSString *)pVolume
-                       speed:(NSString *)pSpeed {
+                       speed:(NSString *)pSpeed
+                  tencentTTS:(BOOL)pTencentTTS {
     if ((self = [super init])) {
         isLocal = local;
+        tencentTTS = local && pTencentTTS;
         tag = local ? @"local" : @"remote";
         self->appid = [pAppid copy];
         self->secretid = [pSecretid copy];
@@ -209,18 +237,22 @@ static void CCTencentResetUplinkMarker(void) {
     p[@"source"] = source;
     p[@"target"] = target;
     p[@"trans_model"] = model;
-    p[@"enable_tts"] = isLocal ? @"1" : @"0";
+    p[@"enable_tts"] = tencentTTS ? @"1" : @"0";
     p[@"codec"] = @"pcm";
     p[@"sample_rate"] = @"16000";
-    p[@"vad_silence_time"] = @"1000";
-    p[@"max_speak_time"] = @"10000";
+    p[@"vad_silence_time"] = CCVadSilence();
+    p[@"max_speak_time"] = CCMaxSpeak();
     p[@"filter_punc"] = @"0";
     p[@"convert_num_mode"] = @"1";
-    if (isLocal && voiceType.length) p[@"voice_type"] = voiceType;
-    if (isLocal && volume.length) p[@"volume"] = volume;
-    if (isLocal && speed.length) p[@"speed"] = speed;
-    CCLogf(@"tencent %@ connect model=%@ source=%@ target=%@ voice=%@",
-           tag, model, source, target, isLocal ? (voiceType ?: @"?" ) : @"-");
+    if (tencentTTS) {
+        if (voiceType.length) p[@"voice_type"] = voiceType;
+        if (volume.length) p[@"volume"] = volume;
+        if (speed.length) p[@"speed"] = speed;
+    }
+    CCLogf(@"tencent %@ connect model=%@ source=%@ target=%@ tts=%@ voice=%@ vad=%@ maxsp=%@",
+           tag, model, source, target, tencentTTS ? @"tencent" : @"off",
+           tencentTTS ? (voiceType ?: @"?") : @"-",
+           p[@"vad_silence_time"], p[@"max_speak_time"]);
     return CCSignQuery(p, appid, secretkey);
 }
 
@@ -299,7 +331,14 @@ static void CCTencentResetUplinkMarker(void) {
         if (code == 0) {
             connected = YES;
             failures = 0;
-            CCLogf(@"tencent %@ open code=0", tag);
+            // v0.19.2：握手期间 ring 会积压 0.5~1.5 秒音频，而腾讯要求严格
+            // 1:1 发送、不能加速追回；这里直接清空，从“现在”开始，避免整通
+            // 电话都带着固定延迟。开头不到 1 秒的音频会被丢掉。
+            CCRingClear(isLocal ? &g_localRing : &g_remoteRing);
+            lastPartialSrc = nil;
+            lastPartialTgt = nil;
+            lrAt = 0;
+            CCLogf(@"tencent %@ open code=0 (ring cleared)", tag);
             CCASendState(isLocal ? @"● 腾讯我方已连接" : @"● 腾讯对方已连接");
             [self startTimer];
         } else {
@@ -322,10 +361,10 @@ static void CCTencentResetUplinkMarker(void) {
     NSDictionary *res = obj[@"result"];
     if ([res isKindOfClass:[NSDictionary class]]) [self handleResult:res];
 
-    if (final == 1 && !isLocal) {
-        // 远程没有 TTS，final=1 表示整条流结束；通话中则重连。
+    if (final == 1 && (!isLocal || !tencentTTS)) {
+        // 没有腾讯 TTS 时，final=1 表示整条流结束；通话中则重连。
         if (!ending) [self fail:@"stream final"];
-    } else if (final == 2 && isLocal) {
+    } else if (final == 2 && isLocal && tencentTTS) {
         if (!ending) [self fail:@"stream final2"];
     }
 }
@@ -342,8 +381,19 @@ static void CCTencentResetUplinkMarker(void) {
     if (!src.length && !tgt.length) return;
     BOOL end = [res[@"sentence_end"] boolValue];
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (!end && now - lastPartialAt < 0.25) return;
+    // v0.19.2：partial 节流 0.25→0.15 秒，并跳过连续完全相同的文本。
+    // 腾讯会把同一 partial 每 200ms 重发一次，不去重会看到字幕“卡住”。
+    if (!end && now - lastPartialAt < 0.15) return;
     if (!end) lastPartialAt = now;
+    if (!end && lastPartialSrc && [src isEqualToString:lastPartialSrc] &&
+        [tgt isEqualToString:lastPartialTgt]) return;
+    if (end) {
+        lastPartialSrc = nil;
+        lastPartialTgt = nil;
+    } else {
+        lastPartialSrc = [src copy];
+        lastPartialTgt = [tgt copy];
+    }
 
     if (!isLocal) {
         if (src.length) CCASendLine([@"I|" stringByAppendingString:src]);
@@ -363,6 +413,7 @@ static void CCTencentResetUplinkMarker(void) {
         if (src.length) CCASendLine([@"LI|" stringByAppendingString:src]);
         if (!tgt.length) return;
         if (end) {
+            lrAt = now;   // v0.19.2：量 LR| 之后多久收到首包英文 TTS
             CCASendLine([@"LR|" stringByAppendingString:tgt]);
             CCASendLine(@"LE|tencent");
         } else {
@@ -388,6 +439,12 @@ static void CCTencentResetUplinkMarker(void) {
 
 - (void)sendTick {
     if (!connected || ending || !task) return;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - lastBacklogLog >= 5.0) {
+        lastBacklogLog = now;
+        CCLogf(@"tencent %@ backlog=%ums", tag,
+               (unsigned)(CCRingUsed(isLocal ? &g_localRing : &g_remoteRing) / 16));
+    }
     int16_t buf[3200];
     NSUInteger got = CCRingRead(isLocal ? &g_localRing : &g_remoteRing, buf, 3200);
     if (got < 3200) memset(buf + got, 0, (3200 - got) * sizeof(int16_t));
@@ -420,7 +477,12 @@ static void CCTencentResetUplinkMarker(void) {
 }
 
 - (void)handleAudio:(NSData *)d {
-    if (!isLocal || !d.length) return;
+    if (!isLocal || !tencentTTS || !d.length) return;
+    if (lrAt > 0) {
+        CCLogf(@"tencent local LR->pcm %.2fs (%lu bytes)",
+               CFAbsoluteTimeGetCurrent() - lrAt, (unsigned long)d.length);
+        lrAt = 0;
+    }
     [audioPending appendData:d];
     NSUInteger n = audioPending.length / 2;
     if (!n) return;
@@ -503,7 +565,16 @@ static void CCTencentResetUplinkMarker(void) {
         fclose(uplinkFp);
         uplinkFp = NULL;
     }
-    if (isLocal) CCTencentResetUplinkMarker();
+    if (isLocal) {
+        lrAt = 0;
+        // v0.19.2：挂断清掉整段上行 PCM，避免下次 reset 时 AppProbe 把旧文件
+        // 重新装进 ring（0.19.1 实测一次 reload 869931 samples = 18.1 秒）。
+        if (uplinkPath.length) {
+            [[NSFileManager defaultManager] removeItemAtPath:uplinkPath error:nil];
+            CCLogf(@"tencent local uplink pcm removed");
+        }
+        CCTencentResetUplinkMarker();
+    }
 }
 
 @end
@@ -539,22 +610,25 @@ void CCTencentStart(void) {
     NSString *localVoice = CCPrefStr(CC_K_TC_LOCAL_VOICE, @"501009");
     NSString *localVol = CCPrefStr(CC_K_TC_LOCAL_VOLUME, @"6");
     NSString *localSpeed = CCPrefStr(CC_K_TC_LOCAL_SPEED, @"0");
+    NSString *enTTS = CCPrefStr(CC_K_ENGLISH_TTS, @"local");
+    BOOL tencentTTS = [enTTS isEqualToString:@"tencent"];
 
     if (remoteOn) {
         CCTencentSession *s = [[CCTencentSession alloc] initWithLocal:NO
             appid:appid secretid:sid secretkey:skey model:remoteModel
-            voiceType:@"" volume:@"" speed:@""];
+            voiceType:@"" volume:@"" speed:@"" tencentTTS:NO];
         [g_sessions addObject:s];
         dispatch_async(s->q, ^{ [s start]; });
     }
     if (localOn) {
         CCTencentSession *s = [[CCTencentSession alloc] initWithLocal:YES
             appid:appid secretid:sid secretkey:skey model:localModel
-            voiceType:localVoice volume:localVol speed:localSpeed];
+            voiceType:localVoice volume:localVol speed:localSpeed
+            tencentTTS:tencentTTS];
         [g_sessions addObject:s];
         dispatch_async(s->q, ^{ [s start]; });
     }
-    CCLogf(@"tencent started remote=%d local=%d", remoteOn, localOn);
+    CCLogf(@"tencent started remote=%d local=%d en_tts=%@", remoteOn, localOn, enTTS);
     CCASendState(@"● 腾讯翻译已启动");
 }
 

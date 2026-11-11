@@ -363,7 +363,13 @@ static void SBDeliverLine(NSString *line) {
     if ([line hasPrefix:@"LRP|"]) {
         CCUIDeliverLocalTranslated([line substringFromIndex:4]);
     } else if ([line hasPrefix:@"LR|"]) {
-        CCUIDeliverLocalTranslated([line substringFromIndex:3]);
+        NSString *t = [line substringFromIndex:3];
+        CCUIDeliverLocalTranslated(t);
+        // v0.19.2：本机英文播报。腾讯 TTS 模式由守护进程直接送上行 PCM；
+        // off 模式只显示英文字幕，不播报。
+        NSString *eng = CCPrefStr(CC_K_ENGLISH_TTS, @"local");
+        if (![eng isEqualToString:@"tencent"] && ![eng isEqualToString:@"off"])
+            CCUIEnqueueLocalEnglishTTS(t);
     } else if ([line hasPrefix:@"LI|"]) {
         CCUIDeliverLocalOriginal([line substringFromIndex:3]);
     } else if ([line hasPrefix:@"RP|"]) {

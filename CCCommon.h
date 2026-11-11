@@ -46,6 +46,9 @@
 #define CC_K_TC_LOCAL_VOLUME  @"TencentLocalVolume"   // -10..10
 #define CC_K_TC_LOCAL_SPEED   @"TencentLocalSpeed"    // -2..6
 #define CC_K_TC_LOCAL_SOURCE  @"TencentLocalSource"   // zh / zh_en
+#define CC_K_ENGLISH_TTS      @"EnglishTTSEngine"     // local / tencent / off，默认 local
+#define CC_K_TC_VAD_SILENCE   @"TencentVadSilence"    // 500..2000 ms
+#define CC_K_TC_MAX_SPEAK     @"TencentMaxSpeak"      // 5000..90000 ms
 
 // ---------- 进程判断 ----------
 void CCProcessInit(void);
@@ -66,6 +69,7 @@ void CCUIDeliverLocalEngine(NSString *engine);     // 我方：实际翻译引�
 void CCUIDeliverState(NSString *state);
 void CCUIClearCaptions(void);                      // 通话开始/结束清空字幕
 void CCUIEnqueueRemoteTTS(NSString *text);          // v0.19.1：把腾讯译文送进下行 TTS 队列
+void CCUIEnqueueLocalEnglishTTS(NSString *text);    // v0.19.2：本机英文 TTS，写入 cc_tts.wav 供上行混音
 NSString *CCFindWhatsAppDocs(void);                 // v0.19.1：守护进程/腾讯模块共用
 // 兼容旧接口
 void CCUIDeliverCaption(NSString *translated);

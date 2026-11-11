@@ -239,11 +239,12 @@ static void CCNoteProperty(AudioUnit unit, AudioUnitPropertyID prop,
         if (seen[i][0] == u && seen[i][1] == prop &&
             seen[i][2] == scope && seen[i][3] == elem) return;
     }
-    if (seenCount < 64) {
-        seen[seenCount][0] = u; seen[seenCount][1] = prop;
-        seen[seenCount][2] = scope; seen[seenCount][3] = elem;
-        seenCount++;
-    }
+    // v0.19.2：表满后不再记录、也不再打日志。以前表满后每个新 unit 都会
+    // 重新刷一行，挂断时路由切换能刷出上千行，把 1MB 日志顶掉。
+    if (seenCount >= 64) return;
+    seen[seenCount][0] = u; seen[seenCount][1] = prop;
+    seen[seenCount][2] = scope; seen[seenCount][3] = elem;
+    seenCount++;
     CCHookLog(@"setprop u%x p%u s%u e%u sz%u", u, prop, scope, elem, size);
 }
 
@@ -263,10 +264,9 @@ static void CCNoteFormat(AudioUnit unit, AudioUnitScope scope, AudioUnitElement 
     for (int i = 0; i < seenCount; i++) {
         if (seen[i][0] == u && seen[i][1] == scope && seen[i][2] == elem) return;
     }
-    if (seenCount < 64) {
-        seen[seenCount][0] = u; seen[seenCount][1] = scope; seen[seenCount][2] = elem;
-        seenCount++;
-    }
+    if (seenCount >= 64) return;   // v0.19.2：表满即静默，避免挂断时刷屏
+    seen[seenCount][0] = u; seen[seenCount][1] = scope; seen[seenCount][2] = elem;
+    seenCount++;
 
     UInt32 sub = 0, man = 0;
     @try {

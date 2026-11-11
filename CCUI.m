@@ -1028,6 +1028,19 @@ void CCUIEnqueueRemoteTTS(NSString *text) {
     CCTTSBuffer(text, @"zh-CN", @"cc_tts_zh.wav");
 }
 
+// v0.19.2：本机英文播报。同步合成到 CC_DIR/cc_tts.wav，守护进程复制给
+// AppProbe，再混进上行。与 0.17.0 同一条已验证链路，延迟远低于腾讯 TTS。
+void CCUIEnqueueLocalEnglishTTS(NSString *text) {
+    if (!text.length) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CCUIEnqueueLocalEnglishTTS(text);
+        });
+        return;
+    }
+    CCTTSBuffer(text, @"en-US", @"cc_tts.wav");
+}
+
 void CCUISpeakText(NSString *text) {
     if (text.length == 0) return;
     @try {
@@ -1369,8 +1382,9 @@ static void CCZhTTSEnqueue(NSString *text) {
     [g_zhTTSQ addObject:text];
     double total = CCZhTTSTotal();
 
-    // 双闸：最多 3 条，或待播总时长 6 秒。先合并最老两条；仍超才丢最老。
-    while ((g_zhTTSQ.count > 3 || total > 6.0) && g_zhTTSQ.count >= 2) {
+    // 双闸：最多 3 条，或待播总时长 3 秒。先合并最老两条；仍超才丢最老。
+    // v0.19.2：从 6 秒收紧到 3 秒，宁可少播一句也不让中文播报越拖越晚。
+    while ((g_zhTTSQ.count > 3 || total > 3.0) && g_zhTTSQ.count >= 2) {
         NSString *a = g_zhTTSQ[0];
         NSString *b = g_zhTTSQ[1];
         NSString *m = [NSString stringWithFormat:@"%@。%@", a, b];
@@ -1381,7 +1395,7 @@ static void CCZhTTSEnqueue(NSString *text) {
                (unsigned long)a.length, (unsigned long)b.length,
                (unsigned long)m.length, (unsigned long)g_zhTTSQ.count);
     }
-    while (g_zhTTSQ.count > 3 || (total > 10.0 && g_zhTTSQ.count > 1)) {
+    while (g_zhTTSQ.count > 3 || (total > 6.0 && g_zhTTSQ.count > 1)) {
         NSString *d = g_zhTTSQ[0];
         [g_zhTTSQ removeObjectAtIndex:0];
         total = CCZhTTSTotal();

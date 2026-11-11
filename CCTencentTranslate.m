@@ -169,6 +169,9 @@ static void CCTencentResetUplinkMarker(void) {
     CFAbsoluteTime lastPartialAt;
     CFAbsoluteTime lastBacklogLog;
     CFAbsoluteTime lrAt;             // v0.19.2：LR| 时刻，量首包 TTS 延迟
+    CFAbsoluteTime lastTextAt;       // v0.19.6：最近一次文本结果
+    int sentReal;                    // v0.19.6：连续发送的真实音频包数（5/s）
+    _Atomic(int) inFlight;           // v0.19.6：未完成的 WS 发送数
     double nextRetryDelay;           // v0.19.3：6001 时快速重连
     NSString *lastPartialSrc;
     NSString *lastPartialTgt;
@@ -340,6 +343,9 @@ static void CCTencentResetUplinkMarker(void) {
             lastPartialSrc = nil;
             lastPartialTgt = nil;
             lrAt = 0;
+            lastTextAt = CFAbsoluteTimeGetCurrent();
+            sentReal = 0;
+            atomic_store(&inFlight, 0);
             CCLogf(@"tencent %@ open code=0 (ring cleared)", tag);
             CCASendState(isLocal ? @"● 腾讯我方已连接" : @"● 腾讯对方已连接");
             [self startTimer];
@@ -401,6 +407,9 @@ static void CCTencentResetUplinkMarker(void) {
     if (!src.length && !tgt.length) return;
     BOOL end = [res[@"sentence_end"] boolValue];
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    // v0.19.6：只要腾讯回了文本，就说明服务端没积压，重置延迟看门狗。
+    lastTextAt = now;
+    sentReal = 0;
     // v0.19.2：partial 节流 0.25→0.15 秒，并跳过连续完全相同的文本。
     // 腾讯会把同一 partial 每 200ms 重发一次，不去重会看到字幕“卡住”。
     if (!end && now - lastPartialAt < 0.15) return;
@@ -462,23 +471,49 @@ static void CCTencentResetUplinkMarker(void) {
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (now - lastBacklogLog >= 5.0) {
         lastBacklogLog = now;
-        CCLogf(@"tencent %@ backlog=%ums", tag,
-               (unsigned)(CCRingUsed(isLocal ? &g_localRing : &g_remoteRing) / 16));
+        CCLogf(@"tencent %@ backlog=%ums inflight=%d sentReal=%d",
+               tag, (unsigned)(CCRingUsed(isLocal ? &g_localRing : &g_remoteRing) / 16),
+               atomic_load(&inFlight), sentReal);
+    }
+    // v0.19.6：如果连续发了 12 秒真实语音还没有任何文本结果，说明
+    // WS 发送队列或腾讯侧已经积压。单靠 1:1 发送永远追不回来，直接
+    // 重连清空队列，宁可丢一点上下文也不让字幕越拖越晚。
+    if (sentReal >= 60 && lastTextAt > 0 && now - lastTextAt > 12.0) {
+        CCLogf(@"tencent %@ no text %.1fs after %d real packets, reconnect",
+               tag, now - lastTextAt, sentReal);
+        [self fail:@"text backlog"];
+        return;
+    }
+    // 发送队列本身积压（网络/TCP 缓冲）也会造成几十秒延迟；超过 6 秒
+    // 未完成的发送就直接重连，清掉 socket 里排队的旧音频。
+    int inf = atomic_load(&inFlight);
+    if (inf > 30) {
+        CCLogf(@"tencent %@ send queue %d packets, reconnect", tag, inf);
+        [self fail:@"send queue"];
+        return;
     }
     int16_t buf[3200];
     NSUInteger got = CCRingRead(isLocal ? &g_localRing : &g_remoteRing, buf, 3200);
+    if (got > 0) sentReal++; else sentReal = 0;
     if (got < 3200) memset(buf + got, 0, (3200 - got) * sizeof(int16_t));
     NSData *d = [NSData dataWithBytes:buf length:sizeof(buf)];
     NSURLSessionWebSocketTask *t = task;
     NSURLSessionWebSocketMessage *m =
         [[NSURLSessionWebSocketMessage alloc] initWithData:d];
+    CFAbsoluteTime sendAt = CFAbsoluteTimeGetCurrent();
+    atomic_fetch_add(&inFlight, 1);
     __weak CCTencentSession *weakSelf = self;
     [t sendMessage:m completionHandler:^(NSError *e) {
-        if (!e) return;
+        atomic_fetch_sub(&self->inFlight, 1);
+        double lag = CFAbsoluteTimeGetCurrent() - sendAt;
+        __weak CCTencentSession *ws = weakSelf;
         dispatch_async(self->q, ^{
-            CCTencentSession *s = weakSelf;
+            CCTencentSession *s = ws;
             if (!s || s->ending || s->task != t) return;
-            [s fail:e.localizedDescription ?: @"send error"];
+            if (lag > 2.0)
+                CCLogf(@"tencent %@ send lag %.1fs inflight=%d", s->tag, lag,
+                       atomic_load(&s->inFlight));
+            if (e) [s fail:e.localizedDescription ?: @"send error"];
         });
     }];
 }

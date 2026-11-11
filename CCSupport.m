@@ -312,12 +312,22 @@ static long g_spoolOffset = 0;
 static NSMutableDictionary<NSNumber *, NSMutableArray<NSString *> *> *g_chunks;
 static void SBDeliverLine(NSString *line);
 
+void CCTransportSkipToEnd(void) {
+    @try {
+        NSDictionary *attrs = [[NSFileManager defaultManager]
+                               attributesOfItemAtPath:CC_SPOOL_PATH error:nil];
+        g_spoolOffset = attrs ? (long)[attrs fileSize] : 0;
+    } @catch (NSException *e) { }
+}
+
 void CCTransportDrain(void) {
     @try {
         NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:CC_SPOOL_PATH];
         if (!fh) return;
         NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:CC_SPOOL_PATH error:nil];
         unsigned long long size = attrs ? [attrs fileSize] : 0;
+        // 文件被截断/重置后，offset 必须跟着回零，否则会一直跳过新内容
+        if (size < (unsigned long long)g_spoolOffset) g_spoolOffset = 0;
         if (size <= (unsigned long long)g_spoolOffset) { [fh closeFile]; return; }
         [fh seekToFileOffset:(unsigned long long)g_spoolOffset];
         NSData *d = [fh readDataToEndOfFile];

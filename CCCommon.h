@@ -94,6 +94,7 @@ void  CCSetPrefBool(NSString *key, BOOL value);   // SB 侧写设置并广播
 void CCTransportBoot(void);                    // SB 侧：建目录/文件、订阅通知
 void CCTransportSendLine(NSString *line);      // MS 侧：发送一行结果
 void CCTransportDrain(void);                   // SB 侧：读取 spool 新增行
+void CCTransportSkipToEnd(void);               // v0.19.6：通话开始丢弃上一通残留行
 void CCTransportHandleChunk(NSString *suffix); // SB 侧：分片兜底重组
 
 // ---------- 翻译 ----------

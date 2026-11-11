@@ -984,6 +984,9 @@ static void CCUIHandleCallActive(BOOL active) {
     CCStreamCallActive(active);
 
     if (active) {
+        // v0.19.6：上一通 WS 的迟到文本可能已经写进 spool；接通瞬间
+        // 先把读指针推到文件末尾，避免“还没接通就弹出上一通字幕”。
+        CCTransportSkipToEnd();
         if (!g_sessionActive && CCPrefBool(CC_K_ENABLED, YES)) {
             g_sessionActive = YES;
             CCSetArmed(YES);

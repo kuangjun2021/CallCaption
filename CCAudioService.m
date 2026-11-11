@@ -37,6 +37,11 @@ static void CCLocalTeeWriteFloat(const float *src, UInt32 n);
 
 static dispatch_queue_t g_stateQ;
 static CFAbsoluteTime g_muteUntil;         // 英文 TTS 播放期间静音，防回声自激
+// v0.19.5 诊断计数（定义在前，CCAQCallback 里要用）
+static _Atomic(uint64_t) g_localTeeSamples;
+static _Atomic(uint64_t) g_localTeeAbsSum;
+static _Atomic(uint64_t) g_localConvOk;
+static _Atomic(uint64_t) g_localConvFail;
 // v0.17.0：守护进程只做“音频桥”——麦克风 Tap + 16k WAV 写入 + TTS 文件复制。
 // 识别/翻译/TTS 合成全部在 SpringBoard（唯一可用 SFSpeech 上下文）。
 // 守护进程里那套 SFSpeech 从来没被喂过音频，只会触发看门狗反复重启 Tap，
@@ -355,9 +360,12 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
                                 }
                             }
                         }
+                        if (ch.expectCJK) atomic_fetch_add(&g_localConvOk, 1);
                         (void)r;
                         (void)pcm;
                         __atomic_add_fetch(&ch->frames, nf, __ATOMIC_RELAXED);
+                    } else if (ch.expectCJK) {
+                        atomic_fetch_add(&g_localConvFail, 1);
                     }
                 }
             }
@@ -699,6 +707,7 @@ static NSString *CCMergeOverlap(NSString *prev, NSString *next) {
 // SpringBoard 侧识别的音频桥：把远程 16k mono s16 连续写成 CC_DIR/remote16k.wav
 static FILE *g_remoteTee;
 static uint64_t g_remoteTeeBytes;
+static BOOL g_remoteCallStarted;   // v0.19.5：arm 之后新出现的 WAV 都属于本通
 static void CCRemoteTeeOpen(void) {
     if (g_remoteTee) return;
     NSString *p = [CC_DIR stringByAppendingPathComponent:@"remote16k.wav"];
@@ -743,7 +752,14 @@ static void CCLocalTeeOpen(void) {
     if (g_localTee) return;
     NSString *p = [CC_DIR stringByAppendingPathComponent:@"local16k.wav"];
     g_localTee = fopen(p.fileSystemRepresentation, "wb");
-    if (!g_localTee) return;
+    if (!g_localTee) {
+        static BOOL logged;
+        if (!logged) {
+            logged = YES;
+            CCLogf(@"local tee open failed (tencent push continues)");
+        }
+        return;
+    }
     uint32_t riff = 36, dsz = 0, rate = 16000, byteRate = 32000, sz16 = 16;
     uint16_t fmt = 1, ch = 1, align = 2, bits = 16;
     fwrite("RIFF", 1, 4, g_localTee); fwrite(&riff, 4, 1, g_localTee);
@@ -758,8 +774,15 @@ static void CCLocalTeeOpen(void) {
 }
 static void CCLocalTeeWriteFloat(const float *src, UInt32 n) {
     if (!n || !src) return;
-    if (!g_localTee) CCLocalTeeOpen();
-    if (!g_localTee) return;
+    // v0.19.5：腾讯本地 ring 不能依赖 local16k.wav 文件是否写得进去。
+    // 以前文件打不开就直接 return，Tencent 也一起收不到音频；现在文件
+    // 写失败只影响 WAV，不影响 CCTencentPushLocal。这同时解释/修掉
+    // 0.19.4 日志里“local16k.wav 只有 694 字节”却仍有 ring backlog 的怪象。
+    BOOL teeOk = (g_localTee != NULL);
+    if (!teeOk) {
+        CCLocalTeeOpen();
+        teeOk = (g_localTee != NULL);
+    }
     double step = 44100.0 / 16000.0;
     double pos = g_localTeePhase;
     int16_t buf[1024];
@@ -774,25 +797,45 @@ static void CCLocalTeeWriteFloat(const float *src, UInt32 n) {
         if (iv < -32768) iv = -32768;
         buf[cnt++] = (int16_t)iv;
         if (cnt == 1024) {
-            fwrite(buf, 2, cnt, g_localTee);
+            if (teeOk) {
+                fwrite(buf, 2, cnt, g_localTee);
+                g_localTeeBytes += (uint64_t)cnt * 2;
+            }
+            uint64_t absSum = 0;
+            for (UInt32 k = 0; k < cnt; k++) {
+                int16_t v = buf[k];
+                absSum += (uint64_t)(v < 0 ? -v : v);
+            }
+            atomic_fetch_add(&g_localTeeAbsSum, absSum);
             CCTencentPushLocal(buf, cnt);
-            g_localTeeBytes += (uint64_t)cnt * 2;
+            atomic_fetch_add(&g_localTeeSamples, cnt);
             cnt = 0;
         }
         pos += step;
     }
     if (cnt) {
-        fwrite(buf, 2, cnt, g_localTee);
+        if (teeOk) {
+            fwrite(buf, 2, cnt, g_localTee);
+            g_localTeeBytes += (uint64_t)cnt * 2;
+        }
+        uint64_t absSum = 0;
+        for (UInt32 k = 0; k < cnt; k++) {
+            int16_t v = buf[k];
+            absSum += (uint64_t)(v < 0 ? -v : v);
+        }
+        atomic_fetch_add(&g_localTeeAbsSum, absSum);
         CCTencentPushLocal(buf, cnt);
-        g_localTeeBytes += (uint64_t)cnt * 2;
+        atomic_fetch_add(&g_localTeeSamples, cnt);
     }
     g_localTeePhase = pos - (double)n;
-    uint32_t riff = (uint32_t)(36 + g_localTeeBytes);
-    uint32_t dsz = (uint32_t)g_localTeeBytes;
-    fseek(g_localTee, 4, SEEK_SET); fwrite(&riff, 4, 1, g_localTee);
-    fseek(g_localTee, 40, SEEK_SET); fwrite(&dsz, 4, 1, g_localTee);
-    fseek(g_localTee, 0, SEEK_END);
-    fflush(g_localTee);
+    if (teeOk) {
+        uint32_t riff = (uint32_t)(36 + g_localTeeBytes);
+        uint32_t dsz = (uint32_t)g_localTeeBytes;
+        fseek(g_localTee, 4, SEEK_SET); fwrite(&riff, 4, 1, g_localTee);
+        fseek(g_localTee, 40, SEEK_SET); fwrite(&dsz, 4, 1, g_localTee);
+        fseek(g_localTee, 0, SEEK_END);
+        fflush(g_localTee);
+    }
 }
 static void CCLocalTeeClose(void) {
     if (g_localTee) { fclose(g_localTee); g_localTee = NULL; }
@@ -829,6 +872,7 @@ static void CCWriteChunkWav(NSString *path, NSData *pcm) {
             return;
         }
         if (!filePath || ![filePath isEqualToString:path]) {
+            BOOL midCall = g_remoteCallStarted;   // arm 之后出现的 WAV 都是本通中途切换
             filePath = path;
             NSDictionary *fat = [[NSFileManager defaultManager]
                                  attributesOfItemAtPath:path error:nil];
@@ -846,6 +890,17 @@ static void CCWriteChunkWav(NSString *path, NSData *pcm) {
                 fileOffset = armSize;
                 CCLogf(@"%@: start at arm offset %.1fs (skip previous call)",
                        self.tag, (double)(armSize - 44) / 96000.0);
+            } else if (midCall && fsz > 44) {
+                // v0.19.5：通话中途探针换了新 WAV（音频单元/路由变化）。
+                // 新文件里可能已经写了好几秒历史；如果从 44 开始读，会把
+                // 这几秒一次性灌进 ring，而腾讯只允许 1:1，永远追不回来。
+                // 这里只保留最后 0.3 秒上下文，前面跳过，保证字幕不再越拖越晚。
+                unsigned long long keep = 48000ULL * 2ULL * 3ULL / 10ULL; // 0.3s
+                fileOffset = (fsz > 44 + keep) ? (fsz - keep) : 44;
+                fileOffset &= ~1ULL;
+                CCLogf(@"%@: switch file, skip %.1fs (keep %.1fs)",
+                       self.tag, (double)(fileOffset - 44) / 96000.0,
+                       (double)(fsz - fileOffset) / 96000.0);
             } else {
                 fileOffset = 44;
             }
@@ -1333,6 +1388,7 @@ static void CheckArm(void) {
         if (armed && !lastArmed) {
             // 新通话：重置 Tap 探测，从 speaker(-2) 开始，最多试 -1 / -3。
             g_remote->tapProbeCount = 0;
+            g_remoteCallStarted = YES;
             g_remote.tapPID = CC_TAP_PID_SPEAKER;
             // 清掉上一通的 16k 桥文件：关闭后删除，下次写入自动重建并截断。
             // 0.17.0 在这里 stop 通道并直接 fopen，结果守护进程每 6~7 秒重启一次
@@ -1345,6 +1401,11 @@ static void CheckArm(void) {
                 CCLocalTeeClose();
                 [fm2 removeItemAtPath:[CC_DIR stringByAppendingPathComponent:@"local16k.wav"]
                                 error:nil];
+                // v0.19.5 诊断计数：新通话清零
+                atomic_store(&g_localTeeSamples, 0);
+                atomic_store(&g_localTeeAbsSum, 0);
+                atomic_store(&g_localConvOk, 0);
+                atomic_store(&g_localConvFail, 0);
             }
             // 0.19.0：清上一通残留的中文 TTS 序列，并通知 AppProbe 清 zh ring
             NSString *waDocs = CCFindWhatsAppDocs();
@@ -1385,6 +1446,7 @@ static void CheckArm(void) {
         if (!armed) {
             // 挂断后让 AppProbe 丢掉还没播完的中文 TTS / 上行 PCM，避免拖到下一通。
             // 只在 armed → unarmed 的那一拍写标记，不要每 500ms 重复写。
+            g_remoteCallStarted = NO;
             CCTencentStop();
             if (wasArmed) {
                 NSString *waDocs = CCFindWhatsAppDocs();
@@ -1593,11 +1655,17 @@ static void CheckArm(void) {
         }
         if (g_local->capturing && now - g_local->lastStatsAt >= 5.0) {
             g_local->lastStatsAt = now;
-            CCLogf(@"local: alive, audio=%llu frames=%llu rms=%.4f noResult=%.1fs",
+            uint64_t tSamples = atomic_load(&g_localTeeSamples);
+            uint64_t tAbs = atomic_load(&g_localTeeAbsSum);
+            double teeRms = tSamples ? (double)tAbs / (double)tSamples / 32768.0 : 0;
+            CCLogf(@"local: alive, audio=%llu frames=%llu rms=%.4f noResult=%.1fs tee=%llu teeRms=%.4f conv=%llu/%llu",
                    (unsigned long long)g_local->audioBytes,
                    (unsigned long long)g_local->frames,
                    g_local->lastRMS,
-                   g_local->lastResultAt > 0 ? now - g_local->lastResultAt : -1);
+                   g_local->lastResultAt > 0 ? now - g_local->lastResultAt : -1,
+                   (unsigned long long)tSamples, teeRms,
+                   (unsigned long long)atomic_load(&g_localConvOk),
+                   (unsigned long long)atomic_load(&g_localConvFail));
         }
     } @catch (NSException *e) { }
 }

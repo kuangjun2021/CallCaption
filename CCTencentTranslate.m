@@ -163,6 +163,7 @@ static void CCTencentResetUplinkMarker(void) {
     BOOL ending;
     BOOL connected;
     BOOL tencentTTS;                 // v0.19.2：我方英文播报是否用腾讯 TTS
+    BOOL liteRetried;                // v0.19.5：lite 6001 先原样重试一次
     NSUInteger gen;
     int failures;
     CFAbsoluteTime lastPartialAt;
@@ -350,9 +351,18 @@ static void CCTencentResetUplinkMarker(void) {
             // 直接回退标准版并 0.3 秒快速重连，避免开头 3~5 秒空白。
             if (isLocal && code == 6001 &&
                 [model isEqualToString:@"hunyuan-translation-lite"]) {
-                model = @"hunyuan-translation";
-                nextRetryDelay = 0.3;
-                CCLogf(@"tencent local lite 6001, fallback standard");
+                // v0.19.5：0.19.2 实测 lite 重连一次就能成功；0.19.3 直接
+                // 切 standard 可能把 zh→en 的流式效果拖坏。先原样重试 lite，
+                // 第二次还 6001 才回退 standard。
+                if (!liteRetried) {
+                    liteRetried = YES;
+                    nextRetryDelay = 0.3;
+                    CCLogf(@"tencent local lite 6001, retry lite");
+                } else {
+                    model = @"hunyuan-translation";
+                    nextRetryDelay = 0.3;
+                    CCLogf(@"tencent local lite 6001 again, fallback standard");
+                }
             }
             CCASendState([NSString stringWithFormat:@"● 腾讯%@连接失败(%ld)",
                           isLocal ? @"我方" : @"对方", (long)code]);

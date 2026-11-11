@@ -28,6 +28,7 @@ typedef struct {
 static CCTCRing g_remoteRing;
 static CCTCRing g_localRing;
 static _Atomic(int) g_tcActive;
+static _Atomic(int) g_tcLocalOn;   // 混合模式下 local 走 SFSpeech，不再推 local ring
 static NSMutableArray *g_sessions;
 static dispatch_queue_t g_tcTransportQ;
 static dispatch_queue_t g_tcStartQ;
@@ -211,6 +212,10 @@ static void CCTencentResetUplinkMarker(void) {
         if (sampleRate != 8000) sampleRate = 16000;
         // 腾讯英文 TTS 的 PCM 按 16k 处理；开 TTS 时强制 16k，避免重采样错位
         if (tencentTTS) sampleRate = 16000;
+        // 混合模式只有一条腾讯 WS，不需要 8k 省带宽；强制 16k 保英文识别质量
+        if (!local &&
+            [CCPrefStr(CC_K_TC_LOCAL_ENGINE, @"sfspeech") isEqualToString:@"sfspeech"])
+            sampleRate = 16000;
         tag = local ? @"local" : @"remote";
         self->appid = [pAppid copy];
         self->secretid = [pSecretid copy];
@@ -670,12 +675,17 @@ void CCTencentStart(void) {
     }
     BOOL remoteOn = CCPrefBool(CC_K_REMOTE_ENABLED, YES);
     BOOL localOn = CCPrefBool(CC_K_LOCAL_ENABLED, YES);
-    if (!remoteOn && !localOn) return;
+    NSString *localEngine = CCPrefStr(CC_K_TC_LOCAL_ENGINE, @"sfspeech");
+    BOOL localTencent = localOn && ![localEngine isEqualToString:@"sfspeech"];
+    // 混合模式（remote 腾讯 + local SFSpeech）不开 local 腾讯 WS；
+    // 如果连 remote 也关了，就完全不需要腾讯会话。
+    if (!remoteOn && !localTencent) return;
 
     CCRingInit(&g_remoteRing, 16000 * 10);
     CCRingInit(&g_localRing, 16000 * 10);
     CCRingClear(&g_remoteRing);
     CCRingClear(&g_localRing);
+    atomic_store(&g_tcLocalOn, localTencent ? 1 : 0);
     atomic_store(&g_tcActive, 1);
     if (!g_sessions) g_sessions = [NSMutableArray array];
 
@@ -696,7 +706,7 @@ void CCTencentStart(void) {
         [g_sessions addObject:s];
         dispatch_async(s->q, ^{ [s start]; });
     }
-    if (localOn) {
+    if (localTencent) {
         CCTencentSession *s = [[CCTencentSession alloc] initWithLocal:YES
             appid:appid secretid:sid secretkey:skey model:localModel
             voiceType:localVoice volume:localVol speed:localSpeed
@@ -704,13 +714,15 @@ void CCTencentStart(void) {
         [g_sessions addObject:s];
         dispatch_async(s->q, ^{ [s start]; });
     }
-    CCLogf(@"tencent started remote=%d local=%d en_tts=%@", remoteOn, localOn, enTTS);
+    CCLogf(@"tencent started remote=%d localTencent=%d engine=%@ en_tts=%@",
+           remoteOn, localTencent, localEngine, enTTS);
     CCASendState(@"● 腾讯翻译已启动");
 }
 
 void CCTencentStop(void) {
     if (!atomic_load(&g_tcActive)) return;
     atomic_store(&g_tcActive, 0);
+    atomic_store(&g_tcLocalOn, 0);
     for (CCTencentSession *s in [g_sessions copy])
         dispatch_async(s->q, ^{ [s stop]; });
     [g_sessions removeAllObjects];
@@ -730,6 +742,6 @@ void CCTencentPushRemote(const int16_t *samples, NSUInteger count) {
 }
 
 void CCTencentPushLocal(const int16_t *samples, NSUInteger count) {
-    if (!atomic_load(&g_tcActive)) return;
+    if (!atomic_load(&g_tcActive) || !atomic_load(&g_tcLocalOn)) return;
     CCRingPush(&g_localRing, samples, count);
 }

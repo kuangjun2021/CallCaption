@@ -1870,7 +1870,8 @@ static void CCStreamDeliver(CCStream *st) {
             if (!out.length) { onFail(); return; }
             CCUIDeliverLocalTranslated(out);
             if (engine.length) CCUIDeliverLocalEngine(engine);
-            if (CCPrefBool(CC_K_TTS_ENABLED, YES))
+            if (CCPrefBool(CC_K_TTS_ENABLED, YES) &&
+                ![CCPrefStr(CC_K_ENGLISH_TTS, @"local") isEqualToString:@"off"])
                 CCTTSBuffer(out, @"en-US", @"cc_tts.wav");
         });
     } else {
@@ -2072,12 +2073,19 @@ static void CCStreamStop(CCStream *st) {
     st.nextRetryAt = 0; st.restartScheduled = NO;
 }
 
+static BOOL CCTencentHybridLocal(void) {
+    if (!CCPrefBool(CC_K_TC_ENABLED, NO)) return NO;
+    return [CCPrefStr(CC_K_TC_LOCAL_ENGINE, @"sfspeech") isEqualToString:@"sfspeech"];
+}
+
 static void CCStreamTick(CCStream *st) {
     if (!g_callActive) return;
-    // v0.19.1：腾讯模式由守护进程双 WS 处理，SpringBoard 不再跑 SFSpeech
+    // v0.19.9：混合模式只让 SpringBoard 跑 local SFSpeech；remote 走腾讯。
     if (CCPrefBool(CC_K_TC_ENABLED, NO)) {
-        if (st.task || st.req) CCStreamStop(st);
-        return;
+        if (!(st.isLocal && CCTencentHybridLocal())) {
+            if (st.task || st.req) CCStreamStop(st);
+            return;
+        }
     }
     if (st.isLocal && g_localStreamPaused) return;
     if (!g_sessionActive) {              // 面板关闭/未启用：不要空跑识别会话
@@ -2201,9 +2209,19 @@ static void CCStreamCallActive(BOOL active) {
         CCStreamReset(r);
         CCStreamReset(l);
         if (CCPrefBool(CC_K_TC_ENABLED, NO)) {
+            if (!CCTencentHybridLocal()) {
+                CCStreamStop(r);
+                CCStreamStop(l);
+                CCLogf(@"stream: tencent mode, SpringBoard SFSpeech off");
+                return;
+            }
+            // v0.19.9 混合：remote 继续由腾讯处理，SpringBoard 只跑 local。
             CCStreamStop(r);
-            CCStreamStop(l);
-            CCLogf(@"stream: tencent mode, SpringBoard SFSpeech off");
+            CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+            l.callStart = now;
+            BOOL cloud = CCPrefBool(CC_K_CLOUD_ASR, YES);
+            l.onDevice = !cloud;
+            CCLogf(@"stream: hybrid, local SFSpeech on (cloud=%d), remote Tencent", cloud);
             return;
         }
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();

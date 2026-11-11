@@ -18,6 +18,7 @@
 #import <fcntl.h>
 
 static void CCLocalTeeWriteFloat(const float *src, UInt32 n);
+static void CCLocalTeeFlush(void);
 
 // ---------- 私有 AudioToolbox Tap API（iOS 16+） ----------
 @interface ATAudioTapDescription : NSObject
@@ -549,7 +550,7 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
     urlTaskRunning = NO;
     atomic_store(&chunkReady, 0);
     if (self.fileMode) CCRemoteTeeClose();
-    else CCLocalTeeClose();
+    else { CCLocalTeeFlush(); CCLocalTeeClose(); }
     callGen++;
     partialGen++;
     @try {
@@ -748,6 +749,46 @@ static void CCRemoteTeeClose(void) {
 static FILE *g_localTee;
 static double g_localTeePhase;
 static uint64_t g_localTeeBytes;
+// v0.19.9：文件写入从 AudioQueue 实时回调挪到守护进程 tick。
+// 以前 RT 线程直接 fwrite 只写进去 0.1~0.2 秒，SpringBoard 的本地
+// SFSpeech 读不到连续音频；混合架构必须修掉。
+static int16_t *g_localFileBuf;
+static uint32_t g_localFileCap;
+static _Atomic(uint32_t) g_localFileHead, g_localFileTail;
+static void CCLocalFileRingInit(void) {
+    if (g_localFileBuf) return;
+    g_localFileCap = 16000 * 10;
+    g_localFileBuf = calloc(g_localFileCap, sizeof(int16_t));
+    if (!g_localFileBuf) g_localFileCap = 0;
+    atomic_store(&g_localFileHead, 0);
+    atomic_store(&g_localFileTail, 0);
+}
+static void CCLocalFileRingReset(void) {
+    atomic_store(&g_localFileHead, 0);
+    atomic_store(&g_localFileTail, 0);
+}
+static void CCLocalFilePush(const int16_t *s, uint32_t n) {
+    if (!g_localFileBuf || !g_localFileCap || !n) return;
+    uint32_t head = atomic_load(&g_localFileHead);
+    uint32_t tail = atomic_load(&g_localFileTail);
+    uint32_t space = g_localFileCap - (head - tail);
+    if (n > space) n = space;
+    for (uint32_t i = 0; i < n; i++)
+        g_localFileBuf[(head + i) % g_localFileCap] = s[i];
+    atomic_store(&g_localFileHead, head + n);
+}
+static NSUInteger CCLocalFileRead(int16_t *dst, NSUInteger max) {
+    if (!g_localFileBuf || !g_localFileCap || !dst || !max) return 0;
+    uint32_t head = atomic_load(&g_localFileHead);
+    uint32_t tail = atomic_load(&g_localFileTail);
+    uint32_t avail = head - tail;
+    if (!avail) return 0;
+    NSUInteger n = MIN((uint32_t)max, avail);
+    for (NSUInteger i = 0; i < n; i++)
+        dst[i] = g_localFileBuf[(tail + (uint32_t)i) % g_localFileCap];
+    atomic_store(&g_localFileTail, tail + (uint32_t)n);
+    return n;
+}
 static void CCLocalTeeOpen(void) {
     if (g_localTee) return;
     NSString *p = [CC_DIR stringByAppendingPathComponent:@"local16k.wav"];
@@ -774,15 +815,10 @@ static void CCLocalTeeOpen(void) {
 }
 static void CCLocalTeeWriteFloat(const float *src, UInt32 n) {
     if (!n || !src) return;
-    // v0.19.5：腾讯本地 ring 不能依赖 local16k.wav 文件是否写得进去。
-    // 以前文件打不开就直接 return，Tencent 也一起收不到音频；现在文件
-    // 写失败只影响 WAV，不影响 CCTencentPushLocal。这同时解释/修掉
-    // 0.19.4 日志里“local16k.wav 只有 694 字节”却仍有 ring backlog 的怪象。
-    BOOL teeOk = (g_localTee != NULL);
-    if (!teeOk) {
-        CCLocalTeeOpen();
-        teeOk = (g_localTee != NULL);
-    }
+    // RT 线程只做重采样 + 入 ring；文件由 CCLocalTeeFlush 在守护进程
+    // tick 线程写。这样 local16k.wav 才能连续增长，SpringBoard 的
+    // 本地 SFSpeech 才有完整音频。
+    CCLocalFileRingInit();
     double step = 44100.0 / 16000.0;
     double pos = g_localTeePhase;
     int16_t buf[1024];
@@ -797,16 +833,13 @@ static void CCLocalTeeWriteFloat(const float *src, UInt32 n) {
         if (iv < -32768) iv = -32768;
         buf[cnt++] = (int16_t)iv;
         if (cnt == 1024) {
-            if (teeOk) {
-                fwrite(buf, 2, cnt, g_localTee);
-                g_localTeeBytes += (uint64_t)cnt * 2;
-            }
             uint64_t absSum = 0;
             for (UInt32 k = 0; k < cnt; k++) {
                 int16_t v = buf[k];
                 absSum += (uint64_t)(v < 0 ? -v : v);
             }
             atomic_fetch_add(&g_localTeeAbsSum, absSum);
+            CCLocalFilePush(buf, cnt);
             CCTencentPushLocal(buf, cnt);
             atomic_fetch_add(&g_localTeeSamples, cnt);
             cnt = 0;
@@ -814,21 +847,37 @@ static void CCLocalTeeWriteFloat(const float *src, UInt32 n) {
         pos += step;
     }
     if (cnt) {
-        if (teeOk) {
-            fwrite(buf, 2, cnt, g_localTee);
-            g_localTeeBytes += (uint64_t)cnt * 2;
-        }
         uint64_t absSum = 0;
         for (UInt32 k = 0; k < cnt; k++) {
             int16_t v = buf[k];
             absSum += (uint64_t)(v < 0 ? -v : v);
         }
         atomic_fetch_add(&g_localTeeAbsSum, absSum);
+        CCLocalFilePush(buf, cnt);
         CCTencentPushLocal(buf, cnt);
         atomic_fetch_add(&g_localTeeSamples, cnt);
     }
     g_localTeePhase = pos - (double)n;
-    if (teeOk) {
+}
+static void CCLocalTeeFlush(void) {
+    CCLocalFileRingInit();
+    if (!g_localFileBuf) return;
+    // 通话结束/未开始时不要重新创建 local16k.wav；只把本通已打开的
+    // 文件里剩下的样本冲掉。
+    if (!g_localTee && !(g_local && g_local->capturing)) return;
+    if (!g_localTee) CCLocalTeeOpen();
+    if (!g_localTee) return;
+    int16_t tmp[4096];
+    NSUInteger n = 0;
+    BOOL wrote = NO;
+    while ((n = CCLocalFileRead(tmp, 4096)) > 0) {
+        size_t w = fwrite(tmp, 2, n, g_localTee);
+        if (!w) break;
+        g_localTeeBytes += (uint64_t)w * 2;
+        wrote = YES;
+        if (w < n) break;
+    }
+    if (wrote) {
         uint32_t riff = (uint32_t)(36 + g_localTeeBytes);
         uint32_t dsz = (uint32_t)g_localTeeBytes;
         fseek(g_localTee, 4, SEEK_SET); fwrite(&riff, 4, 1, g_localTee);
@@ -1399,6 +1448,8 @@ static void CheckArm(void) {
                             error:nil];
             if (CCPrefBool(CC_K_LOCAL_ENABLED, YES)) {
                 CCLocalTeeClose();
+                CCLocalFileRingInit();
+                CCLocalFileRingReset();
                 [fm2 removeItemAtPath:[CC_DIR stringByAppendingPathComponent:@"local16k.wav"]
                                 error:nil];
                 // v0.19.5 诊断计数：新通话清零
@@ -1644,6 +1695,10 @@ static void CheckArm(void) {
                 }
             }
         }
+
+        // v0.19.9：把 RT 回调里积攒的本地 16k 样本写进 local16k.wav，
+        // 供 SpringBoard 的本地 SFSpeech 连续读取。
+        CCLocalTeeFlush();
 
         if (g_remote->capturing && now - g_remote->lastStatsAt >= 5.0) {
             g_remote->lastStatsAt = now;

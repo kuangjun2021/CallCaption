@@ -50,6 +50,7 @@
 #define CC_K_TC_VAD_SILENCE   @"TencentVadSilence"    // 500..2000 ms
 #define CC_K_TC_MAX_SPEAK     @"TencentMaxSpeak"      // 5000..90000 ms
 #define CC_K_TC_SAMPLE_RATE   @"TencentSampleRate"    // 16000 / 8000，双开卡时用 8000
+#define CC_K_TC_LOCAL_ENGINE  @"TencentLocalEngine"   // sfspeech（混合，单 WS）/ tencent（双 WS）
 
 // ---------- 进程判断 ----------
 void CCProcessInit(void);

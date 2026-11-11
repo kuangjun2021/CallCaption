@@ -4,6 +4,7 @@
 // 参考实现：Lessica/TrollRecorder（ATAudioTap + AudioQueue 'qtob'）
 // 权限：entitlements/CallCaptionAudioService.plist
 #import "CCCommon.h"
+#import "CCTencentTranslate.h"
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <Speech/Speech.h>
@@ -134,7 +135,7 @@ static void CCWriteUplinkWav(NSData *pcm) {
     CCLogf(@"uplink tts written %lu bytes", (unsigned long)pcm.length);
 }
 
-static NSString *CCFindWhatsAppDocs(void) {
+NSString *CCFindWhatsAppDocs(void) {
     if (g_waDocsDir) return g_waDocsDir;
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *base = @"/var/mobile/Containers/Data/Application";
@@ -720,6 +721,7 @@ static void CCRemoteTeeWrite(const int16_t *s, UInt32 n) {
     if (!g_remoteTee) CCRemoteTeeOpen();
     if (!g_remoteTee) return;
     fwrite(s, 2, n, g_remoteTee);
+    CCTencentPushRemote(s, n);
     g_remoteTeeBytes += (uint64_t)n * 2;
     uint32_t riff = (uint32_t)(36 + g_remoteTeeBytes);
     uint32_t dsz = (uint32_t)g_remoteTeeBytes;
@@ -773,6 +775,7 @@ static void CCLocalTeeWriteFloat(const float *src, UInt32 n) {
         buf[cnt++] = (int16_t)iv;
         if (cnt == 1024) {
             fwrite(buf, 2, cnt, g_localTee);
+            CCTencentPushLocal(buf, cnt);
             g_localTeeBytes += (uint64_t)cnt * 2;
             cnt = 0;
         }
@@ -780,6 +783,7 @@ static void CCLocalTeeWriteFloat(const float *src, UInt32 n) {
     }
     if (cnt) {
         fwrite(buf, 2, cnt, g_localTee);
+        CCTencentPushLocal(buf, cnt);
         g_localTeeBytes += (uint64_t)cnt * 2;
     }
     g_localTeePhase = pos - (double)n;
@@ -1359,24 +1363,38 @@ static void CheckArm(void) {
                 }
                 [fm2 removeItemAtPath:[waDocs stringByAppendingPathComponent:@"cc_tts_zh.wav"]
                                 error:nil];
+                [fm2 removeItemAtPath:[waDocs stringByAppendingPathComponent:@"cc_tts.wav"]
+                                error:nil];
+                [fm2 removeItemAtPath:[CC_DIR stringByAppendingPathComponent:@"cc_tts.wav"]
+                                error:nil];
                 NSString *reset = [waDocs stringByAppendingPathComponent:@"cc_tts_reset"];
                 [@"" writeToFile:reset atomically:YES encoding:NSUTF8StringEncoding error:nil];
                 chmod(reset.fileSystemRepresentation, 0666);
+                [fm2 removeItemAtPath:[waDocs stringByAppendingPathComponent:@"uplink_stream.pcm"]
+                                error:nil];
+                NSString *ureset = [waDocs stringByAppendingPathComponent:@"uplink_reset"];
+                [@"" writeToFile:ureset atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                chmod(ureset.fileSystemRepresentation, 0666);
             }
             g_localStartAfter = CFAbsoluteTimeGetCurrent() + 1.0;
             CCSnapshotProbeFileSizes();
+            CCTencentStart();
             CCLogf(@"arm: bridge wav cleared (local tap in 1.0s)");
         }
         lastArmed = armed;
         if (!armed) {
-            // 挂断后让 AppProbe 丢掉还没播完的中文 TTS，避免拖到下一通。
+            // 挂断后让 AppProbe 丢掉还没播完的中文 TTS / 上行 PCM，避免拖到下一通。
             // 只在 armed → unarmed 的那一拍写标记，不要每 500ms 重复写。
+            CCTencentStop();
             if (wasArmed) {
                 NSString *waDocs = CCFindWhatsAppDocs();
                 if (waDocs) {
                     NSString *reset = [waDocs stringByAppendingPathComponent:@"cc_tts_reset"];
                     [@"" writeToFile:reset atomically:YES encoding:NSUTF8StringEncoding error:nil];
                     chmod(reset.fileSystemRepresentation, 0666);
+                    NSString *ureset = [waDocs stringByAppendingPathComponent:@"uplink_reset"];
+                    [@"" writeToFile:ureset atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                    chmod(ureset.fileSystemRepresentation, 0666);
                 }
             }
             [g_remote stop];

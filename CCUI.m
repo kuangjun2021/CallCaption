@@ -1021,6 +1021,13 @@ static void CCUIHandleCallActive(BOOL active) {
 
 static AVSpeechSynthesizer *g_tts;
 
+// v0.19.1：腾讯远程译文走 0.19.0 的序列 TTS 队列，混入下行；
+// 不再用 CCUISpeakText 的扬声器外放。
+void CCUIEnqueueRemoteTTS(NSString *text) {
+    if (!text.length) return;
+    CCTTSBuffer(text, @"zh-CN", @"cc_tts_zh.wav");
+}
+
 void CCUISpeakText(NSString *text) {
     if (text.length == 0) return;
     @try {
@@ -2047,6 +2054,11 @@ static void CCStreamStop(CCStream *st) {
 
 static void CCStreamTick(CCStream *st) {
     if (!g_callActive) return;
+    // v0.19.1：腾讯模式由守护进程双 WS 处理，SpringBoard 不再跑 SFSpeech
+    if (CCPrefBool(CC_K_TC_ENABLED, NO)) {
+        if (st.task || st.req) CCStreamStop(st);
+        return;
+    }
     if (st.isLocal && g_localStreamPaused) return;
     if (!g_sessionActive) {              // 面板关闭/未启用：不要空跑识别会话
         if (st.task || st.req) CCStreamStop(st);
@@ -2168,6 +2180,12 @@ static void CCStreamCallActive(BOOL active) {
         CCZhTTSReset();
         CCStreamReset(r);
         CCStreamReset(l);
+        if (CCPrefBool(CC_K_TC_ENABLED, NO)) {
+            CCStreamStop(r);
+            CCStreamStop(l);
+            CCLogf(@"stream: tencent mode, SpringBoard SFSpeech off");
+            return;
+        }
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
         r.callStart = now;
         l.callStart = now;

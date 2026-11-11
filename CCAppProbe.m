@@ -377,6 +377,7 @@ static uint32_t g_ttsZhCap;
 static _Atomic(uint32_t) g_ttsZhHead, g_ttsZhTail;
 static NSTimeInterval g_ttsZhMtime;
 static NSString *g_ttsZhLastFile;   // 0.19.0：zh 序列文件按名字递增装载
+static unsigned long long g_uplinkOffset;   // 0.19.1：腾讯英文 TTS 的 48k PCM 流
 
 // 原音音量：0.0~1.0（0 = TTS 播放时原音静音）
 static double g_duckRemote = 0.30;
@@ -415,6 +416,68 @@ static void CCLoadTTSIfNeeded(void) {
         }
         atomic_store(&g_ttsHead, head);
         CCAppLog(@"tts loaded %lu samples", (unsigned long)n);
+    } @catch (NSException *e) { }
+}
+
+// v0.19.1：腾讯英文 TTS 的 48k s16 PCM 从守护进程追加到 uplink_stream.pcm。
+// 这里按 offset 增量读取，转 float 进上行 ring；uplink_reset 由守护进程在
+// arm/挂断时写入，用来清空上一通残留。
+static void CCLoadUplinkStreamIfNeeded(void) {
+    @try {
+        NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                              NSUserDomainMask, YES) firstObject];
+        if (!docs.length) return;
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSString *marker = [docs stringByAppendingPathComponent:@"uplink_reset"];
+        if ([fm fileExistsAtPath:marker]) {
+            if (!g_ttsRing) {
+                g_ttsCap = 48000 * 30;
+                g_ttsRing = calloc(g_ttsCap, sizeof(float));
+            }
+            atomic_store(&g_ttsHead, 0);
+            atomic_store(&g_ttsTail, 0);
+            g_uplinkOffset = 0;
+            [fm removeItemAtPath:marker error:nil];
+            CCAppLog(@"uplink stream reset");
+        }
+        NSString *p = [docs stringByAppendingPathComponent:@"uplink_stream.pcm"];
+        NSDictionary *at = [fm attributesOfItemAtPath:p error:nil];
+        if (!at) return;
+        unsigned long long size = [at[NSFileSize] unsignedLongLongValue];
+        if (size < g_uplinkOffset) g_uplinkOffset = 0;
+        if (size <= g_uplinkOffset) return;
+        if (!g_ttsRing) {
+            g_ttsCap = 48000 * 30;
+            g_ttsRing = calloc(g_ttsCap, sizeof(float));
+        }
+        if (!g_ttsRing) return;
+        uint32_t head = atomic_load(&g_ttsHead);
+        uint32_t tail = atomic_load(&g_ttsTail);
+        uint32_t space = g_ttsCap - (head - tail);
+        if (!space) return;
+        unsigned long long avail = size - g_uplinkOffset;
+        unsigned long long want = MIN(avail, (unsigned long long)space * 2ULL);
+        want &= ~1ULL;
+        if (!want) return;
+        NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:p];
+        if (!fh) return;
+        NSData *d = nil;
+        @try {
+            [fh seekToFileOffset:g_uplinkOffset];
+            d = [fh readDataOfLength:(NSUInteger)want];
+        } @catch (NSException *e) { d = nil; }
+        [fh closeFile];
+        if (d.length < 2) return;
+        NSUInteger n = d.length / 2;
+        const int16_t *src = (const int16_t *)d.bytes;
+        for (NSUInteger i = 0; i < n; i++) {
+            g_ttsRing[head % g_ttsCap] = (float)src[i] / 32768.0f;
+            head++;
+        }
+        atomic_store(&g_ttsHead, head);
+        g_uplinkOffset += (unsigned long long)n * 2;
+        CCAppLog(@"uplink pcm loaded %lu samples total=%llu",
+                 (unsigned long)n, g_uplinkOffset);
     } @catch (NSException *e) { }
 }
 
@@ -655,6 +718,7 @@ static OSStatus CCHookedRender(AudioUnit unit, AudioUnitRenderActionFlags *flags
 static void CCReport(void) {
     CCLoadTTSIfNeeded();
     CCLoadZhTTSIfNeeded();
+    CCLoadUplinkStreamIfNeeded();
     CCLoadConfigIfNeeded();
     int cbCount = atomic_load(&g_cbCount);
     for (int i = 0; i < cbCount; i++) {

@@ -371,7 +371,7 @@ static void SBDeliverLine(NSString *line) {
     } else if ([line hasPrefix:@"R|"]) {
         NSString *t = [line substringFromIndex:2];
         CCUIDeliverRemoteTranslated(t);
-        if (CCPrefBool(CC_K_TTS_ENABLED, YES)) CCUISpeakText(t);
+        if (CCPrefBool(CC_K_TTS_ENABLED, YES)) CCUIEnqueueRemoteTTS(t);
     } else if ([line hasPrefix:@"I|"]) {
         CCUIDeliverRemoteOriginal([line substringFromIndex:2]);
     } else if ([line hasPrefix:@"RE|"]) {

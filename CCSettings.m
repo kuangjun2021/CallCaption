@@ -506,6 +506,23 @@ static void VoiceLists(NSString *prefix,
         MkSwitch(@"LargeCaptions", @"大字幕", NO),
         MkSwitch(@"AlwaysShowPanel", @"面板常驻显示（非通话也显示）", NO),
     ];
+    NSArray *tencent = @[
+        MkSwitch(@"TencentTranslateEnabled", @"启用腾讯实时翻译", NO),
+        MkText(@"TencentAppID", @"AppID", @"", NO, @"10 位数字"),
+        MkText(@"TencentSecretID", @"SecretId", @"", NO, @"SecretId"),
+        MkText(@"TencentSecretKey", @"SecretKey", @"", YES, @"SecretKey（密文）"),
+        MkText(@"TencentLocalVoice", @"我方英文音色 ID", @"501009", NO, @"501009 / 101050"),
+        MkChoice(@"TencentLocalSource", @"我方源语言", @"zh",
+                 @[@"zh", @"zh_en"], @[@"中文", @"中文 + 英文"]),
+        MkChoice(@"TencentLocalModel", @"我方翻译模型", @"hunyuan-translation-lite",
+                 @[@"hunyuan-translation-lite", @"hunyuan-translation"],
+                 @[@"Lite（快/省）", @"标准"]),
+        MkChoice(@"TencentRemoteModel", @"对方翻译模型", @"hunyuan-translation",
+                 @[@"hunyuan-translation", @"hunyuan-translation-lite"],
+                 @[@"标准（en→zh 必需）", @"Lite（不支持 en→zh）"]),
+        MkSlider(@"TencentLocalVolume", @"我方英文音量", @"6", -10, 10),
+        MkSlider(@"TencentLocalSpeed", @"我方英文语速", @"0", -2, 6),
+    ];
     NSArray *lang = @[
         MkText(@"RemoteLocale", @"对方语言", @"en-US", NO, @"en-US"),
         MkText(@"LocalLocale", @"我的语言", @"zh-CN", NO, @"zh-CN"),
@@ -548,12 +565,13 @@ static void VoiceLists(NSString *prefix,
         MkAction(@"openLog", @"打开诊断日志"),
     ];
 
-    self.sections = @[func, lang, volumes, engine, ai, apiTest, voices, diag];
-    self.sectionTitles = @[@"功能开关", @"语言", @"原音音量", @"翻译引擎",
+    self.sections = @[func, tencent, lang, volumes, engine, ai, apiTest, voices, diag];
+    self.sectionTitles = @[@"功能开关", @"腾讯实时翻译（D+）", @"语言", @"原音音量", @"翻译引擎",
                            @"AI 自定义接口（OpenAI 兼容）", @"接口测试",
                            @"播报音色", @"诊断"];
     self.sectionFooters = @[
         @"通话接通后自动激活，屏幕出现小地球；点地球展开面板，再点面板里的地球可关闭/开启翻译。面板外任意位置点击自动收起。",
+        @"启用后：对方英文→中文文本（本机中文 TTS 队列），我方中文→英文文本+腾讯英文 TTS。AppID/SecretId/SecretKey 从腾讯云 CAM 获取；SecretKey 只存本机。我方模型 Lite 不支持 en→zh，对方模型必须标准版。",
         @"识别语言代码（BCP-47）：对方英文 en-US、日文 ja-JP、韩文 ko-KR；我的语言通常 zh-CN。",
         @"TTS 播报时原音保留多少：0 = 原音静音，100 = 不压低。对方原音 = 你听到的英文；我方原音 = 对方听到的你的声音。",
         @"自动 = 已填 Key 优先，失败自动切换。MyMemory 免费接口国内可用；Google 不填 Key 用免费接口，填了走 Cloud Translation。",

@@ -75,6 +75,13 @@ static BOOL g_uiReady;
 static BOOL g_boxesBuilt;
 static BOOL g_sessionActive;
 
+// v0.20.1：每一通电话一个序号；挂断后保留 5 秒字幕窗口，
+// 只允许本通在途翻译更新字幕，绝不把上一通的迟到结果带进下一通。
+static NSUInteger g_callSeq;
+static BOOL g_graceActive;
+static NSUInteger g_graceSeq;
+static NSTimer *g_graceTimer;
+
 static NSString *g_texts[4];            // 0 对方原文 / 1 对方译文 / 2 我方原文 / 3 我方译文
 static NSString *g_engines[2];          // 0 对方引擎 / 1 我方引擎
 static CFAbsoluteTime g_textAt[4];
@@ -284,6 +291,7 @@ static UIWindow *CreateOverlayWindow(void) {
 #pragma mark - 前向声明
 
 static void CCUIHandleCallActive(BOOL active);
+static void CCUIRingingNow(void);
 static void CCStreamCallActive(BOOL active);
 static void RefreshBoxes(void);
 static void EnsureUI(void);
@@ -294,11 +302,19 @@ static void EnsureUI(void);
 @end
 @implementation CCUICallWatcher
 - (void)callObserver:(CXCallObserver *)observer callChanged:(CXCall *)call {
-    BOOL active = NO;
+    // v0.20.1：拨号/响铃也是 CXCall，但 hasConnected=NO。
+    // 只有真正接通的通话才 arm、开麦、出字幕。
+    BOOL connected = NO;
+    BOOL ringing = NO;
     for (CXCall *c in observer.calls) {
-        if (!c.hasEnded) { active = YES; break; }
+        if (c.hasEnded) continue;
+        if (c.hasConnected) connected = YES;
+        else ringing = YES;
     }
-    dispatch_async(dispatch_get_main_queue(), ^{ CCUIHandleCallActive(active); });
+    dispatch_async(dispatch_get_main_queue(), ^{
+        CCUIHandleCallActive(connected);
+        if (!connected && ringing) CCUIRingingNow();
+    });
 }
 @end
 
@@ -622,9 +638,13 @@ static void ResetLocalTimer(void) {
     [[NSRunLoop mainRunLoop] addTimer:g_localHide forMode:NSRunLoopCommonModes];
 }
 
+static BOOL CCUIGraceLive(void) {
+    return !g_callActive && g_graceActive && g_graceSeq == g_callSeq;
+}
+
 static void RefreshBoxes(void) {
     if (!g_boxesBuilt) return;
-    BOOL active = g_callActive || CCPrefBool(CC_K_ALWAYS_PANEL, NO);
+    BOOL active = g_callActive || CCUIGraceLive() || CCPrefBool(CC_K_ALWAYS_PANEL, NO);
     if (!active) {
         g_remoteBox.hidden = YES;
         g_localBox.hidden = YES;
@@ -650,7 +670,8 @@ static void DeliverText(int idx, NSString *text) {
     if (idx < 0 || idx > 3) return;
     text = text ?: @"";
     if (!g_boxesBuilt) return;
-    if (!g_callActive && !CCPrefBool(CC_K_ALWAYS_PANEL, NO)) return;
+    // 挂断后的 5 秒内仍允许本通最后一句更新字幕；grace 结束或换新通话后丢弃。
+    if (!g_callActive && !CCUIGraceLive() && !CCPrefBool(CC_K_ALWAYS_PANEL, NO)) return;
 
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (text.length && [g_texts[idx] isEqualToString:text] && now - g_textAt[idx] < 1.5)
@@ -976,14 +997,35 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
 
 #pragma mark - 通话状态
 
+static void CCUIEndGrace(void) {
+    if (!g_graceActive || g_callActive || g_graceSeq != g_callSeq) return;
+    g_graceActive = NO;
+    [g_graceTimer invalidate];
+    g_graceTimer = nil;
+    CCLogf(@"subtitle grace ended seq=%lu", (unsigned long)g_graceSeq);
+    CCUIClearCaptions();
+    if (CCPrefBool(CC_K_ALWAYS_PANEL, NO)) {
+        ShowWindow();
+        [CCUIHelper expandPanel];
+    } else {
+        HideWindow();
+    }
+}
+
 static void CCUIHandleCallActive(BOOL active) {
     if (g_callActive == active) return;
     g_callActive = active;
     CCLogf(@"call state: %@", active ? @"ACTIVE" : @"NONE");
     EnsureUI();
-    // v0.19.8：先清字幕再让 CCStreamCallActive/ShowWindow 显示窗口，
-    // 避免上一通的旧文本在窗口出现瞬间闪一下。
-    if (active) CCUIClearCaptions();
+
+    if (active) {
+        // 新一通：序号 +1，取消上一通的 grace，清掉旧字幕。
+        g_callSeq++;
+        g_graceActive = NO;
+        [g_graceTimer invalidate];
+        g_graceTimer = nil;
+        CCUIClearCaptions();
+    }
     CCStreamCallActive(active);
 
     if (active) {
@@ -1002,25 +1044,64 @@ static void CCUIHandleCallActive(BOOL active) {
         [CCUIHelper showGrabber];
         if (CCPrefBool(CC_K_ALWAYS_PANEL, NO)) [CCUIHelper expandPanel];
         [CCUIHelper refreshPanel];
+        CCLogf(@"call seq=%lu armed=1", (unsigned long)g_callSeq);
     } else {
         if (g_sessionActive) {
             g_sessionActive = NO;
             CCSetArmed(NO);
         }
-        CCUIClearCaptions();
+        // v0.20.1：挂断后不立即清屏，保留最后一句 5 秒；只停流、收面板、
+        // 不再 TTS。grace 期间只接受本通 seq 的在途翻译。
         [g_grabberHide invalidate]; g_grabberHide = nil;
         if (g_grabber) { g_grabber.hidden = YES; g_grabber.alpha = 1.0; }
         g_grabberVisible = NO;
         g_panelExpanded = NO;
         g_panelCard.hidden = YES;
         g_panelCard.alpha = 1.0;
+        g_graceActive = YES;
+        g_graceSeq = g_callSeq;
+        // 如果字幕已到隐藏时间，挂断这一拍重新显示最后一句，再开始 5 秒计时。
+        RefreshBoxes();
+        [g_graceTimer invalidate];
+        g_graceTimer = [NSTimer scheduledTimerWithTimeInterval:5.0
+                                                       repeats:NO
+                                                         block:^(NSTimer *t) {
+            if (t != g_graceTimer) return;
+            CCUIEndGrace();
+        }];
         if (CCPrefBool(CC_K_ALWAYS_PANEL, NO)) {
             ShowWindow();
             [CCUIHelper expandPanel];
-        } else {
-            HideWindow();
         }
+        CCLogf(@"subtitle grace 5s seq=%lu", (unsigned long)g_graceSeq);
     }
+}
+
+static void CCUIRingingNow(void) {
+    if (g_callActive) return;   // 通话保持中（呼叫等待）不动当前字幕
+    EnsureUI();
+    // 新一通正在拨号/响铃：取消上一通 grace，清屏、收 grabber、绝不 arm。
+    g_graceActive = NO;
+    [g_graceTimer invalidate];
+    g_graceTimer = nil;
+    if (g_sessionActive) {
+        g_sessionActive = NO;
+        CCSetArmed(NO);
+    }
+    CCUIClearCaptions();
+    [g_grabberHide invalidate]; g_grabberHide = nil;
+    if (g_grabber) { g_grabber.hidden = YES; g_grabber.alpha = 1.0; }
+    g_grabberVisible = NO;
+    g_panelExpanded = NO;
+    g_panelCard.hidden = YES;
+    g_panelCard.alpha = 1.0;
+    if (CCPrefBool(CC_K_ALWAYS_PANEL, NO)) {
+        ShowWindow();
+        [CCUIHelper expandPanel];
+    } else {
+        HideWindow();
+    }
+    CCLogf(@"ringing: captions cleared, not armed");
 }
 
 #pragma mark - TTS
@@ -1037,12 +1118,21 @@ void CCUIEnqueueRemoteTTS(NSString *text) {
 // v0.20.0 B1：来电 ASR 最终文本 -> 独立翻译引擎（默认 Google）-> 中文字幕/TTS。
 void CCUIRemoteFinalText(NSString *text) {
     if (!text.length) return;
+    NSUInteger seq = g_callSeq;
+    if (!g_callActive && !(g_graceActive && g_graceSeq == seq)) return;
     NSString *eng = CCPrefStr(CC_K_REMOTE_TRANSLATE_ENGINE, @"google");
     CCTranslateWithEngine(text, @"en", @"zh", eng,
                           ^(NSString *out, NSString *used) {
         if (!out.length) return;
+        // 翻译回来时可能已经挂断/换下一通：只接受本通 seq，且只允许
+        // 通话中或挂断后 5 秒 grace 内更新字幕。
+        if (seq != g_callSeq) return;
+        BOOL live = g_callActive;
+        BOOL grace = (!live && g_graceActive && g_graceSeq == seq);
+        if (!live && !grace) return;
         CCUIDeliverRemoteTranslated(out);
         if (used.length) CCUIDeliverRemoteEngine(used);
+        if (!live) return;   // 挂断后绝不 TTS
         if (!CCPrefBool(CC_K_TTS_ENABLED, YES)) return;
         NSString *low = [[text lowercaseString]
             stringByTrimmingCharactersInSet:[NSCharacterSet punctuationCharacterSet]];
@@ -1056,12 +1146,19 @@ void CCUIRemoteFinalText(NSString *text) {
 // v0.20.0 B1：去电 ASR 最终文本 -> 独立翻译引擎（默认 DeepL）-> 英文字幕/TTS。
 void CCUILocalFinalText(NSString *text) {
     if (!text.length) return;
+    NSUInteger seq = g_callSeq;
+    if (!g_callActive && !(g_graceActive && g_graceSeq == seq)) return;
     NSString *eng = CCPrefStr(CC_K_LOCAL_TRANSLATE_ENGINE, @"deepl");
     CCTranslateWithEngine(text, @"zh", @"en", eng,
                           ^(NSString *out, NSString *used) {
         if (!out.length) return;
+        if (seq != g_callSeq) return;
+        BOOL live = g_callActive;
+        BOOL grace = (!live && g_graceActive && g_graceSeq == seq);
+        if (!live && !grace) return;
         CCUIDeliverLocalTranslated(out);
         if (used.length) CCUIDeliverLocalEngine(used);
+        if (!live) return;   // 挂断后绝不 TTS；这是 0.20.0 微信被占的头号修复
         if (!CCPrefBool(CC_K_TTS_ENABLED, YES)) return;
         if ([CCPrefStr(CC_K_ENGLISH_TTS, @"local") isEqualToString:@"off"]) return;
         CCTTSBuffer(out, @"en-US", @"cc_tts.wav");
@@ -1494,6 +1591,20 @@ static void CCTTSBufferNow(NSString *text, NSString *lang, NSString *fileName,
                            void (^completion)(void)) {
     if (!text.length) {
         if (completion) dispatch_async(dispatch_get_main_queue(), completion);
+        return;
+    }
+    // v0.20.1 硬闸门：挂断后任何路径都不允许再启动 AVSpeechSynthesizer。
+    // 0.20.0 只有中文 TTS 队列有 g_callActive 检查，去电英文 TTS 没有；
+    // 迟到的 LQ| 翻译会在 SpringBoard 里留下语音合成/音频会话状态。
+    if (!g_callActive) {
+        CCLogf(@"tts skip: call ended %@", fileName);
+        if (completion) dispatch_async(dispatch_get_main_queue(), completion);
+        return;
+    }
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CCTTSBufferNow(text, lang, fileName, completion);
+        });
         return;
     }
     CCLogf(@"tts synth start %@ [%lu chars] %@", lang, (unsigned long)text.length,
@@ -2298,16 +2409,23 @@ void CCUIBoot(void) {
                     g_callObs = [[CXCallObserver alloc] init];
                     [g_callObs setDelegate:g_callWatcher queue:dispatch_get_main_queue()];
                 }
-                BOOL active = NO;
+                BOOL connected = NO;
+                BOOL ringing = NO;
                 for (CXCall *c in g_callObs.calls) {
-                    if (!c.hasEnded) { active = YES; break; }
+                    if (c.hasEnded) continue;
+                    if (c.hasConnected) connected = YES;
+                    else ringing = YES;
                 }
-                // 强制走一次状态处理（g_callActive 初值不是真实状态）
-                g_callActive = !active;
-                CCUIHandleCallActive(active);
-                if (!active && CCPrefBool(CC_K_ALWAYS_PANEL, NO)) {
-                    ShowWindow();
-                    [CCUIHelper expandPanel];
+                // v0.20.1：只有已接通的通话才恢复为 ACTIVE；响铃/拨号只清屏。
+                // 不再用 g_callActive = !active 的强制翻转，避免启动时凭空进入
+                // “挂断 grace”把旧字幕留在屏幕上。
+                if (connected) {
+                    CCUIHandleCallActive(YES);
+                } else {
+                    CCUIRingingNow();
+                }
+                if (!connected && ringing) {
+                    CCLogf(@"boot: ringing call present, not armed");
                 }
                 if (!g_sbTimer) {
                     g_sbTimer = [NSTimer scheduledTimerWithTimeInterval:1.0

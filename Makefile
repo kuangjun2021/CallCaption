@@ -1,21 +1,18 @@
 THEOS_PACKAGE_SCHEME = rootless
 TARGET := iphone:clang:latest:16.0
 ARCHS = arm64e
-INSTALL_TARGET_PROCESSES = SpringBoard mediaserverd
+INSTALL_TARGET_PROCESSES = SpringBoard
 
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME = CallCaption CallCaptionAudioHook CallCaptionAppProbe
+# v0.20.1：B1 不再需要 mediaserverd/audiomxd 的 AudioUnit 观察钩子。
+# CCAudioHook.m 源码保留，但 CallCaptionAudioHook 不编译、不打包，避免
+# arm64e 函数钩子给 mediaserverd 留下不可回收的音频状态。
+TWEAK_NAME = CallCaption CallCaptionAppProbe
 CallCaption_FILES = Tweak.x CCSupport.m CCTranslator.m CCEngine.m CCUI.m CCMicCapture.m CCSettings.m
 CallCaption_FRAMEWORKS = Foundation UIKit AudioToolbox CoreTelephony AVFoundation Speech CoreFoundation CallKit
 CallCaption_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-command-line-argument -Wno-unused-function -fno-objc-msgsend-selector-stubs -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
 CallCaption_LDFLAGS = -Wl,-fixup_chains
-
-# 阶段 1：LCT 同款 AudioUnitRender/AudioUnitProcess 观察（只打 RMS，不改音频）
-CallCaptionAudioHook_FILES = CCAudioHook.m
-CallCaptionAudioHook_FRAMEWORKS = Foundation AudioToolbox
-CallCaptionAudioHook_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function -fno-objc-msgsend-selector-stubs -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
-CallCaptionAudioHook_LDFLAGS = -Wl,-fixup_chains
 
 # 阶段 2 诊断：注入通话 App（WhatsApp），包住 AudioUnit 的 render callback 抓对方 PCM
 CallCaptionAppProbe_FILES = CCAppProbe.m

@@ -1414,6 +1414,36 @@ static void CCManageSiriHelper(BOOL armed) {
     }
 }
 
+// v0.20.1：只在通话 arm 期间持有 AVAudioSession；挂断后主动释放，
+// 避免守护进程从开机起一直占着 SoloAmbient，影响微信等其他通话。
+static void CCAudioSessionSetActive(BOOL active) {
+    @try {
+        AVAudioSession *sess = [AVAudioSession sharedInstance];
+        NSError *err = nil;
+        if (active) {
+            [sess setCategory:AVAudioSessionCategorySoloAmbient
+                         mode:AVAudioSessionModeDefault
+                      options:0
+                        error:nil];
+            if (![sess setActive:YES error:&err]) {
+                CCLogf(@"audio session activate failed: %@", err.localizedDescription);
+            } else {
+                CCLogf(@"audio session: active");
+            }
+        } else {
+            if (![sess setActive:NO
+                     withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
+                           error:&err]) {
+                CCLogf(@"audio session deactivate failed: %@", err.localizedDescription);
+            } else {
+                CCLogf(@"audio session: inactive (notify others)");
+            }
+        }
+    } @catch (NSException *e) {
+        CCLogf(@"audio session exc %@", e.reason);
+    }
+}
+
 static void CheckArm(void) {
     @try {
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
@@ -1436,6 +1466,8 @@ static void CheckArm(void) {
         BOOL wasArmed = lastArmed;
         if (armed && !lastArmed) {
             // 新通话：重置 Tap 探测，从 speaker(-2) 开始，最多试 -1 / -3。
+            // 会话只在通话期间激活；boot 时只设置 category，不 setActive。
+            CCAudioSessionSetActive(YES);
             g_remote->tapProbeCount = 0;
             g_remoteCallStarted = YES;
             g_remote.tapPID = CC_TAP_PID_SPEAKER;
@@ -1494,6 +1526,35 @@ static void CheckArm(void) {
             CCLogf(@"arm: bridge wav cleared (local tap in 1.0s)");
         }
         lastArmed = armed;
+
+        // v0.20.1：把原音音量、方向开关和“当前是否在通话”写给 AppProbe。
+        // 必须在 !armed 的 return 之前写：挂断那一拍也要把 call=0 送出去，
+        // 否则 AppProbe 会一直以为通话还在，继续 force-mute/mix。
+        {
+            static NSString *lastCfg = nil;
+            NSString *docs = CCFindWhatsAppDocs();
+            if (docs) {
+                int rv = [CCPrefStr(@"RemoteOriginalVolume", @"30") intValue];
+                int lv = [CCPrefStr(@"LocalOriginalVolume", @"30") intValue];
+                if (rv < 0) rv = 0; if (rv > 100) rv = 100;
+                if (lv < 0) lv = 0; if (lv > 100) lv = 100;
+                BOOL rOn = CCPrefBool(CC_K_REMOTE_ENABLED, YES);
+                BOOL lOn = CCPrefBool(CC_K_LOCAL_ENABLED, YES);
+                NSString *cfg = [NSString stringWithFormat:
+                                 @"remote=%.2f\nlocal=%.2f\nremoteon=%d\nlocalon=%d\ncall=%d\n",
+                                 rv / 100.0, lv / 100.0, rOn ? 1 : 0, lOn ? 1 : 0,
+                                 armed ? 1 : 0];
+                if (![cfg isEqualToString:lastCfg]) {
+                    NSString *p = [docs stringByAppendingPathComponent:@"cc_cfg.txt"];
+                    [cfg writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                    chmod(p.fileSystemRepresentation, 0666);
+                    lastCfg = cfg;
+                    CCLogf(@"app cfg remote=%d local=%d on=%d/%d call=%d", rv, lv,
+                           rOn ? 1 : 0, lOn ? 1 : 0, armed ? 1 : 0);
+                }
+            }
+        }
+
         if (!armed) {
             // 挂断后让 AppProbe 丢掉还没播完的中文 TTS / 上行 PCM，避免拖到下一通。
             // 只在 armed → unarmed 的那一拍写标记，不要每 500ms 重复写。
@@ -1512,6 +1573,7 @@ static void CheckArm(void) {
             }
             [g_remote stop];
             [g_local stop];
+            if (wasArmed) CCAudioSessionSetActive(NO);
             return;
         }
 
@@ -1619,34 +1681,6 @@ static void CheckArm(void) {
                     [ch stop];
                     ch->lastAttempt = 0;
                     ch->lastFrameChangeAt = now;
-                }
-            }
-        }
-
-        // 把两个“原音音量”设置写给 App 探针（App 沙盒读不到 /var/mobile 的 prefs）
-        {
-            static NSString *lastCfg = nil;
-            NSString *docs = CCFindWhatsAppDocs();
-            if (docs) {
-                int rv = [CCPrefStr(@"RemoteOriginalVolume", @"30") intValue];
-                int lv = [CCPrefStr(@"LocalOriginalVolume", @"30") intValue];
-                if (rv < 0) rv = 0; if (rv > 100) rv = 100;
-                if (lv < 0) lv = 0; if (lv > 100) lv = 100;
-                // v0.19.4：带上两个方向开关。音量=0 时 AppProbe 会全程静音
-                // 该方向原声（只播译文）；方向关闭时不能静音，否则普通通话
-                // 会被误伤。
-                BOOL rOn = CCPrefBool(CC_K_REMOTE_ENABLED, YES);
-                BOOL lOn = CCPrefBool(CC_K_LOCAL_ENABLED, YES);
-                NSString *cfg = [NSString stringWithFormat:
-                                 @"remote=%.2f\nlocal=%.2f\nremoteon=%d\nlocalon=%d\n",
-                                 rv / 100.0, lv / 100.0, rOn ? 1 : 0, lOn ? 1 : 0];
-                if (![cfg isEqualToString:lastCfg]) {
-                    NSString *p = [docs stringByAppendingPathComponent:@"cc_cfg.txt"];
-                    [cfg writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:nil];
-                    chmod(p.fileSystemRepresentation, 0666);
-                    lastCfg = cfg;
-                    CCLogf(@"app cfg remote=%d local=%d on=%d/%d", rv, lv,
-                           rOn ? 1 : 0, lOn ? 1 : 0);
                 }
             }
         }
@@ -1775,8 +1809,8 @@ int main(int argc, char *argv[]) {
                          mode:AVAudioSessionModeDefault
                       options:0
                         error:nil];
-            [sess setActive:YES error:nil];
-            CCLogf(@"audio session: cat=%@ mode=%@", sess.category, sess.mode);
+            // v0.20.1：boot 只配置 category，不激活会话；等 arm 时再 setActive:YES。
+            CCLogf(@"audio session: cat=%@ mode=%@ (activate on arm)", sess.category, sess.mode);
         } @catch (NSException *e) {
             CCLogf(@"audio session exc %@", e.reason);
         }

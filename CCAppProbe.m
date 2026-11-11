@@ -149,6 +149,10 @@ typedef struct {
 static CCCB *g_cbs[16];
 static _Atomic(int) g_cbCount;
 
+// v0.20.1：守护进程 arm 时写 call=1、挂断时写 call=0。
+// 默认 0：App 刚启动、还没通话时绝不碰通话音频。
+static _Atomic(int) g_callOn;
+
 static void CCMixZhDownlink(CCCB *c, AudioBufferList *ioData, UInt32 frames);
 
 static float CCReadSample(const void *data, UInt32 idx, UInt32 bits, UInt32 flags) {
@@ -164,6 +168,8 @@ static float CCReadSample(const void *data, UInt32 idx, UInt32 bits, UInt32 flag
 }
 
 static void CCRecordCB(CCCB *c, AudioBufferList *ioData, UInt32 frames) {
+    // 挂断后不再录对方 PCM；否则探针会在 App 还活着时继续消费/写文件。
+    if (!atomic_load(&g_callOn)) return;
     if (!c || !ioData || frames == 0) return;
     UInt32 ch = c->fmt.ch ? c->fmt.ch : 1;
     UInt32 bits = c->fmt.bits ? c->fmt.bits : 32;
@@ -388,6 +394,7 @@ static NSTimeInterval g_cfgMtime;
 
 static void CCLoadTTSIfNeeded(void) {
     @try {
+        if (!atomic_load(&g_callOn)) return;
         NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
                                                               NSUserDomainMask, YES) firstObject];
         if (!docs.length) return;
@@ -442,6 +449,7 @@ static void CCLoadUplinkStreamIfNeeded(void) {
             [fm removeItemAtPath:marker error:nil];
             CCAppLog(@"uplink stream reset");
         }
+        if (!atomic_load(&g_callOn)) return;
         NSString *p = [docs stringByAppendingPathComponent:@"uplink_stream.pcm"];
         NSDictionary *at = [fm attributesOfItemAtPath:p error:nil];
         if (!at) return;
@@ -507,6 +515,7 @@ static void CCLoadZhTTSIfNeeded(void) {
             [fm removeItemAtPath:marker error:nil];
             CCAppLog(@"tts zh reset");
         }
+        if (!atomic_load(&g_callOn)) return;
 
         NSArray *names = [fm contentsOfDirectoryAtPath:docs error:nil];
         NSMutableArray *zh = [NSMutableArray array];
@@ -556,6 +565,24 @@ static void CCLoadZhTTSIfNeeded(void) {
     } @catch (NSException *e) { }
 }
 
+// 挂断（call 1→0）时立刻丢掉所有待播 TTS 和 PCM，避免下一通重新拉起时
+// 残留的 ring 又被混进音频，也避免挂断后还继续消费旧文件。
+static void CCResetTTSRings(void) {
+    if (g_ttsRing) {
+        atomic_store(&g_ttsHead, 0);
+        atomic_store(&g_ttsTail, 0);
+    }
+    if (g_ttsZhRing) {
+        atomic_store(&g_ttsZhHead, 0);
+        atomic_store(&g_ttsZhTail, 0);
+    }
+    g_uplinkOffset = 0;
+    g_ttsMtime = 0;
+    g_ttsZhMtime = 0;
+    g_ttsZhLastFile = nil;
+    CCAppLog(@"call=0: tts rings reset");
+}
+
 static void CCLoadConfigIfNeeded(void) {
     @try {
         NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
@@ -568,6 +595,7 @@ static void CCLoadConfigIfNeeded(void) {
         if (mt <= g_cfgMtime) return;
         g_cfgMtime = mt;
         NSString *txt = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil];
+        int newCallOn = atomic_load(&g_callOn);
         for (NSString *line in [txt componentsSeparatedByString:@"\n"]) {
             NSArray *kv = [line componentsSeparatedByString:@"="];
             if (kv.count != 2) continue;
@@ -578,9 +606,13 @@ static void CCLoadConfigIfNeeded(void) {
             if ([kv[0] isEqualToString:@"local"]) g_duckLocal = v;
             if ([kv[0] isEqualToString:@"remoteon"]) g_remoteOn = [kv[1] boolValue];
             if ([kv[0] isEqualToString:@"localon"]) g_localOn = [kv[1] boolValue];
+            if ([kv[0] isEqualToString:@"call"]) newCallOn = [kv[1] boolValue];
         }
-        CCAppLog(@"cfg remote=%.2f local=%.2f on=%d/%d", g_duckRemote, g_duckLocal,
-                 g_remoteOn, g_localOn);
+        int oldCallOn = atomic_load(&g_callOn);
+        atomic_store(&g_callOn, newCallOn ? 1 : 0);
+        if (oldCallOn && !newCallOn) CCResetTTSRings();
+        CCAppLog(@"cfg remote=%.2f local=%.2f on=%d/%d call=%d", g_duckRemote,
+                 g_duckLocal, g_remoteOn, g_localOn, newCallOn);
     } @catch (NSException *e) { }
 }
 
@@ -680,6 +712,7 @@ static void CCZeroBuffers(AudioBufferList *ioData) {
 }
 
 static void CCMixZhDownlink(CCCB *c, AudioBufferList *ioData, UInt32 frames) {
+    if (!atomic_load(&g_callOn)) return;
     if (!c || !ioData || frames == 0 || ioData->mNumberBuffers == 0) return;
     AudioBuffer *b = &ioData->mBuffers[0];
     if (!b->mData || b->mDataByteSize < 2) return;
@@ -699,6 +732,7 @@ static void CCMixZhDownlink(CCCB *c, AudioBufferList *ioData, UInt32 frames) {
 }
 
 static void CCMixEnUplink(AudioUnit unit, AudioBufferList *ioData, UInt32 frames) {
+    if (!atomic_load(&g_callOn)) return;
     if (!ioData || frames == 0 || ioData->mNumberBuffers == 0) return;
     AudioBuffer *b = &ioData->mBuffers[0];
     if (!b->mData || b->mDataByteSize < 2) return;
@@ -742,10 +776,12 @@ static OSStatus CCHookedRender(AudioUnit unit, AudioUnitRenderActionFlags *flags
 
 // ---------- 后台汇报 ----------
 static void CCReport(void) {
+    // v0.20.1：先读 call=1/0，再决定是否装载 TTS/PCM。
+    // 否则 arm 后第一拍 loaders 还看到 call=0，白白多等一个汇报周期。
+    CCLoadConfigIfNeeded();
     CCLoadTTSIfNeeded();
     CCLoadZhTTSIfNeeded();
     CCLoadUplinkStreamIfNeeded();
-    CCLoadConfigIfNeeded();
     int cbCount = atomic_load(&g_cbCount);
     for (int i = 0; i < cbCount; i++) {
         CCCB *c = g_cbs[i];

@@ -1329,9 +1329,111 @@ static void CCWriteWav48kFile(NSString *path, NSData *pcm) {
     chmod(path.fileSystemRepresentation, 0666);
 }
 
+// v0.19.0：下行中文 TTS 改成序列文件 + 有界队列，彻底解决同秒覆盖丢句。
+// 上行英文 TTS（cc_tts.wav）在 0.19.0 保持 0.17.0 原行为，不动。
+static void CCTTSBufferNow(NSString *text, NSString *lang, NSString *fileName,
+                           void (^completion)(void));
+static NSMutableArray *g_zhTTSQ;
+static BOOL g_zhTTSBusy;
+static NSUInteger g_zhTTSSeq;
+static NSUInteger g_zhTTSGen;
+static void CCZhTTSStartNext(void);
+
+static double CCZhTTSEst(NSString *s) {
+    double d = 0.9 + 0.075 * (double)s.length;
+    return d > 15.0 ? 15.0 : d;
+}
+
+static double CCZhTTSTotal(void) {
+    double total = 0;
+    for (NSString *s in g_zhTTSQ) total += CCZhTTSEst(s);
+    return total;
+}
+
+static void CCZhTTSEnqueue(NSString *text) {
+    if (!text.length) return;
+    if (!g_callActive) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ CCZhTTSEnqueue(text); });
+        return;
+    }
+    if (!g_zhTTSQ) g_zhTTSQ = [NSMutableArray array];
+    [g_zhTTSQ addObject:text];
+    double total = CCZhTTSTotal();
+
+    // 双闸：最多 3 条，或待播总时长 6 秒。先合并最老两条；仍超才丢最老。
+    while ((g_zhTTSQ.count > 3 || total > 6.0) && g_zhTTSQ.count >= 2) {
+        NSString *a = g_zhTTSQ[0];
+        NSString *b = g_zhTTSQ[1];
+        NSString *m = [NSString stringWithFormat:@"%@。%@", a, b];
+        [g_zhTTSQ removeObjectsInRange:NSMakeRange(0, 2)];
+        [g_zhTTSQ insertObject:m atIndex:0];
+        total = CCZhTTSTotal();
+        CCLogf(@"tts zh merge %lu+%lu -> %lu chars, pending=%lu",
+               (unsigned long)a.length, (unsigned long)b.length,
+               (unsigned long)m.length, (unsigned long)g_zhTTSQ.count);
+    }
+    while (g_zhTTSQ.count > 3 || (total > 10.0 && g_zhTTSQ.count > 1)) {
+        NSString *d = g_zhTTSQ[0];
+        [g_zhTTSQ removeObjectAtIndex:0];
+        total = CCZhTTSTotal();
+        CCLogf(@"tts zh drop %lu chars, pending=%lu",
+               (unsigned long)d.length, (unsigned long)g_zhTTSQ.count);
+    }
+    CCLogf(@"tts zh enqueue %lu chars, pending=%lu, est=%.1fs",
+           (unsigned long)text.length, (unsigned long)g_zhTTSQ.count, total);
+
+    if (!g_zhTTSBusy) {
+        g_zhTTSBusy = YES;
+        CCZhTTSStartNext();
+    }
+}
+
+static void CCZhTTSStartNext(void) {
+    if (!g_zhTTSQ.count) { g_zhTTSBusy = NO; return; }
+    NSString *text = g_zhTTSQ[0];
+    [g_zhTTSQ removeObjectAtIndex:0];
+    NSUInteger gen = g_zhTTSGen;
+    NSUInteger seq = ++g_zhTTSSeq;
+    NSString *fileName = [NSString stringWithFormat:@"cc_tts_zh_%04lu.wav",
+                          (unsigned long)seq];
+    CCLogf(@"tts zh synth seq=%lu pending=%lu chars=%lu",
+           (unsigned long)seq, (unsigned long)g_zhTTSQ.count,
+           (unsigned long)text.length);
+    CCTTSBufferNow(text, @"zh-CN", fileName, ^{
+        if (gen != g_zhTTSGen) return;      // 通话已切换，旧队列不再继续
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ CCZhTTSStartNext(); });
+    });
+}
+
+static void CCZhTTSReset(void) {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ CCZhTTSReset(); });
+        return;
+    }
+    g_zhTTSGen++;
+    [g_zhTTSQ removeAllObjects];
+    g_zhTTSBusy = NO;
+    g_zhTTSSeq = 0;
+    CCLogf(@"tts zh queue reset");
+}
+
 // TTS 合成成 48k PCM，写到 CC_DIR/<fileName>；守护进程再复制给 App 探针做混音
 static void CCTTSBuffer(NSString *text, NSString *lang, NSString *fileName) {
-    if (!text.length) return;
+    if ([fileName isEqualToString:@"cc_tts_zh.wav"]) {
+        CCZhTTSEnqueue(text);
+        return;
+    }
+    CCTTSBufferNow(text, lang, fileName, nil);
+}
+
+static void CCTTSBufferNow(NSString *text, NSString *lang, NSString *fileName,
+                           void (^completion)(void)) {
+    if (!text.length) {
+        if (completion) dispatch_async(dispatch_get_main_queue(), completion);
+        return;
+    }
     CCLogf(@"tts synth start %@ [%lu chars] %@", lang, (unsigned long)text.length,
            text.length > 40 ? [text substringToIndex:40] : text);
     AVSpeechSynthesizer *synth = [[AVSpeechSynthesizer alloc] init];
@@ -1343,6 +1445,20 @@ static void CCTTSBuffer(NSString *text, NSString *lang, NSString *fileName) {
     NSMutableData *out = [NSMutableData data];
     __block double phase = 0;
     __block BOOL done = NO;
+    __block BOOL cbDone = NO;
+    void (^finish)(void) = ^{
+        if (cbDone) return;
+        cbDone = YES;
+        if (completion) dispatch_async(dispatch_get_main_queue(), completion);
+    };
+    void (^writeOut)(void) = ^{
+        if (!out.length) return;
+        NSString *p = [CC_DIR stringByAppendingPathComponent:fileName];
+        NSString *tmp = [p stringByAppendingString:@".tmp"];
+        CCWriteWav48kFile(tmp, out);
+        if (rename(tmp.fileSystemRepresentation, p.fileSystemRepresentation) != 0)
+            CCLogf(@"tts rename fail %@", fileName);
+    };
     __block AVSpeechSynthesizer *keep = synth;
     [synth writeUtterance:u toBufferCallback:^(AVAudioBuffer *buffer) {
         @autoreleasepool {
@@ -1352,13 +1468,11 @@ static void CCTTSBuffer(NSString *text, NSString *lang, NSString *fileName) {
             if (n == 0) {
                 if (!done) {
                     done = YES;
-                    if (out.length) {
-                        NSString *p = [CC_DIR stringByAppendingPathComponent:fileName];
-                        CCWriteWav48kFile(p, out);
-                    }
+                    writeOut();
                     CCLogf(@"tts %@ -> %@ %lu bytes", lang, fileName,
                            (unsigned long)out.length);
                     keep = nil;
+                    finish();
                 }
                 return;
             }
@@ -1398,12 +1512,10 @@ static void CCTTSBuffer(NSString *text, NSString *lang, NSString *fileName) {
                    dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         if (!done) {
             done = YES;
-            if (out.length) {
-                NSString *p = [CC_DIR stringByAppendingPathComponent:fileName];
-                CCWriteWav48kFile(p, out);
-            }
+            writeOut();
             CCLogf(@"tts timeout %@ %lu bytes", fileName, (unsigned long)out.length);
             keep = nil;
+            finish();
         }
     });
 }
@@ -2052,6 +2164,7 @@ static void CCStreamCallActive(BOOL active) {
     CCStream *r = CCStreamFor(NO);
     CCStream *l = CCStreamFor(YES);
     if (active) {
+        CCZhTTSReset();
         CCStreamReset(r);
         CCStreamReset(l);
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
@@ -2063,6 +2176,7 @@ static void CCStreamCallActive(BOOL active) {
         CCLogf(@"stream: call active, cloud=%d localPaused=%d", cloud,
                g_localStreamPaused);
     } else {
+        CCZhTTSReset();
         CCStreamStop(r);
         CCStreamStop(l);
         CCLogf(@"stream: call ended");

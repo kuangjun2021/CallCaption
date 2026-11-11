@@ -1325,6 +1325,7 @@ static void CheckArm(void) {
 
         static BOOL lastArmed = NO;
         BOOL armed = [[NSFileManager defaultManager] fileExistsAtPath:CC_ARM_PATH];
+        BOOL wasArmed = lastArmed;
         if (armed && !lastArmed) {
             // 新通话：重置 Tap 探测，从 speaker(-2) 开始，最多试 -1 / -3。
             g_remote->tapProbeCount = 0;
@@ -1341,12 +1342,43 @@ static void CheckArm(void) {
                 [fm2 removeItemAtPath:[CC_DIR stringByAppendingPathComponent:@"local16k.wav"]
                                 error:nil];
             }
+            // 0.19.0：清上一通残留的中文 TTS 序列，并通知 AppProbe 清 zh ring
+            NSString *waDocs = CCFindWhatsAppDocs();
+            NSArray *ccNames = [fm2 contentsOfDirectoryAtPath:CC_DIR error:nil];
+            for (NSString *f in ccNames) {
+                if ([f hasPrefix:@"cc_tts_zh_"] && [f hasSuffix:@".wav"])
+                    [fm2 removeItemAtPath:[CC_DIR stringByAppendingPathComponent:f]
+                                    error:nil];
+            }
+            if (waDocs) {
+                NSArray *docNames = [fm2 contentsOfDirectoryAtPath:waDocs error:nil];
+                for (NSString *f in docNames) {
+                    if ([f hasPrefix:@"cc_tts_zh_"] && [f hasSuffix:@".wav"])
+                        [fm2 removeItemAtPath:[waDocs stringByAppendingPathComponent:f]
+                                        error:nil];
+                }
+                [fm2 removeItemAtPath:[waDocs stringByAppendingPathComponent:@"cc_tts_zh.wav"]
+                                error:nil];
+                NSString *reset = [waDocs stringByAppendingPathComponent:@"cc_tts_reset"];
+                [@"" writeToFile:reset atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                chmod(reset.fileSystemRepresentation, 0666);
+            }
             g_localStartAfter = CFAbsoluteTimeGetCurrent() + 1.0;
             CCSnapshotProbeFileSizes();
             CCLogf(@"arm: bridge wav cleared (local tap in 1.0s)");
         }
         lastArmed = armed;
         if (!armed) {
+            // 挂断后让 AppProbe 丢掉还没播完的中文 TTS，避免拖到下一通。
+            // 只在 armed → unarmed 的那一拍写标记，不要每 500ms 重复写。
+            if (wasArmed) {
+                NSString *waDocs = CCFindWhatsAppDocs();
+                if (waDocs) {
+                    NSString *reset = [waDocs stringByAppendingPathComponent:@"cc_tts_reset"];
+                    [@"" writeToFile:reset atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                    chmod(reset.fileSystemRepresentation, 0666);
+                }
+            }
             [g_remote stop];
             [g_local stop];
             return;
@@ -1482,44 +1514,46 @@ static void CheckArm(void) {
         }
 
         // SpringBoard 合成好的 TTS 复制到 WhatsApp Documents：
-        //   cc_tts.wav    = 英文（我方说话 → 对方听），App 探针混进上行
-        //   cc_tts_zh.wav = 中文（对方说话 → 我方听），App 探针混进下行
-        // 两个文件必须各自独立监视：以前只看 cc_tts.wav，双向模式没开时中文 TTS
-        // 永远不会被复制，用户就一直只听到英文原音。
+        //   cc_tts.wav          = 英文（我方说话 → 对方听），0.19.0 保持 0.17.0 原样
+        //   cc_tts_zh_0001.wav  = 中文（对方说话 → 我方听），按序号复制，绝不覆盖
         {
-            static NSTimeInterval lastEn = 0, lastZh = 0;
+            static NSTimeInterval lastEn = 0;
             static BOOL primed = NO;
             NSFileManager *fm = [NSFileManager defaultManager];
+            NSString *docs = CCFindWhatsAppDocs();
             NSString *pEn = [CC_DIR stringByAppendingPathComponent:@"cc_tts.wav"];
-            NSString *pZh = [CC_DIR stringByAppendingPathComponent:@"cc_tts_zh.wav"];
             NSDictionary *atEn = [fm attributesOfItemAtPath:pEn error:nil];
-            NSDictionary *atZh = [fm attributesOfItemAtPath:pZh error:nil];
             NSTimeInterval mtEn = atEn ? [atEn[NSFileModificationDate] timeIntervalSince1970] : 0;
-            NSTimeInterval mtZh = atZh ? [atZh[NSFileModificationDate] timeIntervalSince1970] : 0;
             if (!primed) {
-                // 守护进程刚起：旧文件只记时间，不再复制，避免上一通的 TTS 被重播
+                // 守护进程刚起：旧 en 文件只记时间，不再复制，避免上一通被重播
                 primed = YES;
                 lastEn = mtEn;
-                lastZh = mtZh;
-            } else if ((mtEn > lastEn) || (mtZh > lastZh)) {
-                NSString *docs = CCFindWhatsAppDocs();
-                if (docs) {
-                    if (mtEn > lastEn) {
-                        lastEn = mtEn;
-                        NSString *dst = [docs stringByAppendingPathComponent:@"cc_tts.wav"];
-                        [fm removeItemAtPath:dst error:nil];
-                        BOOL ok = [fm copyItemAtPath:pEn toPath:dst error:nil];
-                        if (ok) chmod(dst.fileSystemRepresentation, 0666);
-                        CCLogf(@"tts copied cc_tts.wav ok=%d", ok);
+            } else if (mtEn > lastEn && docs) {
+                lastEn = mtEn;
+                NSString *dst = [docs stringByAppendingPathComponent:@"cc_tts.wav"];
+                [fm removeItemAtPath:dst error:nil];
+                BOOL ok = [fm copyItemAtPath:pEn toPath:dst error:nil];
+                if (ok) chmod(dst.fileSystemRepresentation, 0666);
+                CCLogf(@"tts copied cc_tts.wav ok=%d", ok);
+            }
+            if (docs) {
+                NSArray *names = [fm contentsOfDirectoryAtPath:CC_DIR error:nil];
+                NSMutableArray *zh = [NSMutableArray array];
+                for (NSString *f in names) {
+                    if ([f hasPrefix:@"cc_tts_zh_"] && [f hasSuffix:@".wav"])
+                        [zh addObject:f];
+                }
+                [zh sortUsingSelector:@selector(compare:)];
+                for (NSString *f in zh) {
+                    NSString *src = [CC_DIR stringByAppendingPathComponent:f];
+                    NSString *dst = [docs stringByAppendingPathComponent:f];
+                    [fm removeItemAtPath:dst error:nil];
+                    BOOL ok = [fm copyItemAtPath:src toPath:dst error:nil];
+                    if (ok) {
+                        chmod(dst.fileSystemRepresentation, 0666);
+                        [fm removeItemAtPath:src error:nil];
                     }
-                    if (mtZh > lastZh) {
-                        lastZh = mtZh;
-                        NSString *dst = [docs stringByAppendingPathComponent:@"cc_tts_zh.wav"];
-                        [fm removeItemAtPath:dst error:nil];
-                        BOOL ok = [fm copyItemAtPath:pZh toPath:dst error:nil];
-                        if (ok) chmod(dst.fileSystemRepresentation, 0666);
-                        CCLogf(@"tts copied cc_tts_zh.wav ok=%d", ok);
-                    }
+                    CCLogf(@"tts zh copied %@ ok=%d", f, ok);
                 }
             }
         }

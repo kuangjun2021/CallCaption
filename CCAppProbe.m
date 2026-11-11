@@ -376,6 +376,7 @@ static float *g_ttsZhRing;
 static uint32_t g_ttsZhCap;
 static _Atomic(uint32_t) g_ttsZhHead, g_ttsZhTail;
 static NSTimeInterval g_ttsZhMtime;
+static NSString *g_ttsZhLastFile;   // 0.19.0：zh 序列文件按名字递增装载
 
 // 原音音量：0.0~1.0（0 = TTS 播放时原音静音）
 static double g_duckRemote = 0.30;
@@ -417,20 +418,52 @@ static void CCLoadTTSIfNeeded(void) {
     } @catch (NSException *e) { }
 }
 
+// v0.19.0：下行中文 TTS 按 cc_tts_zh_0001.wav 序号装载，一个文件装完再装下一个。
+// cc_tts_reset 由守护进程在 arm/挂断时写入，用来清空上一通残留的 zh ring。
 static void CCLoadZhTTSIfNeeded(void) {
     @try {
         NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
                                                               NSUserDomainMask, YES) firstObject];
         if (!docs.length) return;
-        NSString *p = [docs stringByAppendingPathComponent:@"cc_tts_zh.wav"];
-        NSDictionary *at = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:nil];
-        if (!at) return;
-        NSTimeInterval mt = [at[NSFileModificationDate] timeIntervalSince1970];
-        if (mt <= g_ttsZhMtime) return;
-        g_ttsZhMtime = mt;
-        if ([[NSDate date] timeIntervalSince1970] - mt > 120.0) return;
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSString *marker = [docs stringByAppendingPathComponent:@"cc_tts_reset"];
+        if ([fm fileExistsAtPath:marker]) {
+            if (!g_ttsZhRing) {
+                g_ttsZhCap = 48000 * 30;
+                g_ttsZhRing = calloc(g_ttsZhCap, sizeof(float));
+            }
+            atomic_store(&g_ttsZhHead, 0);
+            atomic_store(&g_ttsZhTail, 0);
+            g_ttsZhMtime = 0;
+            g_ttsZhLastFile = nil;
+            [fm removeItemAtPath:marker error:nil];
+            CCAppLog(@"tts zh reset");
+        }
+
+        NSArray *names = [fm contentsOfDirectoryAtPath:docs error:nil];
+        NSMutableArray *zh = [NSMutableArray array];
+        for (NSString *f in names) {
+            if ([f hasPrefix:@"cc_tts_zh_"] && [f hasSuffix:@".wav"])
+                [zh addObject:f];
+        }
+        if (!zh.count) return;
+        [zh sortUsingSelector:@selector(compare:)];
+        NSString *pick = nil;
+        for (NSString *f in zh) {
+            if (!g_ttsZhLastFile ||
+                [f compare:g_ttsZhLastFile] == NSOrderedDescending) {
+                pick = f;
+                break;
+            }
+        }
+        if (!pick) return;
+        NSString *p = [docs stringByAppendingPathComponent:pick];
         NSData *d = [NSData dataWithContentsOfFile:p];
-        if (d.length <= 44) return;
+        if (d.length <= 44) {
+            g_ttsZhLastFile = pick;
+            [fm removeItemAtPath:p error:nil];
+            return;
+        }
         if (!g_ttsZhRing) {
             g_ttsZhCap = 48000 * 30;
             g_ttsZhRing = calloc(g_ttsZhCap, sizeof(float));
@@ -441,13 +474,17 @@ static void CCLoadZhTTSIfNeeded(void) {
         uint32_t head = atomic_load(&g_ttsZhHead);
         uint32_t tail = atomic_load(&g_ttsZhTail);
         uint32_t space = g_ttsZhCap - (head - tail);
-        if (n > space) n = space;
+        // 环形缓冲不够就等下一拍，绝不截断一句 TTS；保持顺序完整。
+        if (n + 4800 > space) return;
         for (NSUInteger i = 0; i < n; i++) {
             g_ttsZhRing[head % g_ttsZhCap] = (float)src[i] / 32768.0f;
             head++;
         }
         atomic_store(&g_ttsZhHead, head);
-        CCAppLog(@"tts zh loaded %lu samples", (unsigned long)n);
+        g_ttsZhLastFile = pick;
+        g_ttsZhMtime = [[NSDate date] timeIntervalSince1970];
+        [fm removeItemAtPath:p error:nil];
+        CCAppLog(@"tts zh loaded %@ %lu samples", pick, (unsigned long)n);
     } @catch (NSException *e) { }
 }
 

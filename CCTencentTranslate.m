@@ -168,6 +168,7 @@ static void CCTencentResetUplinkMarker(void) {
     CFAbsoluteTime lastPartialAt;
     CFAbsoluteTime lastBacklogLog;
     CFAbsoluteTime lrAt;             // v0.19.2：LR| 时刻，量首包 TTS 延迟
+    double nextRetryDelay;           // v0.19.3：6001 时快速重连
     NSString *lastPartialSrc;
     NSString *lastPartialTgt;
     NSMutableData *audioPending;
@@ -344,6 +345,15 @@ static void CCTencentResetUplinkMarker(void) {
         } else {
             NSString *m = obj[@"message"] ?: @"";
             CCLogf(@"tencent %@ handshake fail code=%ld %@", tag, (long)code, m);
+            // v0.19.3：我方 lite 模型偶尔首连返回 6001“not support this
+            // trans model”，同一参数重连又成功（0.19.1/0.19.2 实测均出现）。
+            // 直接回退标准版并 0.3 秒快速重连，避免开头 3~5 秒空白。
+            if (isLocal && code == 6001 &&
+                [model isEqualToString:@"hunyuan-translation-lite"]) {
+                model = @"hunyuan-translation";
+                nextRetryDelay = 0.3;
+                CCLogf(@"tencent local lite 6001, fallback standard");
+            }
             CCASendState([NSString stringWithFormat:@"● 腾讯%@连接失败(%ld)",
                           isLocal ? @"我方" : @"对方", (long)code]);
             [self fail:[NSString stringWithFormat:@"code %ld", (long)code]];
@@ -531,7 +541,10 @@ static void CCTencentResetUplinkMarker(void) {
     CCLogf(@"tencent %@ failed: %@ (failures=%d)", tag, why ?: @"?", failures);
     [self closeSocket];
     if (!ending) {
-        double delay = failures <= 1 ? 1.0 : (failures == 2 ? 3.0 : 5.0);
+        double delay = nextRetryDelay > 0
+                     ? nextRetryDelay
+                     : (failures <= 1 ? 1.0 : (failures == 2 ? 3.0 : 5.0));
+        nextRetryDelay = 0;
         [self scheduleRetry:delay];
     }
 }

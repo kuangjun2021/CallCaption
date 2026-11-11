@@ -76,6 +76,17 @@ static NSUInteger CCRingRead(CCTCRing *r, int16_t *dst, NSUInteger max) {
     return n;
 }
 
+// v0.20.2：只有严重积压时调用。保留最新 keep 个样本，丢掉最老的积压，
+// 避免 10 秒 ring 满后反而静默丢掉“新”音频（0.20.1 日志里的 10000ms）。
+static void CCRingDropTo(CCTCRing *r, uint32_t keep) {
+    if (!r->buf || !r->cap) return;
+    uint32_t head = atomic_load(&r->head);
+    uint32_t tail = atomic_load(&r->tail);
+    uint32_t used = head - tail;
+    if (used <= keep) return;
+    atomic_store(&r->tail, head - keep);
+}
+
 // ---------- 字符串/签名 ----------
 static NSString *CCPct(NSString *s) {
     static NSCharacterSet *ok;
@@ -560,9 +571,20 @@ static void CCTencentResetUplinkMarker(void) {
                atomic_load(&inFlight), sentReal,
                lastTextAt > 0 ? now - lastTextAt : 0);
     }
-    // v0.20.0 B1：ASR 只允许一个发送在途，避免服务端慢时把几十秒音频
-    // 排进 socket，恢复时突发触发 4000/6000。慢的时候 ring 会积压。
-    if (asrMode && atomic_load(&inFlight) > 0) return;
+    // v0.20.2：0.20.1 实测一个在途包会把整条流卡死：send completion
+    // 受网络 ACK 影响，超过 200ms 就跳过下一拍，10 秒 ring 很快满。
+    // ASR 仍按 200ms 节奏发，但允许最多 3 个包在途（约 600ms 缓冲）。
+    CCTCRing *sendRing = isLocal ? &g_localRing : &g_remoteRing;
+    uint32_t ringUsed = CCRingUsed(sendRing);
+    // 严重积压（>2s）说明网络/服务端已经跟不上。保留最新 500ms，
+    // 丢掉最老的积压；否则 ring 满 10s 后会静默丢新音频，字幕永远晚 10 秒。
+    if (ringUsed > 16000 * 2) {
+        CCRingDropTo(sendRing, 16000 / 2);
+        CCLogf(@"tencent %@ backlog drop %ums -> 500ms", tag, ringUsed / 16);
+        ringUsed = CCRingUsed(sendRing);
+    }
+    (void)ringUsed;
+    if (asrMode && atomic_load(&inFlight) >= 3) return;
     // v0.19.8：看门狗改成“只记录、不重连”，并且只统计真正的语音包。
     // 0.19.6/0.19.7 的 12 秒重连会把上一通/本条流的内容直接丢掉；
     // 用户明确要求“不能漏掉通话内容”，所以这里不再自动 reconnect。

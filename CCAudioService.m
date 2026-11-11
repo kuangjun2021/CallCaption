@@ -1414,9 +1414,13 @@ static void CCManageSiriHelper(BOOL armed) {
     }
 }
 
-// v0.20.1：只在通话 arm 期间持有 AVAudioSession；挂断后主动释放，
-// 避免守护进程从开机起一直占着 SoloAmbient，影响微信等其他通话。
+// v0.20.2：恢复 0.20.0 的“boot 时激活会话”，但挂断后必须释放。
+// 0.20.1 在通话接通后才激活 SoloAmbient，会打断 WhatsApp 已经建立的
+// 音频路由；日志里 local tap 在 23:26:48 停帧、23:26:56 被看门狗重启，
+// 同时两条 WS 都积压到 10 秒。boot 激活可以避开这个时间点。
+static BOOL g_daemonAudioActive;
 static void CCAudioSessionSetActive(BOOL active) {
+    if (active == g_daemonAudioActive) return;
     @try {
         AVAudioSession *sess = [AVAudioSession sharedInstance];
         NSError *err = nil;
@@ -1427,17 +1431,19 @@ static void CCAudioSessionSetActive(BOOL active) {
                         error:nil];
             if (![sess setActive:YES error:&err]) {
                 CCLogf(@"audio session activate failed: %@", err.localizedDescription);
-            } else {
-                CCLogf(@"audio session: active");
+                return;
             }
+            g_daemonAudioActive = YES;
+            CCLogf(@"audio session: active");
         } else {
             if (![sess setActive:NO
                      withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
                            error:&err]) {
                 CCLogf(@"audio session deactivate failed: %@", err.localizedDescription);
-            } else {
-                CCLogf(@"audio session: inactive (notify others)");
+                return;
             }
+            g_daemonAudioActive = NO;
+            CCLogf(@"audio session: inactive (notify others)");
         }
     } @catch (NSException *e) {
         CCLogf(@"audio session exc %@", e.reason);
@@ -1466,7 +1472,9 @@ static void CheckArm(void) {
         BOOL wasArmed = lastArmed;
         if (armed && !lastArmed) {
             // 新通话：重置 Tap 探测，从 speaker(-2) 开始，最多试 -1 / -3。
-            // 会话只在通话期间激活；boot 时只设置 category，不 setActive。
+            // 首次 boot 已激活；只有上一通挂断时释放过，这里才重新激活。
+            // 若会话仍 active，CCAudioSessionSetActive 是 no-op，不会在
+            // WhatsApp 已接通的通话中重新打断音频路由。
             CCAudioSessionSetActive(YES);
             g_remote->tapProbeCount = 0;
             g_remoteCallStarted = YES;
@@ -1804,13 +1812,13 @@ int main(int argc, char *argv[]) {
         // LCT 的 livecallhelper 在识别前会配置 AVAudioSession（SoloAmbient/Default）；
         // 我们的守护进程以前没做这一步，补上。
         @try {
+            // v0.20.2：恢复 boot 激活，挂断时释放。这样首次通话的音频路由
+            // 在开机时已经建立，不会在接通瞬间打断 WhatsApp；挂断后释放
+            // 又不会占着会话影响微信。
+            CCAudioSessionSetActive(YES);
             AVAudioSession *sess = [AVAudioSession sharedInstance];
-            [sess setCategory:AVAudioSessionCategorySoloAmbient
-                         mode:AVAudioSessionModeDefault
-                      options:0
-                        error:nil];
-            // v0.20.1：boot 只配置 category，不激活会话；等 arm 时再 setActive:YES。
-            CCLogf(@"audio session: cat=%@ mode=%@ (activate on arm)", sess.category, sess.mode);
+            CCLogf(@"audio session: cat=%@ mode=%@ (boot active, release on hangup)",
+                   sess.category, sess.mode);
         } @catch (NSException *e) {
             CCLogf(@"audio session exc %@", e.reason);
         }

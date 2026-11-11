@@ -981,6 +981,9 @@ static void CCUIHandleCallActive(BOOL active) {
     g_callActive = active;
     CCLogf(@"call state: %@", active ? @"ACTIVE" : @"NONE");
     EnsureUI();
+    // v0.19.8：先清字幕再让 CCStreamCallActive/ShowWindow 显示窗口，
+    // 避免上一通的旧文本在窗口出现瞬间闪一下。
+    if (active) CCUIClearCaptions();
     CCStreamCallActive(active);
 
     if (active) {

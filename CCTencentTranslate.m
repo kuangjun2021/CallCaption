@@ -401,6 +401,9 @@ static void CCTencentResetUplinkMarker(void) {
 }
 
 - (void)handleResult:(NSDictionary *)res {
+    // v0.19.8：通话已结束/已 disarm，迟到的 WS 结果直接丢弃，
+    // 不再写 spool，避免下一通接通时蹦出上一轮字幕。
+    if (ending || !atomic_load(&g_tcActive)) return;
     NSString *src = [res[@"source_text"] isKindOfClass:[NSString class]]
                     ? res[@"source_text"] : @"";
     NSString *tgt = [res[@"target_text"] isKindOfClass:[NSString class]]
@@ -479,31 +482,27 @@ static void CCTencentResetUplinkMarker(void) {
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (now - lastBacklogLog >= 5.0) {
         lastBacklogLog = now;
-        CCLogf(@"tencent %@ backlog=%ums inflight=%d sentReal=%d",
+        CCLogf(@"tencent %@ backlog=%ums inflight=%d sentReal=%d noText=%.1fs",
                tag, (unsigned)(CCRingUsed(isLocal ? &g_localRing : &g_remoteRing) / 16),
-               atomic_load(&inFlight), sentReal);
+               atomic_load(&inFlight), sentReal,
+               lastTextAt > 0 ? now - lastTextAt : 0);
     }
-    // v0.19.6：如果连续发了 12 秒真实语音还没有任何文本结果，说明
-    // WS 发送队列或腾讯侧已经积压。单靠 1:1 发送永远追不回来，直接
-    // 重连清空队列，宁可丢一点上下文也不让字幕越拖越晚。
-    if (sentReal >= 60 && lastTextAt > 0 && now - lastTextAt > 12.0) {
-        CCLogf(@"tencent %@ no text %.1fs after %d real packets, reconnect",
-               tag, now - lastTextAt, sentReal);
-        [self fail:@"text backlog"];
-        return;
-    }
-    // 发送队列本身积压（网络/TCP 缓冲）也会造成几十秒延迟；超过 6 秒
-    // 未完成的发送就直接重连，清掉 socket 里排队的旧音频。
-    int inf = atomic_load(&inFlight);
-    if (inf > 30) {
-        CCLogf(@"tencent %@ send queue %d packets, reconnect", tag, inf);
-        [self fail:@"send queue"];
-        return;
-    }
+    // v0.19.8：看门狗改成“只记录、不重连”，并且只统计真正的语音包。
+    // 0.19.6/0.19.7 的 12 秒重连会把上一通/本条流的内容直接丢掉；
+    // 用户明确要求“不能漏掉通话内容”，所以这里不再自动 reconnect。
+    // 队列/服务端慢只写日志，由人决定是否挂断或改设置。
     int16_t buf[3200];
     NSUInteger got = CCRingRead(isLocal ? &g_localRing : &g_remoteRing, buf, 3200);
-    if (got > 0) sentReal++; else sentReal = 0;
     if (got < 3200) memset(buf + got, 0, (3200 - got) * sizeof(int16_t));
+    double absSum = 0;
+    for (NSUInteger i = 0; i < 3200; i++) {
+        int16_t v = buf[i];
+        absSum += (double)(v < 0 ? -v : v);
+    }
+    double pktRms = absSum / 3200.0 / 32768.0;
+    // 只有明显高于底噪的包才算“真实语音”；静音/底噪把计数清零。
+    // 这样不会再出现“安静 12 秒也被看成 12 秒语音”的误判。
+    if (got > 0 && pktRms > 0.004) sentReal++; else sentReal = 0;
     NSData *d = nil;
     if (sampleRate == 8000) {
         // v0.19.7：ring 仍是 16k；发 8k 时每 200ms 取 3200 个 16k 样本，
@@ -550,6 +549,7 @@ static void CCTencentResetUplinkMarker(void) {
 }
 
 - (void)handleAudio:(NSData *)d {
+    if (ending || !atomic_load(&g_tcActive)) return;
     if (!isLocal || !tencentTTS || !d.length) return;
     if (lrAt > 0) {
         CCLogf(@"tencent local LR->pcm %.2fs (%lu bytes)",

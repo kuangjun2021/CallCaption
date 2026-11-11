@@ -71,6 +71,7 @@ static NSTimer *g_grabberHide;
 static BOOL g_panelExpanded;
 static BOOL g_grabberVisible;
 static BOOL g_callActive;
+static BOOL g_ringing;                  // v0.20.4：拨号/响铃中，只显示地球，不 arm
 static BOOL g_uiReady;
 static BOOL g_boxesBuilt;
 static BOOL g_sessionActive;
@@ -292,6 +293,7 @@ static UIWindow *CreateOverlayWindow(void) {
 
 static void CCUIHandleCallActive(BOOL active);
 static void CCUIRingingNow(void);
+static void CCUIIdleNow(void);
 static void CCStreamCallActive(BOOL active);
 static void RefreshBoxes(void);
 static void EnsureUI(void);
@@ -313,7 +315,12 @@ static void EnsureUI(void);
     }
     dispatch_async(dispatch_get_main_queue(), ^{
         CCUIHandleCallActive(connected);
-        if (!connected && ringing) CCUIRingingNow();
+        if (!connected && ringing) {
+            CCUIRingingNow();
+        } else if (!connected && !ringing && !g_callActive && !g_graceActive) {
+            // 响铃被取消、且不是挂断 grace，收掉地球。
+            CCUIIdleNow();
+        }
     });
 }
 @end
@@ -880,7 +887,7 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
 + (void)showGrabber {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!g_grabber) return;
-        if (!g_callActive && !CCPrefBool(CC_K_ALWAYS_PANEL, NO)) return;
+        if (!g_callActive && !g_ringing && !CCPrefBool(CC_K_ALWAYS_PANEL, NO)) return;
         [g_grabberHide invalidate];
         g_grabber.hidden = NO;
         g_grabber.alpha = 1.0;
@@ -1015,6 +1022,7 @@ static void CCUIEndGrace(void) {
 static void CCUIHandleCallActive(BOOL active) {
     if (g_callActive == active) return;
     g_callActive = active;
+    g_ringing = NO;
     CCLogf(@"call state: %@", active ? @"ACTIVE" : @"NONE");
     EnsureUI();
 
@@ -1077,10 +1085,12 @@ static void CCUIHandleCallActive(BOOL active) {
     }
 }
 
+// v0.20.4：拨号/响铃只显示地球，证明插件在；不 arm、不开麦、不出字幕。
 static void CCUIRingingNow(void) {
     if (g_callActive) return;   // 通话保持中（呼叫等待）不动当前字幕
     EnsureUI();
-    // 新一通正在拨号/响铃：取消上一通 grace，清屏、收 grabber、绝不 arm。
+    g_ringing = YES;
+    // 新一通正在拨号/响铃：取消上一通 grace，清屏，但保留地球。
     g_graceActive = NO;
     [g_graceTimer invalidate];
     g_graceTimer = nil;
@@ -1088,6 +1098,25 @@ static void CCUIRingingNow(void) {
         g_sessionActive = NO;
         CCSetArmed(NO);
     }
+    CCUIClearCaptions();
+    if (g_remoteBox) g_remoteBox.hidden = YES;
+    if (g_localBox) g_localBox.hidden = YES;
+    g_panelExpanded = NO;
+    g_panelCard.hidden = YES;
+    g_panelCard.alpha = 1.0;
+    ShowWindow();
+    [CCUIHelper showGrabber];
+    CCLogf(@"ringing: globe shown, captions cleared, not armed");
+}
+
+// 没有通话、也没有挂断 grace：真正空闲，收掉地球和窗口。
+static void CCUIIdleNow(void) {
+    if (g_callActive) return;
+    g_ringing = NO;
+    EnsureUI();
+    g_graceActive = NO;
+    [g_graceTimer invalidate];
+    g_graceTimer = nil;
     CCUIClearCaptions();
     [g_grabberHide invalidate]; g_grabberHide = nil;
     if (g_grabber) { g_grabber.hidden = YES; g_grabber.alpha = 1.0; }
@@ -1101,7 +1130,7 @@ static void CCUIRingingNow(void) {
     } else {
         HideWindow();
     }
-    CCLogf(@"ringing: captions cleared, not armed");
+    CCLogf(@"idle: globe hidden");
 }
 
 #pragma mark - TTS
@@ -2421,11 +2450,11 @@ void CCUIBoot(void) {
                 // “挂断 grace”把旧字幕留在屏幕上。
                 if (connected) {
                     CCUIHandleCallActive(YES);
-                } else {
+                } else if (ringing) {
                     CCUIRingingNow();
-                }
-                if (!connected && ringing) {
-                    CCLogf(@"boot: ringing call present, not armed");
+                    CCLogf(@"boot: ringing call present, globe shown, not armed");
+                } else {
+                    CCUIIdleNow();
                 }
                 if (!g_sbTimer) {
                     g_sbTimer = [NSTimer scheduledTimerWithTimeInterval:1.0

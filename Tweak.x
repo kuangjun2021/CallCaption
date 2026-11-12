@@ -35,6 +35,9 @@ static void SBDarwinCB(CFNotificationCenterRef center, void *observer,
         } else if ([suffix isEqualToString:@"prefschanged"]) {
             CCPrefsReload();
             CCUIRefreshPanel();
+        } else if ([suffix isEqualToString:@"sfspeechlab"]) {
+            // v0.20.8-lab：只跑离线 SFSpeech，不打电话、不联网。
+            CCLabSpeechStartFromMode(NO);
         }
     } @catch (NSException *e) { }
 }
@@ -62,6 +65,12 @@ static void SBDarwinCB(CFNotificationCenterRef center, void *observer,
                 CFNotificationCenterGetDarwinNotifyCenter(),
                 NULL, &SBDarwinCB,
                 (__bridge CFStringRef)[CC_NOTIF_PREFIX stringByAppendingString:@"prefschanged"],
+                NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+            // v0.20.8-lab：显式订阅，避免 NULL 通配在部分场景收不到。
+            CFNotificationCenterAddObserver(
+                CFNotificationCenterGetDarwinNotifyCenter(),
+                NULL, &SBDarwinCB,
+                (__bridge CFStringRef)[CC_NOTIF_PREFIX stringByAppendingString:@"sfspeechlab"],
                 NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
             %init(SBGroup);
         } else if (CCIsMediaServerd()) {

@@ -23,6 +23,7 @@
 #define CC_K_TTS_ENABLED      @"TTSEnabled"       // 中文播报
 #define CC_K_CLOUD_ASR       @"CloudASR"         // 云端语音识别（更准，需联网）
 #define CC_K_TAP_STALL_SEC   @"TapStallSec"       // Tap 帧停滞重启阈值（秒，2..10）
+#define CC_K_LAB_MODE        @"LabSpeechMode"     // v0.20.8-lab：remote/local/dual
 #define CC_K_SHOW_RECOGNIZED @"ShowRecognized"    // 显示识别原文
 #define CC_K_SHOW_TRANSLATED @"ShowTranslated"    // 显示译文
 #define CC_K_TTS_VOICE       @"TTSVoice"          // 中文播报音色 identifier
@@ -101,6 +102,9 @@ id    CCPref(NSString *key);
 BOOL  CCPrefBool(NSString *key, BOOL def);
 NSString *CCPrefStr(NSString *key, NSString *def);
 void  CCSetPrefBool(NSString *key, BOOL value);   // SB 侧写设置并广播
+
+// ---------- v0.20.8-lab：离线 SFSpeech 实验 ----------
+void CCLabSpeechStartFromMode(BOOL localSide);
 
 // ---------- 传输（MS→SB 结果行） ----------
 void CCTransportBoot(void);                    // SB 侧：建目录/文件、订阅通知

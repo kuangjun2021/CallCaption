@@ -6,7 +6,7 @@ INSTALL_TARGET_PROCESSES = SpringBoard mediaserverd
 include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = CallCaption CallCaptionAudioHook CallCaptionAppProbe
-CallCaption_FILES = Tweak.x CCSupport.m CCTranslator.m CCEngine.m CCUI.m CCMicCapture.m CCSettings.m
+CallCaption_FILES = Tweak.x CCSupport.m CCTranslator.m CCEngine.m CCUI.m CCMicCapture.m CCSettings.m CCLabSpeech.m
 CallCaption_FRAMEWORKS = Foundation UIKit AudioToolbox CoreTelephony AVFoundation Speech CoreFoundation CallKit
 CallCaption_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-command-line-argument -Wno-unused-function -fno-objc-msgsend-selector-stubs -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
 CallCaption_LDFLAGS = -Wl,-fixup_chains
@@ -33,7 +33,7 @@ CallCaptionPrefs_LDFLAGS = -Wl,-fixup_chains -Wl,-undefined,dynamic_lookup
 
 # v0.10: 独立音频守护进程（系统级 Tap 抓取通话对方声音，无钩子/无 mediaserverd）
 TOOL_NAME = CallCaptionAudioService
-CallCaptionAudioService_FILES = CCAudioService.m CCSupport.m CCTranslator.m CCTencentTranslate.m
+CallCaptionAudioService_FILES = CCAudioService.m CCSupport.m CCTranslator.m CCTencentTranslate.m CCLabSpeech.m
 CallCaptionAudioService_FRAMEWORKS = Foundation AudioToolbox AVFAudio AVFoundation Speech CoreFoundation
 CallCaptionAudioService_CFLAGS = -fobjc-arc -DCC_TOOL -Wno-deprecated-declarations -Wno-arc-performSelector-leaks -Wno-unused-variable -Wno-unused-function -fno-objc-msgsend-selector-stubs -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
 CallCaptionAudioService_LDFLAGS = -Wl,-fixup_chains

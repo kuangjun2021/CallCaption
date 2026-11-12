@@ -1844,6 +1844,9 @@ static void CCDaemonNotifCB(CFNotificationCenterRef center, void *observer,
                    CCPrefBool(CC_K_LOCAL_ENABLED, YES));
         } else if ([suffix isEqualToString:@"arm"] || [suffix isEqualToString:@"disarm"]) {
             dispatch_async(g_stateQ, ^{ CheckArm(); });
+        } else if ([suffix isEqualToString:@"sfspeechlab"]) {
+            // v0.20.8-lab：守护进程侧只跑我方 zh-CN 离线识别。
+            dispatch_async(g_stateQ, ^{ CCLabSpeechStartFromMode(YES); });
         }
     } @catch (NSException *e) { }
 }
@@ -1959,6 +1962,11 @@ int main(int argc, char *argv[]) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
                                         NULL, &CCDaemonNotifCB, NULL, NULL,
                                         CFNotificationSuspensionBehaviorDeliverImmediately);
+        // v0.20.8-lab：显式订阅，避免 NULL 通配在部分场景收不到。
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                                        NULL, &CCDaemonNotifCB,
+                                        (__bridge CFStringRef)[CC_NOTIF_PREFIX stringByAppendingString:@"sfspeechlab"],
+                                        NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
 
         dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,
                                                          0, 0, g_stateQ);

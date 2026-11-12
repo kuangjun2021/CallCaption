@@ -569,6 +569,9 @@ static void VoiceLists(NSString *prefix,
         MkChoice(@"TapStallSec", @"Tap 断流重启阈值", @"4",
                  @[@"2", @"3", @"4", @"5", @"6", @"8", @"10"],
                  @[@"2s（激进）", @"3s", @"4s（推荐）", @"5s", @"6s", @"8s", @"10s（保守）"]),
+        MkAction(@"labRemote", @"实验 A：对方单路（本地 SFSpeech）"),
+        MkAction(@"labLocal", @"实验 B：我方单路（本地 SFSpeech）"),
+        MkAction(@"labDual", @"实验 C：双路同时（关键）"),
         MkAction(@"openLog", @"打开诊断日志"),
     ];
 
@@ -585,7 +588,7 @@ static void VoiceLists(NSString *prefix,
         @"填写 chat/completions 完整地址、Key 与模型名，例如 DeepSeek。",
         @"分别请求 DeepL / Google / AI / MyMemory 一次（Hello 英译中），检查 Key 和网络是否可用。",
         @"列表来自系统已安装语音。中文用于对方字幕播报，英文用于我方双向播报。",
-        @"日志：/var/mobile/Library/CallCaption/probe.log。Tap 断流重启阈值：音频帧停止增长超过该秒数就重挂 Tap，4 秒兼顾首通恢复和误判。",
+        @"日志：/var/mobile/Library/CallCaption/probe.log。Tap 断流重启阈值：音频帧停止增长超过该秒数就重挂 Tap，4 秒兼顾首通恢复和误判。SFSpeech 离线实验：A/B/C 三组各约 150 秒，不打电话、不联网、不花钱；用上一通留下的 local16k.wav / remote16k.wav，结束后导出 probe.log 搜索 LAB。",
     ];
 
     NSMutableArray *tr = [NSMutableArray array];
@@ -778,6 +781,8 @@ static void VoiceLists(NSString *prefix,
             [self presentLogMenu:[tv cellForRowAtIndexPath:ip]];
         } else if ([row.key isEqualToString:@"testApi"]) {
             [self runApiTest];
+        } else if ([row.key hasPrefix:@"lab"]) {
+            [self startSpeechLab:row.key];
         }
     }
 }
@@ -941,6 +946,25 @@ static NSString *CCApiTextFromJSON(NSString *engine, id json) {
         detail = [NSString stringWithFormat:@"✗ HTTP %ld · %@", (long)status, CCApiShort(CCApiSnippet2(data), 60)];
     }
     @synchronized(res) { res[engine] = @{@"ok": @(ok), @"detail": detail}; }
+}
+
+// v0.20.8-lab：离线 SFSpeech 实验。只写 LabSpeechMode + 发通知，
+// 由 SpringBoard / 守护进程各自读 WAV 跑识别；不打电话、不联网。
+- (void)startSpeechLab:(NSString *)key {
+    NSString *mode = [key isEqualToString:@"labRemote"] ? @"remote" :
+                     ([key isEqualToString:@"labLocal"] ? @"local" : @"dual");
+    [self setPrefValue:mode forKey:@"LabSpeechMode"];
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+        (__bridge CFStringRef)@"net.user.callcaption.sfspeechlab", NULL, NULL, TRUE);
+    NSString *msg = [NSString stringWithFormat:
+        @"已启动实验 %@，约 150 秒，请不要拨打电话。\n\n"
+         "结束后导出 probe.log，搜索 LAB 行。\n\n"
+         "注意：实验用的是上一通电话留下的 local16k.wav / remote16k.wav；"
+         "下一通电话会把它们删掉，所以请先做实验再打电话。", mode];
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"SFSpeech 离线实验"
+        message:msg preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:a animated:YES completion:nil];
 }
 
 - (void)runApiTest {

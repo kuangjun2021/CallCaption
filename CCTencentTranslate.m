@@ -843,15 +843,23 @@ void CCTencentStart(void) {
     BOOL localOn = CCPrefBool(CC_K_LOCAL_ENABLED, YES);
     if (!remoteOn && !localOn) return;
 
+    // v0.21.0：我方默认走守护进程内 on-device SFSpeech，本地腾讯 WS 不再启动。
+    // 如果本机模型/授权不可用，自动回退到本地腾讯 WS，保证功能不中断。
+    BOOL localSFWanted = [[CCPrefStr(CC_K_TC_LOCAL_ENGINE, @"sfspeech") lowercaseString]
+                          isEqualToString:@"sfspeech"];
+    BOOL localSFSpeech = localOn && localSFWanted &&
+        CCLocalSpeechAvailable(CCPrefStr(CC_K_LOCAL_LOCALE, @"zh-CN"));
+    BOOL startLocalTC = localOn && !localSFSpeech;
+
     CCRingInit(&g_remoteRing, 16000 * 10);
     CCRingInit(&g_localRing, 16000 * 10);
     CCRingClear(&g_remoteRing);
     CCRingClear(&g_localRing);
-    atomic_store(&g_tcLocalOn, localOn ? 1 : 0);
+    atomic_store(&g_tcLocalOn, startLocalTC ? 1 : 0);
     atomic_store(&g_tcActive, 1);
     if (!g_sessions) g_sessions = [NSMutableArray array];
 
-    // v0.20.0 B1：腾讯只做实时 ASR，翻译交给 SpringBoard（来电 Google / 去电 DeepL）。
+    // 腾讯只做实时 ASR，翻译交给 SpringBoard（来电 Google / 去电 DeepL）。
     NSString *remoteModel = @"16k_en";
     NSString *localModel = @"16k_zh";
 
@@ -862,14 +870,19 @@ void CCTencentStart(void) {
         [g_sessions addObject:s];
         dispatch_async(s->q, ^{ [s start]; });
     }
-    if (localOn) {
+    if (startLocalTC) {
         CCTencentSession *s = [[CCTencentSession alloc] initWithLocal:YES
             appid:appid secretid:sid secretkey:skey model:localModel
             voiceType:@"" volume:@"" speed:@"" tencentTTS:NO asrMode:YES];
         [g_sessions addObject:s];
         dispatch_async(s->q, ^{ [s start]; });
     }
-    CCLogf(@"tencent asr started remote=%d local=%d", remoteOn, localOn);
+    NSString *localEngine = !localOn ? @"off"
+                          : (localSFSpeech ? @"sfspeech" : @"tencent");
+    CCLogf(@"tencent asr started remote=%d local=%d localEngine=%@",
+           remoteOn, startLocalTC, localEngine);
+    if (localOn && localSFWanted && !localSFSpeech)
+        CCLogf(@"tencent local SFSpeech unavailable, fallback to Tencent local");
     CCASendState(@"● 腾讯 ASR 已启动");
 }
 

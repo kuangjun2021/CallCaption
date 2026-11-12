@@ -106,6 +106,9 @@ void  CCSetPrefBool(NSString *key, BOOL value);   // SB 侧写设置并广播
 // ---------- v0.20.8-lab：离线 SFSpeech 实验 ----------
 void CCLabSpeechStartFromMode(BOOL localSide);
 
+// ---------- v0.21.0：本机 SFSpeech 可用性 ----------
+BOOL CCLocalSpeechAvailable(NSString *locale);
+
 // ---------- 传输（MS→SB 结果行） ----------
 void CCTransportBoot(void);                    // SB 侧：建目录/文件、订阅通知
 void CCTransportSendLine(NSString *line);      // MS 侧：发送一行结果

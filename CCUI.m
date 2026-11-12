@@ -1182,6 +1182,16 @@ void CCUIRemoteFinalText(NSString *text) {
 // v0.20.0 B1：去电 ASR 最终文本 -> 独立翻译引擎（默认 DeepL）-> 英文字幕/TTS。
 void CCUILocalFinalText(NSString *text) {
     if (!text.length) return;
+    // v0.20.6 诊断：记录本地 final 与填充词判定，不改 TTS 行为。
+    NSString *trimmed = [text stringByTrimmingCharactersInSet:
+                         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSSet *fillers = [NSSet setWithObjects:
+                      @"嗯", @"啊", @"哦", @"呃", @"唉", @"恩",
+                      @"hmm", @"um", @"uh", @"er", @"ah", @"oh", @"mm", nil];
+    BOOL isFiller = (trimmed.length <= 2 ||
+                     [fillers containsObject:[trimmed lowercaseString]]);
+    CCLogf(@"local final raw=%@ len=%lu filler=%d",
+           text, (unsigned long)text.length, isFiller ? 1 : 0);
     NSUInteger seq = g_callSeq;
     if (!g_callActive && !(g_graceActive && g_graceSeq == seq)) return;
     NSString *eng = CCPrefStr(CC_K_LOCAL_TRANSLATE_ENGINE, @"deepl");

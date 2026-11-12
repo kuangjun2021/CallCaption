@@ -241,6 +241,8 @@ static BOOL CCGenerateUplinkTTS(NSString *text) {
     BOOL endAudioSent;           // 已请求收句，等待 final
     uint64_t frames;
     uint64_t audioBytes;         // 原始音频字节（不依赖识别请求）
+    uint64_t aqCalls;            // v0.20.6 诊断：AudioQueue 回调次数
+    CFAbsoluteTime lastAQAt;     // v0.20.6 诊断：最近一次 AudioQueue 回调时间
     uint64_t lastAudioSeen;
     CFAbsoluteTime lastFrameChangeAt;
     CFAbsoluteTime lastRecogTry;
@@ -310,6 +312,9 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
     CCChannel *ch = (__bridge CCChannel *)ud;
     @autoreleasepool {
         @try {
+            // v0.20.6 诊断：AudioQueue 回调心跳。只写原子/时间，不分配内存。
+            __atomic_add_fetch(&ch->aqCalls, 1, __ATOMIC_RELAXED);
+            ch->lastAQAt = CFAbsoluteTimeGetCurrent();
             SFSpeechAudioBufferRecognitionRequest *r = ch->req;
             AVAudioFormat *monoFmt = ch->mono;
             AVAudioFormat *srcFmt = ch->fmt;
@@ -486,6 +491,8 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
     onDevice = YES;
     frames = 0;
     audioBytes = 0;
+    aqCalls = 0;
+    lastAQAt = CFAbsoluteTimeGetCurrent();
     lastAudioSeen = 0;
     lastFrameChangeAt = CFAbsoluteTimeGetCurrent();
     lastRecogTry = 0;
@@ -519,7 +526,10 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
         [self stop];
         return NO;
     }
-    CCLogf(@"%@: capture started (pid=%d, %@)", self.tag, self.tapPID, self.locale);
+    CCLogf(@"%@: capture started (pid=%d, %@) queue=%p tap=%p fmt=%.0f/%.0f/%u aqCalls=%llu",
+           self.tag, self.tapPID, self.locale, queue, tap,
+           asbd.mSampleRate, asbd.mBytesPerFrame, asbd.mChannelsPerFrame,
+           (unsigned long long)aqCalls);
     if (!self.expectCJK) CCASendState(@"● 已开始收听对方语音");
     return YES;
 }
@@ -549,6 +559,10 @@ static void CCAQCallback(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf,
     lastChunkText = nil;
     urlTaskRunning = NO;
     atomic_store(&chunkReady, 0);
+    CCLogf(@"%@: stop begin fileMode=%d queue=%p aqCalls=%llu lastAQ=%.2fs frames=%llu audio=%llu",
+           self.tag, self.fileMode, queue, (unsigned long long)aqCalls,
+           lastAQAt > 0 ? CFAbsoluteTimeGetCurrent() - lastAQAt : -1.0,
+           (unsigned long long)frames, (unsigned long long)audioBytes);
     if (self.fileMode) CCRemoteTeeClose();
     else { CCLocalTeeFlush(); CCLocalTeeClose(); }
     callGen++;
@@ -792,6 +806,10 @@ static NSUInteger CCLocalFileRead(int16_t *dst, NSUInteger max) {
 static void CCLocalTeeOpen(void) {
     if (g_localTee) return;
     NSString *p = [CC_DIR stringByAppendingPathComponent:@"local16k.wav"];
+    NSDictionary *at = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:nil];
+    unsigned long long oldBytes = at ? [at[NSFileSize] unsignedLongLongValue] : 0;
+    CCLogf(@"local tee open path=%@ existing=%llu bytes (fopen wb -> truncate)",
+           p.lastPathComponent, oldBytes);
     g_localTee = fopen(p.fileSystemRepresentation, "wb");
     if (!g_localTee) {
         static BOOL logged;
@@ -887,7 +905,13 @@ static void CCLocalTeeFlush(void) {
     }
 }
 static void CCLocalTeeClose(void) {
-    if (g_localTee) { fclose(g_localTee); g_localTee = NULL; }
+    if (g_localTee) {
+        CCLogf(@"local tee close bytes=%llu samples=%llu",
+               (unsigned long long)g_localTeeBytes,
+               (unsigned long long)atomic_load(&g_localTeeSamples));
+        fclose(g_localTee);
+        g_localTee = NULL;
+    }
     g_localTeeBytes = 0; g_localTeePhase = 0;
 }
 
@@ -1418,6 +1442,25 @@ static void CCManageSiriHelper(BOOL armed) {
 // 0.20.0 在 boot 激活 SoloAmbient 并一直持有，微信可能被占用；
 // 这里保持 boot 激活（通话效果与 0.20.0 一致），挂断时释放。
 static BOOL g_daemonAudioActive;
+static NSString *CCAudioRouteDesc(void) {
+    @try {
+        AVAudioSession *s = [AVAudioSession sharedInstance];
+        NSMutableString *m = [NSMutableString stringWithFormat:
+            @"cat=%@ mode=%@ rate=%.0f vol=%.2f other=%d out=[",
+            s.category, s.mode, s.sampleRate, s.outputVolume,
+            s.isOtherAudioPlaying ? 1 : 0];
+        for (AVAudioSessionPortDescription *p in s.currentRoute.outputs)
+            [m appendFormat:@"%@/%@ ", p.portType, p.portName];
+        [m appendString:@"] in=["];
+        for (AVAudioSessionPortDescription *p in s.currentRoute.inputs)
+            [m appendFormat:@"%@/%@ ", p.portType, p.portName];
+        [m appendString:@"]"];
+        return m;
+    } @catch (NSException *e) {
+        return [NSString stringWithFormat:@"routeExc:%@", e.reason];
+    }
+}
+
 static void CCAudioSessionSetActive(BOOL active) {
     if (active == g_daemonAudioActive) return;
     @try {
@@ -1433,7 +1476,7 @@ static void CCAudioSessionSetActive(BOOL active) {
                 return;
             }
             g_daemonAudioActive = YES;
-            CCLogf(@"audio session: active");
+            CCLogf(@"audio session: active %@", CCAudioRouteDesc());
         } else {
             if (![sess setActive:NO
                      withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
@@ -1442,7 +1485,7 @@ static void CCAudioSessionSetActive(BOOL active) {
                 return;
             }
             g_daemonAudioActive = NO;
-            CCLogf(@"audio session: inactive (notify others)");
+            CCLogf(@"audio session: inactive (notify others) %@", CCAudioRouteDesc());
         }
     } @catch (NSException *e) {
         CCLogf(@"audio session exc %@", e.reason);
@@ -1667,8 +1710,11 @@ static void CheckArm(void) {
                 } else {
                     // 只重挂同一个 PID，不再乱换 -2/-1/-3：
                     // 换到 -3 会把麦克风声音当“对方”，还会把通道语言切成中文。
-                    CCLogf(@"%@: audio stalled (frames=%llu), restarting tap pid=%d",
-                           ch.tag, (unsigned long long)ch->frames, ch.tapPID);
+                    CCLogf(@"%@: audio stalled (frames=%llu aq=%llu lastAQ=%.2fs route=%@), restarting tap pid=%d",
+                           ch.tag, (unsigned long long)ch->frames,
+                           (unsigned long long)ch->aqCalls,
+                           ch->lastAQAt > 0 ? now - ch->lastAQAt : -1.0,
+                           CCAudioRouteDesc(), ch.tapPID);
                     [ch stop];
                     ch->lastAttempt = 0;
                     ch->lastFrameChangeAt = now;
@@ -1761,14 +1807,18 @@ static void CheckArm(void) {
             uint64_t tSamples = atomic_load(&g_localTeeSamples);
             uint64_t tAbs = atomic_load(&g_localTeeAbsSum);
             double teeRms = tSamples ? (double)tAbs / (double)tSamples / 32768.0 : 0;
-            CCLogf(@"local: alive, audio=%llu frames=%llu rms=%.4f noResult=%.1fs tee=%llu teeRms=%.4f conv=%llu/%llu",
+            CCLogf(@"local: alive, audio=%llu frames=%llu rms=%.4f noResult=%.1fs tee=%llu teeRms=%.4f conv=%llu/%llu aq=%llu lastAQ=%.1fs frameAge=%.1fs route=%@",
                    (unsigned long long)g_local->audioBytes,
                    (unsigned long long)g_local->frames,
                    g_local->lastRMS,
                    g_local->lastResultAt > 0 ? now - g_local->lastResultAt : -1,
                    (unsigned long long)tSamples, teeRms,
                    (unsigned long long)atomic_load(&g_localConvOk),
-                   (unsigned long long)atomic_load(&g_localConvFail));
+                   (unsigned long long)atomic_load(&g_localConvFail),
+                   (unsigned long long)g_local->aqCalls,
+                   g_local->lastAQAt > 0 ? now - g_local->lastAQAt : -1,
+                   now - g_local->lastFrameChangeAt,
+                   CCAudioRouteDesc());
         }
     } @catch (NSException *e) { }
 }
@@ -1831,6 +1881,25 @@ int main(int argc, char *argv[]) {
         } @catch (NSException *e) {
             CCLogf(@"audio session exc %@", e.reason);
         }
+        // v0.20.6 诊断：记录系统音频路由变化（local tap 停帧时最需要看这个）。
+        [[NSNotificationCenter defaultCenter]
+            addObserverForName:AVAudioSessionRouteChangeNotification
+                        object:nil
+                         queue:nil
+                    usingBlock:^(NSNotification *n) {
+            @try {
+                NSNumber *reason = n.userInfo[AVAudioSessionRouteChangeReasonKey];
+                AVAudioSessionRouteDescription *prev =
+                    n.userInfo[AVAudioSessionRouteChangePreviousRouteKey];
+                NSMutableString *p = [NSMutableString string];
+                for (AVAudioSessionPortDescription *x in prev.outputs)
+                    [p appendFormat:@"%@/%@ ", x.portType, x.portName];
+                CCLogf(@"route change reason=%ld prevOut=[%@] now=%@",
+                       (long)reason.integerValue, p, CCAudioRouteDesc());
+            } @catch (NSException *e) {
+                CCLogf(@"route change exc %@", e.reason);
+            }
+        }];
         {
             NSString *dk = CCPrefStr(CC_K_DEEPL_KEY, @"");
             CCLogf(@"prefs boot: engine=%@ deeplKeyLen=%lu remote=%d local=%d",

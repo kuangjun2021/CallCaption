@@ -2275,8 +2275,24 @@ static void CCStreamStop(CCStream *st) {
 }
 
 static BOOL CCTencentHybridLocal(void) {
-    // v0.20.0 B1：ASR 在守护进程里跑，SpringBoard 不再跑任何 SFSpeech。
-    return NO;
+    // v0.21.2：本地 SFSpeech 放回 SpringBoard。0.21.1 实测守护进程在通话中
+    // 会被系统/音频会话饿死（128 秒零结果），而 SpringBoard 在 0.17.0 的
+    // 真实通话里是正常的。只有一路 SFSpeech，不会触发双路互杀。
+    if (![[CCPrefStr(CC_K_TC_LOCAL_ENGINE, @"sfspeech") lowercaseString]
+          isEqualToString:@"sfspeech"]) return NO;
+    NSString *loc = CCPrefStr(CC_K_LOCAL_LOCALE, @"zh-CN");
+    static NSString *cachedLoc;
+    static BOOL cachedOK;
+    if (!cachedLoc || ![cachedLoc isEqualToString:loc]) {
+        SFSpeechRecognizer *r = [[SFSpeechRecognizer alloc] initWithLocale:
+            [NSLocale localeWithLocaleIdentifier:loc]];
+        cachedOK = r && r.isAvailable && r.supportsOnDeviceRecognition &&
+            [SFSpeechRecognizer authorizationStatus] ==
+                SFSpeechRecognizerAuthorizationStatusAuthorized;
+        cachedLoc = [loc copy];
+        CCLogf(@"hybrid: local SFSpeech available=%d loc=%@", cachedOK, loc);
+    }
+    return cachedOK;
 }
 
 static void CCStreamTick(CCStream *st) {
@@ -2393,9 +2409,10 @@ static void CCStreamTick(CCStream *st) {
         if (ended) CCStreamDeliver(st);
     }
 
-    // Apple 单会话约 1 分钟：55 秒时收句并轮换，间隙音频进 pending
-    if (st.task && now - st.sessionStart > 55.0 && !st.rotating) {
-        CCLogf(@"stream %@ rotate at 55s", CCStreamTag(st));
+    // v0.21.2：on-device 没有服务端 60 秒硬限制（lab 单会话 150 秒无错）。
+    // 55 秒轮换会让后续 SFSpeech task 停摆；改为 8 分钟后在句末轮换。
+    if (st.task && now - st.sessionStart > 480.0 && !st.rotating) {
+        CCLogf(@"stream %@ rotate at %.0fs", CCStreamTag(st), now - st.sessionStart);
         CCStreamDeliver(st);
         st.rotating = YES;
         [st.req endAudio];
@@ -2416,13 +2433,13 @@ static void CCStreamCallActive(BOOL active) {
                 CCLogf(@"stream: tencent mode, SpringBoard SFSpeech off");
                 return;
             }
-            // v0.19.9 混合：remote 继续由腾讯处理，SpringBoard 只跑 local。
+            // v0.21.2 混合：remote 继续由腾讯处理，SpringBoard 只跑 local，
+            // 且强制 on-device（忽略 CloudASR，避免又走 Apple 云端 SFSpeech）。
             CCStreamStop(r);
             CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
             l.callStart = now;
-            BOOL cloud = CCPrefBool(CC_K_CLOUD_ASR, YES);
-            l.onDevice = !cloud;
-            CCLogf(@"stream: hybrid, local SFSpeech on (cloud=%d), remote Tencent", cloud);
+            l.onDevice = YES;
+            CCLogf(@"stream: hybrid, local SFSpeech on-device, remote Tencent");
             return;
         }
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();

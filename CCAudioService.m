@@ -1977,24 +1977,11 @@ static void CheckArm(void) {
             g_localStartAfter = CFAbsoluteTimeGetCurrent() + 1.0;
             CCSnapshotProbeFileSizes();
             CCTencentStart();
-            // v0.21.0：我方 on-device SFSpeech（守护进程内），与对方 SpringBoard
-            // 的识别是两条连接；本地腾讯 WS 由 CCTencentStart 按可用性自动关闭。
-            BOOL localOnArm = CCPrefBool(CC_K_LOCAL_ENABLED, YES);
-            BOOL localSFOn = localOnArm &&
-                [[CCPrefStr(CC_K_TC_LOCAL_ENGINE, @"sfspeech") lowercaseString]
-                 isEqualToString:@"sfspeech"] &&
-                CCLocalSpeechAvailable(CCPrefStr(CC_K_LOCAL_LOCALE, @"zh-CN"));
-            if (localSFOn) {
-                if (!g_localASR) g_localASR = [[CCLocalASR alloc] init];
-                [g_localASR stop];
-                [g_localASR start];
-                CCLogf(@"arm: local SFSpeech on-device started");
-            } else if (g_localASR) {
-                [g_localASR stop];
-                CCLogf(@"arm: local SFSpeech off (engine=%@ available=%d)",
-                       CCPrefStr(CC_K_TC_LOCAL_ENGINE, @"sfspeech"),
-                       CCLocalSpeechAvailable(CCPrefStr(CC_K_LOCAL_LOCALE, @"zh-CN")));
-            }
+            // v0.21.2：本地 SFSpeech 改回 SpringBoard（守护进程在通话中会被
+            // 系统/音频会话饿死，0.21.1 实测 128 秒零结果）。守护进程内这套
+            // CCLocalASR 暂不启动；CCTencentStart 仍按可用性决定是否回退
+            // 本地腾讯 WS。
+            if (g_localASR) [g_localASR stop];
             CCLogf(@"arm: bridge wav cleared (local tap in 1.0s)");
         }
         lastArmed = armed;

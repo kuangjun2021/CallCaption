@@ -1188,10 +1188,14 @@ void CCUILocalFinalText(NSString *text) {
     // 3 秒后语气词只上字幕，不合成英文 TTS，避免对方听到 Hmm。
     NSString *trimmed = [text stringByTrimmingCharactersInSet:
                          [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    // v0.20.7.1：先去掉首尾标点再匹配，否则“嗯。”“啊。”会被当成普通句子合成 Hmm。
+    NSString *fillerKey = [[trimmed lowercaseString]
+        stringByTrimmingCharactersInSet:[NSCharacterSet punctuationCharacterSet]];
     NSSet *fillers = [NSSet setWithObjects:
                       @"嗯", @"啊", @"哦", @"呃", @"唉", @"恩",
+                      @"嗯嗯", @"哦哦", @"啊啊", @"呃呃", @"恩恩", @"嘘",
                       @"hmm", @"um", @"uh", @"er", @"ah", @"oh", @"mm", nil];
-    BOOL explicitFiller = [fillers containsObject:[trimmed lowercaseString]];
+    BOOL explicitFiller = [fillers containsObject:fillerKey];
     BOOL early = (g_callActiveAt > 0 &&
                   CFAbsoluteTimeGetCurrent() - g_callActiveAt < 3.0);
     CCLogf(@"local final raw=%@ len=%lu filler=%d early=%d",

@@ -566,6 +566,9 @@ static void VoiceLists(NSString *prefix,
     ];
     NSArray *diag = @[
         MkSwitch(@"Diagnostics", @"诊断日志", YES),
+        MkChoice(@"TapStallSec", @"Tap 断流重启阈值", @"4",
+                 @[@"2", @"3", @"4", @"5", @"6", @"8", @"10"],
+                 @[@"2s（激进）", @"3s", @"4s（推荐）", @"5s", @"6s", @"8s", @"10s（保守）"]),
         MkAction(@"openLog", @"打开诊断日志"),
     ];
 
@@ -582,7 +585,7 @@ static void VoiceLists(NSString *prefix,
         @"填写 chat/completions 完整地址、Key 与模型名，例如 DeepSeek。",
         @"分别请求 DeepL / Google / AI / MyMemory 一次（Hello 英译中），检查 Key 和网络是否可用。",
         @"列表来自系统已安装语音。中文用于对方字幕播报，英文用于我方双向播报。",
-        @"日志：/var/mobile/Library/CallCaption/probe.log",
+        @"日志：/var/mobile/Library/CallCaption/probe.log。Tap 断流重启阈值：音频帧停止增长超过该秒数就重挂 Tap，4 秒兼顾首通恢复和误判。",
     ];
 
     NSMutableArray *tr = [NSMutableArray array];

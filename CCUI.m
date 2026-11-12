@@ -71,6 +71,7 @@ static NSTimer *g_grabberHide;
 static BOOL g_panelExpanded;
 static BOOL g_grabberVisible;
 static BOOL g_callActive;
+static CFAbsoluteTime g_callActiveAt;   // v0.20.7：本通 ACTIVE 时刻，用于过滤开头语气词
 static BOOL g_ringing;                  // v0.20.4：拨号/响铃中，只显示地球，不 arm
 static BOOL g_uiReady;
 static BOOL g_boxesBuilt;
@@ -1022,6 +1023,7 @@ static void CCUIEndGrace(void) {
 static void CCUIHandleCallActive(BOOL active) {
     if (g_callActive == active) return;
     g_callActive = active;
+    if (active) g_callActiveAt = CFAbsoluteTimeGetCurrent();
     g_ringing = NO;
     CCLogf(@"call state: %@", active ? @"ACTIVE" : @"NONE");
     EnsureUI();
@@ -1182,16 +1184,19 @@ void CCUIRemoteFinalText(NSString *text) {
 // v0.20.0 B1：去电 ASR 最终文本 -> 独立翻译引擎（默认 DeepL）-> 英文字幕/TTS。
 void CCUILocalFinalText(NSString *text) {
     if (!text.length) return;
-    // v0.20.6 诊断：记录本地 final 与填充词判定，不改 TTS 行为。
+    // v0.20.7：接通前 3 秒的语气词/单字试音直接忽略（不上字幕、不翻译、不 TTS）；
+    // 3 秒后语气词只上字幕，不合成英文 TTS，避免对方听到 Hmm。
     NSString *trimmed = [text stringByTrimmingCharactersInSet:
                          [NSCharacterSet whitespaceAndNewlineCharacterSet]];
     NSSet *fillers = [NSSet setWithObjects:
                       @"嗯", @"啊", @"哦", @"呃", @"唉", @"恩",
                       @"hmm", @"um", @"uh", @"er", @"ah", @"oh", @"mm", nil];
-    BOOL isFiller = (trimmed.length <= 2 ||
-                     [fillers containsObject:[trimmed lowercaseString]]);
-    CCLogf(@"local final raw=%@ len=%lu filler=%d",
-           text, (unsigned long)text.length, isFiller ? 1 : 0);
+    BOOL explicitFiller = [fillers containsObject:[trimmed lowercaseString]];
+    BOOL early = (g_callActiveAt > 0 &&
+                  CFAbsoluteTimeGetCurrent() - g_callActiveAt < 3.0);
+    CCLogf(@"local final raw=%@ len=%lu filler=%d early=%d",
+           text, (unsigned long)text.length, explicitFiller ? 1 : 0, early ? 1 : 0);
+    if (early && (explicitFiller || trimmed.length <= 1)) return;
     NSUInteger seq = g_callSeq;
     if (!g_callActive && !(g_graceActive && g_graceSeq == seq)) return;
     NSString *eng = CCPrefStr(CC_K_LOCAL_TRANSLATE_ENGINE, @"deepl");
@@ -1207,6 +1212,7 @@ void CCUILocalFinalText(NSString *text) {
         if (!live) return;   // 挂断后绝不 TTS；这是 0.20.0 微信被占的头号修复
         if (!CCPrefBool(CC_K_TTS_ENABLED, YES)) return;
         if ([CCPrefStr(CC_K_ENGLISH_TTS, @"local") isEqualToString:@"off"]) return;
+        if (explicitFiller) return;
         CCTTSBuffer(out, @"en-US", @"cc_tts.wav");
     });
 }

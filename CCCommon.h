@@ -22,6 +22,7 @@
 #define CC_K_LOCAL_ENABLED    @"LocalEnabled"     // 我的语音→英文(扬声器中继,实验)
 #define CC_K_TTS_ENABLED      @"TTSEnabled"       // 中文播报
 #define CC_K_CLOUD_ASR       @"CloudASR"         // 云端语音识别（更准，需联网）
+#define CC_K_TAP_STALL_SEC   @"TapStallSec"       // Tap 帧停滞重启阈值（秒，2..10）
 #define CC_K_SHOW_RECOGNIZED @"ShowRecognized"    // 显示识别原文
 #define CC_K_SHOW_TRANSLATED @"ShowTranslated"    // 显示译文
 #define CC_K_TTS_VOICE       @"TTSVoice"          // 中文播报音色 identifier

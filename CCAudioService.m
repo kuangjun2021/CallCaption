@@ -1697,24 +1697,28 @@ static void CheckArm(void) {
         }
 
         // 帧停滞看门狗：换通话/音频会话重建后 Tap 可能不再送音频，自动重挂
+        // v0.20.7：阈值做成设置项，默认 4 秒（原固定 8 秒，首通停摆要多等 4 秒）。
+        double tapStallSec = [CCPrefStr(CC_K_TAP_STALL_SEC, @"4") doubleValue];
+        if (tapStallSec < 2.0) tapStallSec = 2.0;
+        if (tapStallSec > 10.0) tapStallSec = 10.0;
         for (CCChannel *ch in chans) {
             if (!ch->capturing) continue;
             if (ch->audioBytes != ch->lastAudioSeen) {
                 ch->lastAudioSeen = ch->audioBytes;
                 ch->lastFrameChangeAt = now;
                 (void)0;
-            } else if (now - ch->lastFrameChangeAt > 8.0) {
+            } else if (now - ch->lastFrameChangeAt > tapStallSec) {
                 if (ch->fileMode) {
-                    // 文件模式没有 Tap 可重挂；文件 8 秒没长，多半是通话结束了
+                    // 文件模式没有 Tap 可重挂；文件长时间没长，多半是通话结束了
                     ch->lastFrameChangeAt = now;
                 } else {
                     // 只重挂同一个 PID，不再乱换 -2/-1/-3：
                     // 换到 -3 会把麦克风声音当“对方”，还会把通道语言切成中文。
-                    CCLogf(@"%@: audio stalled (frames=%llu aq=%llu lastAQ=%.2fs route=%@), restarting tap pid=%d",
+                    CCLogf(@"%@: audio stalled (frames=%llu aq=%llu lastAQ=%.2fs threshold=%.0fs route=%@), restarting tap pid=%d",
                            ch.tag, (unsigned long long)ch->frames,
                            (unsigned long long)ch->aqCalls,
                            ch->lastAQAt > 0 ? now - ch->lastAQAt : -1.0,
-                           CCAudioRouteDesc(), ch.tapPID);
+                           tapStallSec, CCAudioRouteDesc(), ch.tapPID);
                     [ch stop];
                     ch->lastAttempt = 0;
                     ch->lastFrameChangeAt = now;

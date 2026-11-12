@@ -16,6 +16,10 @@
 #import <stdio.h>
 #import <stdlib.h>
 #import <string.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netdb.h>
+#include <arpa/inet.h>
 
 // ---------- 16k s16 单生产者/单消费者环形缓冲 ----------
 typedef struct {
@@ -74,6 +78,38 @@ static NSUInteger CCRingRead(CCTCRing *r, int16_t *dst, NSUInteger max) {
     for (NSUInteger i = 0; i < n; i++) dst[i] = r->buf[(tail + (uint32_t)i) % r->cap];
     atomic_store(&r->tail, tail + (uint32_t)n);
     return n;
+}
+
+// v0.20.7：积压熔断。保留最新 keep 个样本，丢掉更老的积压，
+// 让识别从“现在”继续，而不是永远晚 10 秒。producer 只推进 head，
+// consumer 只推进 tail，这里把 tail 原子跳到 head-keep，安全。
+static void CCRingDropToNewest(CCTCRing *r, uint32_t keep) {
+    if (!r->buf || !r->cap) return;
+    uint32_t head = atomic_load(&r->head);
+    uint32_t tail = atomic_load(&r->tail);
+    if (head - tail <= keep) return;
+    atomic_store(&r->tail, head - keep);
+}
+
+// v0.20.7 诊断：记录腾讯接入 IP，区分“同一 Wi-Fi 但节点/路由变了”。
+static NSString *CCResolveHost(NSString *host) {
+    if (!host.length) return nil;
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo *res = NULL;
+    if (getaddrinfo(host.UTF8String, "443", &hints, &res) != 0 || !res) return nil;
+    char buf[INET6_ADDRSTRLEN] = {0};
+    if (res->ai_family == AF_INET) {
+        struct sockaddr_in *sa = (struct sockaddr_in *)res->ai_addr;
+        inet_ntop(AF_INET, &sa->sin_addr, buf, sizeof(buf));
+    } else if (res->ai_family == AF_INET6) {
+        struct sockaddr_in6 *sa = (struct sockaddr_in6 *)res->ai_addr;
+        inet_ntop(AF_INET6, &sa->sin6_addr, buf, sizeof(buf));
+    }
+    freeaddrinfo(res);
+    return buf[0] ? [NSString stringWithUTF8String:buf] : nil;
 }
 
 // ---------- 字符串/签名 ----------
@@ -175,6 +211,14 @@ static void CCTencentResetUplinkMarker(void) {
     CFAbsoluteTime lastTextAt;       // v0.19.6：最近一次文本结果
     int sentReal;                    // v0.19.6：连续发送的真实音频包数（5/s）
     _Atomic(int) inFlight;           // v0.19.6：未完成的 WS 发送数
+    uint64_t txPackets;              // v0.20.7：本次连接已发包数
+    uint64_t txBytes;                // v0.20.7：本次连接已发字节
+    CFAbsoluteTime handshakeAt;      // v0.20.7：握手开始时间
+    double handshakeMs;              // v0.20.7：握手耗时
+    CFAbsoluteTime highBacklogSince; // v0.20.7：backlog 持续 >4s 的起点
+    CFAbsoluteTime lastDropAt;       // v0.20.7：上次熔断时间（30s 滞回）
+    double maxLag;                   // v0.20.7：5s 窗口内最大 send lag
+    int curMaxInFlight;              // v0.20.7：自适应在途上限（1/2，带滞回）
     double nextRetryDelay;           // v0.19.3：6001 时快速重连
     NSString *lastPartialSrc;
     NSString *lastPartialTgt;
@@ -312,9 +356,24 @@ static void CCTencentResetUplinkMarker(void) {
     cfg.timeoutIntervalForRequest = 15.0;
     cfg.timeoutIntervalForResource = 3600.0;
     sess = [NSURLSession sessionWithConfiguration:cfg];
+    txPackets = 0;
+    txBytes = 0;
+    maxLag = 0;
+    highBacklogSince = 0;
+    lastDropAt = 0;
+    curMaxInFlight = 1;
+    handshakeMs = 0;
+    handshakeAt = CFAbsoluteTimeGetCurrent();
     task = [sess webSocketTaskWithURL:url];
     [task resume];
     CCLogf(@"tencent %@ opened", tag);
+    // v0.20.7 诊断：异步解析接入 IP，不阻塞 WS 启动。
+    NSString *host = url.host;
+    NSString *tg = [tag copy];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSString *ip = CCResolveHost(host);
+        if (ip.length) CCLogf(@"tencent %@ dns %@ -> %@", tg, host, ip);
+    });
     [self receiveNext];
     __weak CCTencentSession *weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)),
@@ -372,7 +431,10 @@ static void CCTencentResetUplinkMarker(void) {
             lastTextAt = CFAbsoluteTimeGetCurrent();
             sentReal = 0;
             atomic_store(&inFlight, 0);
-            CCLogf(@"tencent %@ open code=0 (ring cleared)", tag);
+            handshakeMs = handshakeAt > 0
+                        ? (CFAbsoluteTimeGetCurrent() - handshakeAt) * 1000.0 : 0;
+            CCLogf(@"tencent %@ open code=0 handshake=%.0fms (ring cleared)",
+                   tag, handshakeMs);
             CCASendState(isLocal ? @"● 腾讯我方已连接" : @"● 腾讯对方已连接");
             [self startTimer];
         } else {
@@ -553,22 +615,53 @@ static void CCTencentResetUplinkMarker(void) {
 - (void)sendTick {
     if (!connected || ending || !task) return;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    CCTCRing *ring = isLocal ? &g_localRing : &g_remoteRing;
+    uint32_t backlogMs = CCRingUsed(ring) / 16;
+
+    // v0.20.7：积压熔断。持续 5 秒 >4s 才动手，30 秒滞回，避免边缘链路抖动。
+    // 保留最新 0.3 秒（4800 samples），丢掉更老的积压：10 秒延迟的字幕没有
+    // 使用价值，主动跳到实时比永远晚 10 秒、且新音频被 ring 丢掉更好。
+    if (asrMode) {
+        if (backlogMs > 4000) {
+            if (now - lastDropAt > 30.0) {
+                if (highBacklogSince <= 0) highBacklogSince = now;
+                else if (now - highBacklogSince >= 5.0) {
+                    CCRingDropToNewest(ring, 4800);
+                    CCLogf(@"tencent %@ backlog drop %ums -> keep 300ms",
+                           tag, backlogMs);
+                    highBacklogSince = 0;
+                    lastDropAt = now;
+                    backlogMs = CCRingUsed(ring) / 16;
+                }
+            } else {
+                highBacklogSince = 0;
+            }
+        } else {
+            highBacklogSince = 0;
+        }
+    }
+
     if (now - lastBacklogLog >= 5.0) {
         lastBacklogLog = now;
-        CCLogf(@"tencent %@ backlog=%ums inflight=%d sentReal=%d noText=%.1fs",
-               tag, (unsigned)(CCRingUsed(isLocal ? &g_localRing : &g_remoteRing) / 16),
-               atomic_load(&inFlight), sentReal,
-               lastTextAt > 0 ? now - lastTextAt : 0);
+        CCLogf(@"tencent %@ backlog=%ums inflight=%d sentReal=%d noText=%.1fs tx=%llu/%lluKB lagMax=%.1fs",
+               tag, backlogMs, atomic_load(&inFlight), sentReal,
+               lastTextAt > 0 ? now - lastTextAt : 0,
+               (unsigned long long)txPackets,
+               (unsigned long long)(txBytes / 1024), maxLag);
+        maxLag = 0;
     }
-    // v0.20.0 B1：ASR 只允许一个发送在途，避免服务端慢时把几十秒音频
-    // 排进 socket，恢复时突发触发 4000/6000。慢的时候 ring 会积压。
-    if (asrMode && atomic_load(&inFlight) > 0) return;
-    // v0.19.8：看门狗改成“只记录、不重连”，并且只统计真正的语音包。
-    // 0.19.6/0.19.7 的 12 秒重连会把上一通/本条流的内容直接丢掉；
-    // 用户明确要求“不能漏掉通话内容”，所以这里不再自动 reconnect。
-    // 队列/服务端慢只写日志，由人决定是否挂断或改设置。
+    // v0.20.7：正常只允许 1 包在途；backlog >1.5s 时允许第 2 包。
+    // 仍然是 200ms 一个 tick、每 tick 最多一包，不做“突发追回”，
+    // 避免腾讯 4000/6000。2 包可覆盖约 400ms RTT。
+    // 带滞回：>1.5s 升到 2，<0.3s 才降回 1，避免在阈值附近来回抖。
+    if (asrMode) {
+        if (backlogMs > 1500) curMaxInFlight = 2;
+        else if (backlogMs < 300) curMaxInFlight = 1;
+        if (atomic_load(&inFlight) >= curMaxInFlight) return;
+    }
+    // v0.19.8：看门狗只记录、不重连；真正的恢复靠上面的熔断/2 包。
     int16_t buf[3200];
-    NSUInteger got = CCRingRead(isLocal ? &g_localRing : &g_remoteRing, buf, 3200);
+    NSUInteger got = CCRingRead(ring, buf, 3200);
     if (got < 3200) memset(buf + got, 0, (3200 - got) * sizeof(int16_t));
     double absSum = 0;
     for (NSUInteger i = 0; i < 3200; i++) {
@@ -577,7 +670,6 @@ static void CCTencentResetUplinkMarker(void) {
     }
     double pktRms = absSum / 3200.0 / 32768.0;
     // 只有明显高于底噪的包才算“真实语音”；静音/底噪把计数清零。
-    // 这样不会再出现“安静 12 秒也被看成 12 秒语音”的误判。
     if (got > 0 && pktRms > 0.004) sentReal++; else sentReal = 0;
     NSData *d = nil;
     if (sampleRate == 8000) {
@@ -593,6 +685,8 @@ static void CCTencentResetUplinkMarker(void) {
     NSURLSessionWebSocketTask *t = task;
     NSURLSessionWebSocketMessage *m =
         [[NSURLSessionWebSocketMessage alloc] initWithData:d];
+    txPackets++;
+    txBytes += d.length;
     CFAbsoluteTime sendAt = CFAbsoluteTimeGetCurrent();
     atomic_fetch_add(&inFlight, 1);
     __weak CCTencentSession *weakSelf = self;
@@ -603,6 +697,7 @@ static void CCTencentResetUplinkMarker(void) {
         dispatch_async(self->q, ^{
             CCTencentSession *s = ws;
             if (!s || s->ending || s->task != t) return;
+            if (lag > s->maxLag) s->maxLag = lag;
             if (lag > 2.0)
                 CCLogf(@"tencent %@ send lag %.1fs inflight=%d", s->tag, lag,
                        atomic_load(&s->inFlight));

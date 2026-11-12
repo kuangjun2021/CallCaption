@@ -322,6 +322,13 @@ static BOOL CCASREndsSentence(NSString *s) {
     return (c == '.' || c == '?' || c == '!' ||
             c == 0x3002 || c == 0xFF1F || c == 0xFF01);   // 。？！
 }
+// 有意义的一字回答，允许单独送翻译（对/好/是/行/嗯/啊/哦）。
+static BOOL CCASRMeaningfulShort(NSString *s) {
+    if (s.length != 1) return NO;
+    unichar c = [s characterAtIndex:0];
+    return (c == 0x5BF9 || c == 0x597D || c == 0x662F ||
+            c == 0x884C || c == 0x55EF || c == 0x554A || c == 0x54E6);
+}
 // 字符级差集：ASR 改写句首时，只交付真正新增的后缀；对不上就等下一次。
 static NSString *CCASRTail(NSString *full, NSString *delivered) {
     if (!full.length) return @"";
@@ -355,6 +362,7 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
     CFAbsoluteTime lastTextAt;
     CFAbsoluteTime lastDeliverAt;
     CFAbsoluteTime lastPartialAt;
+    CFAbsoluteTime lastPartialLog;
     CFAbsoluteTime nextRetryAt;
     CFAbsoluteTime suspendedUntil;
     BOOL running;
@@ -388,6 +396,7 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
     lastTextAt = 0;
     lastDeliverAt = 0;
     lastPartialAt = 0;
+    lastPartialLog = 0;
     offset = 44;
     text = @"";
     delivered = @"";
@@ -438,6 +447,7 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
     lastTextAt = now;
     lastDeliverAt = now;
     lastPartialAt = 0;
+    lastPartialLog = 0;
     CCLogf(@"local asr: task start loc=%@ auth=%ld supportOD=%d",
            loc, (long)auth, recog.supportsOnDeviceRecognition);
     __weak CCLocalASR *weakSelf = self;
@@ -475,6 +485,11 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
             lastPartial = tail;
             lastPartialAt = now;
             CCTransportSendLine([@"LI|" stringByAppendingString:tail]);
+        }
+        if (now - lastPartialLog >= 1.0) {
+            lastPartialLog = now;
+            CCLogf(@"local asr: partial +%.1fs: %@",
+                   now - sessionStart, t);
         }
     }
     if (res.isFinal) {
@@ -563,6 +578,10 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
     NSString *full = text;
     NSString *tail = CCASRTail(full, delivered);
     if (!tail.length) return;
+    // v0.21.1：单字碎片（如“路”）不送 DeepL/TTS，等下一段合并；否则
+    // 对方会听到 “Road” 这种完全无关的英文。
+    if (CCASRUnits(tail) < 2 && !CCASREndsSentence(tail) &&
+        !CCASRMeaningfulShort(tail)) return;
     delivered = full;
     lastDeliverAt = CFAbsoluteTimeGetCurrent();
     CCLogf(@"local asr: deliver (silence %.2fs): %@",
@@ -579,7 +598,7 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
     BOOL ended = NO;
     if (CCASREndsSentence(tail) && silence >= 0.30) ended = YES;
     else if (silence >= 0.80 && units >= 4) ended = YES;
-    else if (silence >= 1.80) ended = YES;
+    else if (silence >= 1.80 && (units >= 2 || CCASRMeaningfulShort(tail))) ended = YES;
     else if (lastDeliverAt > 0 && now - lastDeliverAt >= 15.0 && units >= 4) ended = YES;
     if (ended) [self deliverNow];
 }
@@ -587,9 +606,11 @@ static NSString *CCASRTail(NSString *full, NSString *delivered) {
 - (void)maybeRotate:(CFAbsoluteTime)now {
     if (!req || rotating) return;
     double age = now - sessionStart;
-    if (age <= 55.0) return;
+    // v0.21.1：on-device 没有服务端 60 秒硬限制（lab 单会话 150 秒无错）。
+    // 55 秒轮换会让第二段 SFSpeech 任务停止出字；改为 8 分钟后在静音处轮换。
+    if (age <= 480.0) return;
     double stable = now - lastTextAt;
-    if (stable > 0.8 || age > 58.0) {
+    if (stable > 0.8 || age > 540.0) {
         CCLogf(@"local asr: rotate at %.0fs", age);
         [self deliverNow];
         rotating = YES;
@@ -1147,7 +1168,23 @@ static void CCLocalTeeOpen(void) {
     NSString *p = [CC_DIR stringByAppendingPathComponent:@"local16k.wav"];
     NSDictionary *at = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:nil];
     unsigned long long oldBytes = at ? [at[NSFileSize] unsignedLongLongValue] : 0;
-    CCLogf(@"local tee open path=%@ existing=%llu bytes (fopen wb -> truncate)",
+    // v0.21.1：Tap 中途重挂时不要截断 local16k.wav。旧代码 fopen("wb") 会把
+    // 前半通音频清掉，正在跑的本地 SFSpeech 看到文件变短就重置文本，导致
+    // 重挂后的第一句拼坏。新通话的 arm 会先删文件，所以这里 existing>44
+    // 一定是同一通的 Tap 重挂，直接追加。
+    if (oldBytes > 44) {
+        g_localTee = fopen(p.fileSystemRepresentation, "r+b");
+        if (g_localTee) {
+            fseek(g_localTee, 0, SEEK_END);
+            g_localTeeBytes = oldBytes - 44;
+            g_localTeePhase = 0;
+            CCLogf(@"local tee open path=%@ existing=%llu bytes (append, no truncate)",
+                   p.lastPathComponent, oldBytes);
+            chmod(p.fileSystemRepresentation, 0666);
+            return;
+        }
+    }
+    CCLogf(@"local tee open path=%@ existing=%llu bytes (new file)",
            p.lastPathComponent, oldBytes);
     g_localTee = fopen(p.fileSystemRepresentation, "wb");
     if (!g_localTee) {

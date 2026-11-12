@@ -1028,6 +1028,8 @@ static void CCUIHandleCallActive(BOOL active) {
 
     if (active) {
         // 新一通：序号 +1，取消上一通的 grace，清掉旧字幕。
+        // 会话已经在 ringing 阶段由 prepare 激活；这里只 arm，不再 setActive。
+        CCSetPrepared(NO);
         g_callSeq++;
         g_graceActive = NO;
         [g_graceTimer invalidate];
@@ -1054,6 +1056,7 @@ static void CCUIHandleCallActive(BOOL active) {
         [CCUIHelper refreshPanel];
         CCLogf(@"call seq=%lu armed=1", (unsigned long)g_callSeq);
     } else {
+        CCSetPrepared(NO);
         if (g_sessionActive) {
             g_sessionActive = NO;
             CCSetArmed(NO);
@@ -1090,6 +1093,9 @@ static void CCUIRingingNow(void) {
     if (g_callActive) return;   // 通话保持中（呼叫等待）不动当前字幕
     EnsureUI();
     g_ringing = YES;
+    // v0.20.5：在对方接通前先把守护进程音频会话打开（只 setActive，
+    // 不 arm、不启动 ASR）。这样接通时不用再激活，避免打断通话音频。
+    CCSetPrepared(YES);
     // 新一通正在拨号/响铃：取消上一通 grace，清屏，但保留地球。
     g_graceActive = NO;
     [g_graceTimer invalidate];
@@ -1113,6 +1119,7 @@ static void CCUIRingingNow(void) {
 static void CCUIIdleNow(void) {
     if (g_callActive) return;
     g_ringing = NO;
+    CCSetPrepared(NO);
     EnsureUI();
     g_graceActive = NO;
     [g_graceTimer invalidate];

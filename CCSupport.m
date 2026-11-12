@@ -241,6 +241,27 @@ void CCSetArmed(BOOL armed) {
     } @catch (NSException *e) { }
 }
 
+// v0.20.5：拨号/响铃阶段预先激活守护进程的音频会话。
+// 只写 prepare 文件，不写 armed；守护进程只 setActive，不启动 ASR/麦克风。
+void CCSetPrepared(BOOL prepared) {
+    @try {
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if (prepared && ![fm fileExistsAtPath:CC_DIR]) {
+            [fm createDirectoryAtPath:CC_DIR withIntermediateDirectories:YES
+                            attributes:@{NSFilePosixPermissions: @0777} error:nil];
+        }
+        if (prepared) {
+            [@"" writeToFile:CC_PREPARE_PATH atomically:YES
+                    encoding:NSUTF8StringEncoding error:nil];
+            [fm setAttributes:@{NSFilePosixPermissions: @0666}
+                   ofItemAtPath:CC_PREPARE_PATH error:nil];
+        } else {
+            [fm removeItemAtPath:CC_PREPARE_PATH error:nil];
+        }
+        CCPostNotif(prepared ? @"prepare" : @"unprepare");
+    } @catch (NSException *e) { }
+}
+
 void CCSetPrefBool(NSString *key, BOOL value) {
     @try {
         // v0.13.16: 面板按钮也直接写守护进程读取的 mobile plist。

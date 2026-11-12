@@ -1494,10 +1494,14 @@ static void CheckArm(void) {
 
         static BOOL lastArmed = NO;
         BOOL armed = [[NSFileManager defaultManager] fileExistsAtPath:CC_ARM_PATH];
+        // v0.20.5：ringing 阶段先激活会话（不启动 ASR）。这样接通 arm 时
+        // 不需要再 setActive，避免打断 WhatsApp 已建立的音频路由。
+        BOOL prepared = [[NSFileManager defaultManager] fileExistsAtPath:CC_PREPARE_PATH];
+        if (prepared && !g_daemonAudioActive) CCAudioSessionSetActive(YES);
         BOOL wasArmed = lastArmed;
         if (armed && !lastArmed) {
             // 新通话：重置 Tap 探测，从 speaker(-2) 开始，最多试 -1 / -3。
-            // boot 已激活；只有上一通挂断释放过，这里才重新激活。
+            // 正常情况下 prepare 已激活；这里只是漏掉 prepare 时的兜底。
             CCAudioSessionSetActive(YES);
             g_remote->tapProbeCount = 0;
             g_remoteCallStarted = YES;
@@ -1577,7 +1581,9 @@ static void CheckArm(void) {
             }
             [g_remote stop];
             [g_local stop];
-            if (wasArmed) CCAudioSessionSetActive(NO);
+            // prepared=1 表示还在拨号/响铃，会话要留给即将接通的通话；
+            // prepared=0 才是真正挂断/响铃取消，这时释放。
+            if (!prepared) CCAudioSessionSetActive(NO);
             return;
         }
 
@@ -1812,11 +1818,15 @@ int main(int argc, char *argv[]) {
         // LCT 的 livecallhelper 在识别前会配置 AVAudioSession（SoloAmbient/Default）；
         // 我们的守护进程以前没做这一步，补上。
         @try {
-            // v0.20.3：保持 0.20.0 的 boot 激活（通话效果一致），
-            // 挂断时由 CheckArm 释放，解决微信被占用。
-            CCAudioSessionSetActive(YES);
+            // v0.20.5：boot 只设置 category，不激活会话。第一次/第二次通话
+            // 都由 SpringBoard 在拨号/响铃阶段写 prepare，守护进程提前
+            // setActive；这样接通时不会打断音频路由，空闲时也不占微信。
             AVAudioSession *sess = [AVAudioSession sharedInstance];
-            CCLogf(@"audio session: cat=%@ mode=%@ (boot active, release on hangup)",
+            [sess setCategory:AVAudioSessionCategorySoloAmbient
+                         mode:AVAudioSessionModeDefault
+                      options:0
+                        error:nil];
+            CCLogf(@"audio session: cat=%@ mode=%@ (boot idle; activate on prepare)",
                    sess.category, sess.mode);
         } @catch (NSException *e) {
             CCLogf(@"audio session exc %@", e.reason);

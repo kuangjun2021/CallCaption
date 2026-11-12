@@ -10,6 +10,11 @@
 #define CC_LOG_PATH       @"/var/mobile/Library/CallCaption/probe.log"
 #define CC_SPOOL_PATH     @"/var/mobile/Library/CallCaption/spool.txt"
 #define CC_ARM_PATH       @"/var/mobile/Library/CallCaption/armed"   // v0.10: 采集开关（SB 创建/删除，守护进程监视）
+// v0.20.5：拨号/响铃阶段预先激活守护进程的 AVAudioSession。
+// 不能等到接通后才 setActive：那会打断 WhatsApp 已建立的音频路由，
+// 第二次通话出现 local tap 停帧、远端 WAV 只写一半。SB 在 ringing 写，
+// 守护进程只激活会话、不启动 ASR；接通后才 arm。
+#define CC_PREPARE_PATH   @"/var/mobile/Library/CallCaption/prepare"
 
 // ---------- 设置键（与 PreferenceLoader 面板一致） ----------
 #define CC_K_ENABLED          @"Enabled"          // 总开关
@@ -127,6 +132,7 @@ void CCMicStop(void);
 
 // ---------- v0.10 新架构：独立音频守护进程（系统级 Tap） ----------
 void CCSetArmed(BOOL armed);          // SB 侧：写/删 armed 文件并广播通知
+void CCSetPrepared(BOOL prepared);    // v0.20.5：SB 侧：ringing 预先激活音频会话（不 arm）
 void CCUISpeakText(NSString *text);   // SB 侧：中文 TTS 播报
 
 // ---------- UI（SpringBoard 侧） ----------

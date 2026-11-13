@@ -9,6 +9,7 @@
 // 日志通道：mediaserverd 沙盒写不了 /var/mobile/...，但 /tmp 可以写！
 // alpha4 的 /tmp/ccaudiohook.log 证明了注入和文件日志都正常，
 // 只有 Darwin 通知会被沙盒挡掉，所以这里以 /tmp 文件为主。
+#import "CCCommon.h"
 #import <Foundation/Foundation.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <AudioUnit/AudioUnit.h>

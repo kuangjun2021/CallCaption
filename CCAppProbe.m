@@ -10,6 +10,7 @@
 //   - 记录每个单元的 StreamFormat（采样率/声道/位宽/格式标志）；
 //   - 按真实格式换算样本、算 RMS；
 //   - 把回调音频录成 WAV 放到 App 的 Documents 里，可以直接试听确认是不是对方声音。
+#import "CCCommon.h"
 #import <Foundation/Foundation.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <AudioUnit/AudioUnit.h>

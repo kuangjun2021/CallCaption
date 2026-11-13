@@ -1610,7 +1610,7 @@ static void CCStartASROfflineTest(void) {
     else CCLogf(@"asr selftest spawn failed %d", r);
 }
 static void CCPollASRSelfTest(void) {
-    NSString *marker = [CC_DIR stringByAppendingPathComponent:@"asr_selftest"];
+    NSString *marker = [CC_DIR stringByAppendingPathComponent:@".asr_selftest"];
     NSFileManager *fm = [NSFileManager defaultManager];
     if ([fm fileExistsAtPath:marker]) {
         [fm removeItemAtPath:marker error:nil];
@@ -1625,6 +1625,17 @@ static void CheckArm(void) {
         if (now - g_lastPrefsLoad > 2.0) {
             g_lastPrefsLoad = now;
             CCPrefsReload();
+        }
+        // 心跳：Settings 用它判断 Pro daemon 是否真的是新版本在跑。
+        // 覆盖安装后旧 pro0.1 daemon 若没被 bootout，会看不到 asr_selftest。
+        static CFAbsoluteTime lastHb;
+        if (now - lastHb > 15.0) {
+            lastHb = now;
+            NSString *hb = [NSString stringWithFormat:@"%.0f pro1.2\n",
+                            [[NSDate date] timeIntervalSince1970]];
+            NSString *hp = [CC_DIR stringByAppendingPathComponent:@"daemon.heartbeat"];
+            [hb writeToFile:hp atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            chmod(hp.fileSystemRepresentation, 0666);
         }
         CCPollASRSelfTest();
         // helper 异常退出时留下日志（崩溃/模型加载失败/dylib 缺失），
@@ -1988,7 +1999,11 @@ int main(int argc, char *argv[]) {
                             attributes:@{NSFilePosixPermissions: @0777} error:nil];
         }
         CCPrefsReload();
+#ifdef CC_PRO
+        CCLogLine(@"audioservice started (pro1.2)");
+#else
         CCLogLine(@"audioservice started (v0.17.0)");
+#endif
         // LCT 的 livecallhelper 在识别前会配置 AVAudioSession（SoloAmbient/Default）；
         // 我们的守护进程以前没做这一步，补上。
         @try {

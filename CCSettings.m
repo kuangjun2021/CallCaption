@@ -1116,7 +1116,7 @@ static NSString *CCApiTextFromJSON(NSString *engine, id json) {
 
 - (void)runCPUASRTest {
     NSString *dir = @"/var/mobile/Library/CallCaptionPro";
-    NSString *marker = [dir stringByAppendingPathComponent:@"asr_selftest"];
+    NSString *marker = [dir stringByAppendingPathComponent:@".asr_selftest"];
     NSString *wav = [dir stringByAppendingPathComponent:@"local16k.wav"];
     NSString *model = [dir stringByAppendingPathComponent:
                        @"models/x-asr-480ms/encoder.int8.onnx"];
@@ -1124,12 +1124,23 @@ static NSString *CCApiTextFromJSON(NSString *engine, id json) {
     [fm createDirectoryAtPath:dir withIntermediateDirectories:YES
                    attributes:nil error:nil];
     NSString *msg;
-    if (![fm fileExistsAtPath:model]) {
+    // 覆盖安装后若还是 pro0.1 daemon 在跑，它不会消费 marker；
+    // 用 daemon 心跳先识别“旧 daemon/没启动”，避免误报“已启动”。
+    NSString *hb = [dir stringByAppendingPathComponent:@"daemon.heartbeat"];
+    NSDate *hbAt = [fm attributesOfItemAtPath:hb error:nil][NSFileModificationDate];
+    BOOL daemonOK = hbAt && [[NSDate date] timeIntervalSinceDate:hbAt] < 60.0;
+    if (!daemonOK) {
+        msg = @"Pro 音频守护进程未运行，或仍是旧版本。\n"
+               "请重启手机后再试；若仍不行，重新安装 pro1.2。";
+    } else if (![fm fileExistsAtPath:model]) {
         msg = @"模型未安装。请先安装 CallCaptionPro Models（x-asr-480ms）。";
     } else if (![fm fileExistsAtPath:wav] &&
                ![fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"selftest16k.wav"]]) {
         msg = @"没有测试音频（local16k.wav / selftest16k.wav 都不存在）。";
     } else {
+        // 清掉旧版残留的可见 marker/空结果，避免被误当成测试结果
+        [fm removeItemAtPath:[dir stringByAppendingPathComponent:@"asr_selftest"] error:nil];
+        [fm removeItemAtPath:[dir stringByAppendingPathComponent:@"asr_test.txt"] error:nil];
         [@"" writeToFile:marker atomically:YES
                 encoding:NSUTF8StringEncoding error:nil];
         msg = @"已启动 CPU ASR 离线测试：首次加载 169MB 模型约 20–60 秒。\n"

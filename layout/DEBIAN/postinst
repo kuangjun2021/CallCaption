@@ -1,5 +1,5 @@
 #!/bin/sh
-# CallCaption Pro 1.0.0-pro1.1
+# CallCaption Pro 1.0.0-pro1.2
 # 独立包：安装时暂停稳定版（0.20.7.1）的注入/守护进程/设置入口，
 # 卸载时自动恢复稳定版。稳定版文件、配置、日志都不删除。
 JB=/var/jb
@@ -58,10 +58,17 @@ fi
 "$KILLALL" -9 Preferences >/dev/null 2>&1 || true
 
 # 启动 Pro daemon
+# 覆盖安装时同名 label 可能还在跑 pro0.1；bootstrap 会失败，旧进程继续运行。
+# killall 对超过 15 字符的进程名不可靠，必须先按 label bootout 再 bootstrap。
+launchctl bootout system/net.user.callcaptionpro.audioservice >/dev/null 2>&1 || true
+sleep 1
+launchctl enable system/net.user.callcaptionpro.audioservice >/dev/null 2>&1 || true
 launchctl bootstrap system "$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist" >/dev/null 2>&1 \
   || launchctl load "$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist" >/dev/null 2>&1 \
   || true
-"$KILLALL" -9 CallCaptionProAudioService >/dev/null 2>&1 || true
+sleep 1
+launchctl print system/net.user.callcaptionpro.audioservice 2>/dev/null \
+  | grep -E "state =|pid =" >> "$LOG" 2>/dev/null || true
 
 # 让 Pro SpringBoard/AppProbe 立刻加载
 "$KILLALL" -9 WhatsApp >/dev/null 2>&1 || true

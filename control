@@ -1,7 +1,7 @@
 Package: net.user.callcaptionpro
 Name: CallCaption Pro
 Depends: mobilesubstrate
-Version: 1.0.0-pro1.1
+Version: 1.0.0-pro1.2
 Architecture: iphoneos-arm64
 Description: CallCaption Pro - independent CPU ASR / Sherpa experiment build. Personal use.
 Maintainer: user <user@localhost>

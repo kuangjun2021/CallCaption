@@ -9,10 +9,12 @@
 #define CC_DOMAIN @"net.user.callcaptionpro"
 #define CC_NOTIF  @"net.user.callcaptionpro.prefschanged"
 #define CC_PREFS_PATH @"/var/mobile/Library/Preferences/net.user.callcaptionpro.plist"
+#define CC_LOG_PATH @"/var/mobile/Library/CallCaptionPro/probe.log"
 #else
 #define CC_DOMAIN @"net.user.callcaption"
 #define CC_NOTIF  @"net.user.callcaption.prefschanged"
 #define CC_PREFS_PATH @"/var/mobile/Library/Preferences/net.user.callcaption.plist"
+#define CC_LOG_PATH @"/var/mobile/Library/CallCaption/probe.log"
 #endif
 
 typedef NS_ENUM(NSInteger, CCPrefsItemKind) {
@@ -408,7 +410,11 @@ __attribute__((visibility("default")))
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+#ifdef CC_PRO
+    self.title = @"CallCaption Pro";
+#else
     self.title = @"CallCaption";
+#endif
     if (!self.embedded) {
         self.navigationItem.rightBarButtonItem =
             [[UIBarButtonItem alloc] initWithTitle:@"完成"
@@ -502,8 +508,13 @@ static void VoiceLists(NSString *prefix,
 }
 
 - (void)buildModel {
+#ifdef CC_PRO
+    NSString *enableLabel = @"启用 CallCaption Pro";
+#else
+    NSString *enableLabel = @"启用 CallCaption";
+#endif
     NSArray *func = @[
-        MkSwitch(@"Enabled", @"启用 CallCaption", YES),
+        MkSwitch(@"Enabled", enableLabel, YES),
         MkSwitch(@"RemoteEnabled", @"对方语音 → 中文字幕", YES),
         MkSwitch(@"LocalEnabled", @"双向模式：我的话 → 英文播报", YES),
         MkSwitch(@"ShowRecognized", @"显示识别原文", YES),
@@ -583,6 +594,9 @@ static void VoiceLists(NSString *prefix,
     self.sectionTitles = @[@"功能开关", @"腾讯实时翻译（D+）", @"语言", @"原音音量", @"翻译引擎",
                            @"AI 自定义接口（OpenAI 兼容）", @"接口测试",
                            @"播报音色", @"诊断"];
+    NSString *logFooter = [NSString stringWithFormat:
+        @"日志：%@。Tap 断流重启阈值：音频帧停止增长超过该秒数就重挂 Tap，4 秒兼顾首通恢复和误判。",
+        CC_LOG_PATH];
     self.sectionFooters = @[
         @"通话接通后自动激活，屏幕出现小地球；点地球展开面板，再点面板里的地球可关闭/开启翻译。面板外任意位置点击自动收起。",
         @"B1 模式：腾讯只做实时 ASR（来电 16k_en / 去电 16k_zh）；来电用“来电翻译引擎”（默认 Google），去电用“去电翻译引擎”（默认 DeepL）。语音翻译、腾讯 TTS、SFSpeech 都不再使用，字幕和 TTS 全部在本机。AppID/SecretId/SecretKey 从腾讯云 CAM 获取；SecretKey 只存本机。翻译引擎需要对应 Key（Google/DeepL/AI）在下面“翻译引擎”里配置。断句静音越短字幕越快但更碎。",
@@ -592,7 +606,7 @@ static void VoiceLists(NSString *prefix,
         @"填写 chat/completions 完整地址、Key 与模型名，例如 DeepSeek。",
         @"分别请求 DeepL / Google / AI / MyMemory 一次（Hello 英译中），检查 Key 和网络是否可用。",
         @"列表来自系统已安装语音。中文用于对方字幕播报，英文用于我方双向播报。",
-        @"日志：/var/mobile/Library/CallCaption/probe.log。Tap 断流重启阈值：音频帧停止增长超过该秒数就重挂 Tap，4 秒兼顾首通恢复和误判。",
+        logFooter,
     ];
 
     NSMutableArray *tr = [NSMutableArray array];
@@ -1000,21 +1014,39 @@ static NSString *CCApiTextFromJSON(NSString *engine, id json) {
 
     dispatch_group_enter(group);
     {
-        NSString *urlStr;
-        if (gk.length) {
-            urlStr = [NSString stringWithFormat:
-                @"https://translation.googleapis.com/language/translate/v2?key=%@&q=Hello&source=en&target=zh",
-                gk];
+        // v1.0.0-pro0.1：Key 先 trim，再用 NSURLComponents 自动转义；
+        // 旧代码把 Key 原样拼进 query，带空格/换行时 NSURL 非法，
+        // 系统会显示“不支持的 URL”。
+        NSString *gkTrim = [(gk ?: @"") stringByTrimmingCharactersInSet:
+                            [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        NSMutableURLRequest *req = nil;
+        if (gkTrim.length) {
+            NSURLComponents *comp = [NSURLComponents componentsWithString:
+                @"https://translation.googleapis.com/language/translate/v2"];
+            comp.queryItems = @[
+                [NSURLQueryItem queryItemWithName:@"key" value:gkTrim],
+                [NSURLQueryItem queryItemWithName:@"q" value:@"Hello"],
+                [NSURLQueryItem queryItemWithName:@"source" value:@"en"],
+                [NSURLQueryItem queryItemWithName:@"target" value:@"zh"],
+            ];
+            if (comp.URL) req = [NSMutableURLRequest requestWithURL:comp.URL];
         } else {
-            urlStr = @"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh&dt=t&q=Hello";
+            NSURL *url = [NSURL URLWithString:
+                @"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh&dt=t&q=Hello"];
+            if (url) req = [NSMutableURLRequest requestWithURL:url];
         }
-        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
-        req.timeoutInterval = 5.0;
-        [[[NSURLSession sharedSession] dataTaskWithRequest:req
-            completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-                [self ccRecordResult:res engine:@"Google" data:data resp:resp err:err];
-                dispatch_group_leave(group);
-            }] resume];
+        if (!req) {
+            res[@"Google"] = @{@"ok": @NO,
+                               @"detail": @"GoogleKey 含非法字符或 URL 为空"};
+            dispatch_group_leave(group);
+        } else {
+            req.timeoutInterval = 5.0;
+            [[[NSURLSession sharedSession] dataTaskWithRequest:req
+                completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+                    [self ccRecordResult:res engine:@"Google" data:data resp:resp err:err];
+                    dispatch_group_leave(group);
+                }] resume];
+        }
     }
 
     if (!aiURL.length || !aiKey.length) {
@@ -1077,13 +1109,14 @@ static NSString *CCApiTextFromJSON(NSString *engine, id json) {
 }
 
 - (void)presentLogMenu:(UITableViewCell *)cell {
-    NSString *path = @"/var/mobile/Library/CallCaption/probe.log";
+    NSString *path = CC_LOG_PATH;
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"诊断日志"
                                                                   message:path
                                                            preferredStyle:UIAlertControllerStyleActionSheet];
     [sheet addAction:[UIAlertAction actionWithTitle:@"用 Filza 打开" style:UIAlertActionStyleDefault
                                             handler:^(__unused UIAlertAction *a) {
-        NSURL *u = [NSURL URLWithString:@"filza://view/var/mobile/Library/CallCaption/probe.log"];
+        NSString *filza = [NSString stringWithFormat:@"filza://view%@", path];
+        NSURL *u = [NSURL URLWithString:filza];
         [[UIApplication sharedApplication] openURL:u options:@{} completionHandler:nil];
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"复制路径" style:UIAlertActionStyleDefault

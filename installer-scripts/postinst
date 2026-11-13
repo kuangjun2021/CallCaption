@@ -1,29 +1,43 @@
 #!/bin/sh
-# CallCaption Pro 1.0.0-pro2.1.13 postinst
-# 只做一次快速 launchctl，不做 chown/killall/后台任务，也不杀 SpringBoard。
-# 稳定版禁用已移到 preinst，保证这个脚本能在 Sileo 注销前正常结束。
+# CallCaption Pro 1.0.0-pro2.1.14 postinst
+#
+# 安装脚本必须快速、完整地结束。这里只做两件事：
+#   1. 确保 Pro 运行目录可写；
+#   2. 启动/重启 Pro 守护进程。
+# 不杀 Preferences / WhatsApp / SpringBoard，不做 sleep 轮询，
+# 这样 Sileo 才能正常显示“执行→完成→手动注销”。
 set +e
 
 JB=/var/jb
-LOG=/var/mobile/Library/CallCaptionPro/install.log
-mkdir -p /var/mobile/Library/CallCaptionPro 2>/dev/null || true
-chown mobile:mobile /var/mobile/Library/CallCaptionPro 2>/dev/null || true
+DIR=/var/mobile/Library/CallCaptionPro
+LOG="$DIR/install.log"
+
+mkdir -p "$DIR" 2>/dev/null || true
+chown mobile:mobile "$DIR" 2>/dev/null || true
+chmod 0755 "$DIR" 2>/dev/null || true
+: >> "$LOG" 2>/dev/null || true
 chmod 0666 "$LOG" 2>/dev/null || true
 
 log() { echo "[$(date '+%F %T')] $*" >> "$LOG" 2>/dev/null || true; }
+
 LABEL=net.user.callcaptionpro.audioservice
 PLIST="$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist"
 
-log "pro postinst start"
+log "pro postinst start (2.1.14)"
 
-launchctl kickstart -k "system/$LABEL" >>"$LOG" 2>&1
-RC=$?
-log "kickstart rc=$RC"
-if [ "$RC" -ne 0 ]; then
+launchctl enable "system/$LABEL" >/dev/null 2>&1 || true
+if launchctl print "system/$LABEL" >/dev/null 2>&1; then
+  launchctl kickstart -k "system/$LABEL" >>"$LOG" 2>&1
+  log "kickstart rc=$?"
+else
   launchctl bootstrap system "$PLIST" >>"$LOG" 2>&1
-  log "bootstrap rc=$?"
-  launchctl load "$PLIST" >>"$LOG" 2>&1
-  log "load rc=$?"
+  RC=$?
+  log "bootstrap rc=$RC"
+  if [ "$RC" -ne 0 ]; then
+    launchctl load "$PLIST" >>"$LOG" 2>&1
+    log "load rc=$?"
+  fi
 fi
+
 log "pro postinst done"
 exit 0

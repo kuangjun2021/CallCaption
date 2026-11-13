@@ -51,11 +51,17 @@ jobs:
       - name: Build package
         run: |
           export THEOS=$HOME/theos
+          # dpkg 要求维护者脚本可执行；Windows/Windows-worktree 提交时 exec 位可能丢失
+          chmod 0755 layout/DEBIAN/preinst layout/DEBIAN/postinst layout/DEBIAN/postrm 2>/dev/null || true
+          chmod 0644 layout/DEBIAN/control 2>/dev/null || true
           make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
       - name: Repack - relocate Pro bundle binary
         run: |
           rm -rf /tmp/rp && mkdir -p /tmp/rp
           dpkg-deb -R packages/*.deb /tmp/rp/pkg
+          # 再兜底一次：维护者脚本必须 root:root + 0755，否则安装器会报权限错误
+          chmod 0755 /tmp/rp/pkg/DEBIAN/preinst /tmp/rp/pkg/DEBIAN/postinst /tmp/rp/pkg/DEBIAN/postrm 2>/dev/null || true
+          chmod 0644 /tmp/rp/pkg/DEBIAN/control 2>/dev/null || true
           if [ -d /tmp/rp/pkg/var/jb/CallCaptionProPrefs.bundle ]; then
             mkdir -p /tmp/rp/pkg/var/jb/Library/PreferenceBundles/CallCaptionProPrefs.bundle
             mv /tmp/rp/pkg/var/jb/CallCaptionProPrefs.bundle/* /tmp/rp/pkg/var/jb/Library/PreferenceBundles/CallCaptionProPrefs.bundle/

@@ -1,0 +1,48 @@
+#!/bin/sh
+# CallCaption Pro 1.0.0-pro2.1.14 preinst
+#
+# 一次性兼容旧版 Pro：dpkg 覆盖升级时，会用 `postrm upgrade <new-version>`
+# 调用“已安装旧包”的 postrm。旧版 postrm 不判断 $1，无条件 killall SpringBoard，
+# 导致 Sileo 的“执行→完成→注销”界面在安装最后被冲掉。
+#
+# 这个脚本在 dpkg 调用旧 postrm 之前，把旧 postrm 换成一个包装器：
+# 只有真正卸载（remove/purge）才交回旧脚本，升级/中止路径一律直接退出。
+# 本次升级完成后，新包自带的 postrm 会覆盖这个包装器。
+set +e
+
+JB=/var/jb
+DIR=/var/mobile/Library/CallCaptionPro
+LOG="$DIR/install.log"
+
+mkdir -p "$DIR" 2>/dev/null || true
+chown mobile:mobile "$DIR" 2>/dev/null || true
+chmod 0755 "$DIR" 2>/dev/null || true
+chmod 0666 "$LOG" 2>/dev/null || true
+
+log() { echo "[$(date '+%F %T')] $*" >> "$LOG" 2>/dev/null || true; }
+
+for INFO in "$JB/var/lib/dpkg/info" "/var/lib/dpkg/info"; do
+  [ -d "$INFO" ] || continue
+  P="$INFO/net.user.callcaptionpro.postrm"
+  [ -f "$P" ] || continue
+  # 只处理旧版那个还会执行 `-9 SpringBoard` 的 postrm。
+  # 新版 postrm 里没有这条命令，重复升级时不会再次打补丁。
+  grep -q -- '-9 SpringBoard' "$P" 2>/dev/null || continue
+  BAK="$P.cc-old"
+  cp -f "$P" "$BAK" 2>/dev/null || continue
+  cat > "$P" <<EOF
+#!/bin/sh
+# one-shot wrapper installed by pro2.1.14 preinst.
+# dpkg 升级时会调用旧包的 postrm；除真正卸载外一律直接退出，
+# 绝不能让旧脚本在安装流程中杀 SpringBoard。
+case "\$1" in
+  remove|purge) exec /bin/sh "$BAK" "\$@" ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod 0755 "$P" 2>/dev/null
+  log "preinst patched old postrm: $P"
+done
+
+log "pro preinst done"
+exit 0

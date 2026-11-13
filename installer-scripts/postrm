@@ -1,0 +1,80 @@
+#!/bin/sh
+# CallCaption Pro 1.0.0-pro2.1.14 postrm
+#
+# 关键：dpkg 覆盖升级时会用 `postrm upgrade <new-version>` 调用
+# “已安装旧包”的 postrm。升级路径必须立即退出：
+# 不杀 SpringBoard，否则 Sileo 的安装完成页会被冲掉。
+#
+# 只有用户真正卸载（remove/purge）时才：
+#   1. 停 Pro 守护进程；
+#   2. 如果稳定版 net.user.callcaption 仍安装在系统里，才恢复它被暂停的文件。
+# 不杀 WhatsApp / SpringBoard，注销交给 Sileo 完成页的按钮。
+set +e
+
+ACTION="$1"
+case "$ACTION" in
+  remove|purge)
+    ;;
+  *)
+    # upgrade / abort-upgrade / abort-remove / disappear 等：什么都不做
+    exit 0
+    ;;
+esac
+
+JB=/var/jb
+LOG=/tmp/callcaptionpro_install.log
+log() { echo "[$(date '+%F %T')] $*" >> "$LOG" 2>/dev/null || true; }
+
+KILLALL="$JB/usr/bin/killall"
+[ -x "$KILLALL" ] || KILLALL=/usr/bin/killall
+[ -x "$KILLALL" ] || KILLALL=killall
+DPKG="$JB/usr/bin/dpkg"
+[ -x "$DPKG" ] || DPKG=/usr/bin/dpkg
+
+log "pro postrm $ACTION start"
+
+# 停 Pro daemon（只动自己的进程）
+launchctl bootout system/net.user.callcaptionpro.audioservice >/dev/null 2>&1 || true
+"$KILLALL" -9 CallCaptionProAudioService >/dev/null 2>&1 || true
+
+# 只有稳定版确实处于 installed 状态，才恢复它。
+# 避免稳定版已卸载、但 .disabled 残留被误恢复，导致重复字幕/重复守护进程。
+STABLE_INSTALLED=0
+if [ -x "$DPKG" ]; then
+  "$DPKG" -s net.user.callcaption 2>/dev/null | grep -q '^Status: install ok installed' && STABLE_INSTALLED=1
+fi
+
+if [ "$STABLE_INSTALLED" = "1" ]; then
+  for f in CallCaption.plist CallCaptionAppProbe.plist CallCaptionAudioHook.plist; do
+    P="$JB/Library/MobileSubstrate/DynamicLibraries/$f"
+    if [ -f "$P.disabled" ]; then
+      mv -f "$P.disabled" "$P" 2>/dev/null && log "restored $f"
+    fi
+  done
+
+  P="$JB/Library/LaunchDaemons/net.user.callcaption.audioservice.plist"
+  if [ -f "$P.disabled" ]; then
+    mv -f "$P.disabled" "$P" 2>/dev/null && log "restored stable daemon plist"
+  fi
+
+  P="$JB/Library/PreferenceLoader/Preferences/callcaption.plist"
+  if [ -f "$P.disabled" ]; then
+    mv -f "$P.disabled" "$P" 2>/dev/null && log "restored stable settings entry"
+  fi
+
+  launchctl enable system/net.user.callcaption.audioservice >/dev/null 2>&1 || true
+  if [ -f "$JB/Library/LaunchDaemons/net.user.callcaption.audioservice.plist" ]; then
+    if launchctl print system/net.user.callcaption.audioservice >/dev/null 2>&1; then
+      launchctl kickstart -k system/net.user.callcaption.audioservice >/dev/null 2>&1 || true
+    else
+      launchctl bootstrap system "$JB/Library/LaunchDaemons/net.user.callcaption.audioservice.plist" >/dev/null 2>&1 \
+        || launchctl load "$JB/Library/LaunchDaemons/net.user.callcaption.audioservice.plist" >/dev/null 2>&1 \
+        || true
+    fi
+  fi
+else
+  log "stable not installed; skip restore"
+fi
+
+log "pro postrm $ACTION done"
+exit 0

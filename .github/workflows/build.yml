@@ -62,6 +62,10 @@ jobs:
             rm -rf /tmp/rp/pkg/var/jb/CallCaptionProPrefs.bundle
           fi
           chmod 755 /tmp/rp/pkg/var/jb/Library/PreferenceBundles/CallCaptionProPrefs.bundle/CallCaptionProPrefs 2>/dev/null || true
+          # /var/mobile 不在 Theos rootless 布局前缀内，必须 repack 时直接放入真实路径
+          mkdir -p /tmp/rp/pkg/var/mobile/Library/CallCaptionPro
+          cp resources/selftest16k.wav /tmp/rp/pkg/var/mobile/Library/CallCaptionPro/selftest16k.wav
+          chmod 0644 /tmp/rp/pkg/var/mobile/Library/CallCaptionPro/selftest16k.wav
           dpkg-deb -b /tmp/rp/pkg /tmp/rp/fixed.deb
           mkdir -p out
           cp /tmp/rp/fixed.deb out/

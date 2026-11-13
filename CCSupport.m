@@ -194,7 +194,7 @@ void CCMark(NSString *tag) {
     @try {
         NSString *line = [NSString stringWithFormat:@"[MARK %@] %@\n",
                           [NSDate date], tag];
-        NSString *path = @"/var/mobile/Library/CallCaption/markers.log";
+        NSString *path = [CC_DIR stringByAppendingPathComponent:@"markers.log"];
         if (CCIsSpringBoard() || CCIsAudioService()) {
             NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
             if (!fh) {

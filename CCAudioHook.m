@@ -27,9 +27,15 @@ typedef void (*CCMSHookFunction)(void *symbol, void *hook, void **old);
 static CCMSHookFunction g_MSHook = NULL;
 static os_log_t g_oslog = NULL;
 
+#ifdef CC_PRO
+#define CC_HOOK_LOG CC_LOG_PATH
+#define CC_HOOK_TMP @"/tmp/ccaudiohookpro.log"
+#define CC_HOOK_OFF [CC_DIR stringByAppendingPathComponent:@"audiohook.off"]
+#else
 #define CC_HOOK_LOG @"/var/mobile/Library/CallCaption/probe.log"
 #define CC_HOOK_TMP @"/tmp/ccaudiohook.log"
 #define CC_HOOK_OFF @"/var/mobile/Library/CallCaption/audiohook.off"
+#endif
 
 typedef OSStatus (*AURenderFn)(AudioUnit, AudioUnitRenderActionFlags *,
                                const AudioTimeStamp *, UInt32, UInt32,

@@ -55,6 +55,12 @@ static void AppendSpool(NSString *line) {
         off += n;
     }
     close(fd);
+    // helper 不是 daemon，写 spool 不会经过 CCTransportSendLine，
+    // 必须自己发 Darwin 通知，SpringBoard 才会立刻 drain。
+    CFNotificationCenterPostNotification(
+        CFNotificationCenterGetDarwinNotifyCenter(),
+        (__bridge CFStringRef)[CC_NOTIF_PREFIX stringByAppendingString:@"line"],
+        NULL, NULL, true);
 }
 
 static BOOL FindDataChunk(NSData *d, NSUInteger *off, NSUInteger *len) {
@@ -150,7 +156,8 @@ int main(int argc, char **argv) {
         cfg.model_config.tokens = tokens.UTF8String;
         cfg.model_config.num_threads = 2;
         cfg.model_config.provider = "cpu";
-        cfg.model_config.model_type = "zipformer2";
+        // model_type 留空，由 transducer 文件自动判定；显式写 "zipformer2"
+        // 在 C API 里是非法 override，会导致 CreateOnlineRecognizer 失败。
         cfg.decoding_method = "greedy_search";
         cfg.max_active_paths = 4;
         cfg.enable_endpoint = 1;

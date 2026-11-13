@@ -80,6 +80,14 @@ jobs:
             'Author: user' \
             'Section: Tweaks' \
             > model-package/DEBIAN/control
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'mkdir -p /var/mobile/Library/CallCaptionPro' \
+            'chown -R mobile:mobile /var/mobile/Library/CallCaptionPro 2>/dev/null || true' \
+            'chmod 0755 /var/mobile/Library/CallCaptionPro 2>/dev/null || true' \
+            'exit 0' \
+            > model-package/DEBIAN/postinst
+          chmod 0755 model-package/DEBIAN/postinst
           curl -L --fail -o /tmp/asr-model.tar.bz2 \
             https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05.tar.bz2
           rm -rf /tmp/asr-model && mkdir -p /tmp/asr-model

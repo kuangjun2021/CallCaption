@@ -1241,7 +1241,7 @@ void CCUISpeakText(NSString *text) {
         if (dur > 20.0) dur = 20.0;
         double until = [[NSDate date] timeIntervalSince1970] + dur;
         NSString *s = [NSString stringWithFormat:@"%.3f", until];
-        [s writeToFile:@"/var/mobile/Library/CallCaption/tts_until"
+        [s writeToFile:[CC_DIR stringByAppendingPathComponent:@"tts_until"]
              atomically:YES encoding:NSUTF8StringEncoding error:nil];
     } @catch (NSException *e) { }
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -1891,7 +1891,7 @@ static void CCLocalFileTick(void) {
 // 就把识别搬进 SpringBoard，避开 daemon 环境限制。
 static void CCRunSpeechSelfTest(BOOL onDevice) {
     static int attempts;
-    NSString *p = @"/var/mobile/Library/CallCaption/selftest.wav";
+    NSString *p = [CC_DIR stringByAppendingPathComponent:@"selftest.wav"];
     if (![[NSFileManager defaultManager] fileExistsAtPath:p]) {
         attempts++;
         CCLogf(@"selftest: no selftest.wav (attempt %d)", attempts);

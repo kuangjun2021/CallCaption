@@ -1384,7 +1384,8 @@ static void CCWriteChunkWav(NSString *path, NSData *pcm) {
 static pid_t g_siriPid = 0;
 static CFAbsoluteTime g_siriLastSpawn = 0;
 static pid_t CCReadSiriPidFile(void) {
-    FILE *fp = fopen("/var/mobile/Library/CallCaption/sirihelper.pid", "r");
+    NSString *pidPath = [CC_DIR stringByAppendingPathComponent:@"sirihelper.pid"];
+    FILE *fp = fopen(pidPath.fileSystemRepresentation, "r");
     if (!fp) return 0;
     int p = 0;
     if (fscanf(fp, "%d", &p) != 1) p = 0;
@@ -1428,7 +1429,7 @@ static void CCManageSiriHelper(BOOL armed) {
     } else {
         pid_t stale = CCReadSiriPidFile();
         if (stale > 0) kill(stale, SIGKILL);
-        unlink("/var/mobile/Library/CallCaption/sirihelper.pid");
+        unlink([[CC_DIR stringByAppendingPathComponent:@"sirihelper.pid"] fileSystemRepresentation]);
         if (g_siriPid > 0) {
             kill(g_siriPid, SIGKILL);
             waitpid(g_siriPid, NULL, WNOHANG);
@@ -1576,11 +1577,17 @@ static void CCStartASRHelper(void) {
 }
 static void CCStartASROfflineTest(void) {
     if (!CCASRHelperAvailable()) return;
+    NSFileManager *fm = [NSFileManager defaultManager];
     NSString *wav = [CC_DIR stringByAppendingPathComponent:@"local16k.wav"];
-    if (![[NSFileManager defaultManager] fileExistsAtPath:wav]) {
-        CCLogf(@"asr selftest: no local16k.wav");
-        return;
+    if (![fm fileExistsAtPath:wav]) {
+        // 还没打过电话时，用主包内置的 16k 中文测试音，保证装完就能验证
+        wav = [CC_DIR stringByAppendingPathComponent:@"selftest16k.wav"];
+        if (![fm fileExistsAtPath:wav]) {
+            CCLogf(@"asr selftest: no wav (local16k/selftest16k)");
+            return;
+        }
     }
+    CCLogf(@"asr selftest wav=%@", wav.lastPathComponent);
     const char *argv[] = {
         CCASRHelperPath().UTF8String,
         "--mode", "offline",
@@ -1618,11 +1625,21 @@ static void CheckArm(void) {
             CCPrefsReload();
         }
         CCPollASRSelfTest();
+        // helper 异常退出时留下日志（崩溃/模型加载失败/dylib 缺失），
+        // 否则 g_asrPid 永远 >0，看起来像“本地识别没反应”。
+        if (g_asrPid > 0) {
+            int st = 0;
+            pid_t r = waitpid(g_asrPid, &st, WNOHANG);
+            if (r == g_asrPid) {
+                CCLogf(@"asr helper exited pid=%d status=%d", (int)g_asrPid, st);
+                g_asrPid = -1;
+            }
+        }
 
         // SB 中文播报窗口：tts_until 文件里是结束时刻（epoch 秒）
         @try {
             NSString *s = [NSString stringWithContentsOfFile:
-                           @"/var/mobile/Library/CallCaption/tts_until"
+                           [CC_DIR stringByAppendingPathComponent:@"tts_until"]
                                               encoding:NSUTF8StringEncoding error:nil];
             // 文件里是 epoch 秒；CFAbsoluteTime 起点是 2001-01-01，必须减去 978307200
             g_ttsUntil = s.length ? ([s doubleValue] - 978307200.0) : 0;

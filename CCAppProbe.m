@@ -893,7 +893,7 @@ static void CCAppProbeBoot(void) {
                        dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             @autoreleasepool {
                 if ([[NSFileManager defaultManager] fileExistsAtPath:
-                     @"/var/mobile/Library/CallCaption/appprobe.off"]) {
+                     [CC_DIR stringByAppendingPathComponent:@"appprobe.off"]]) {
                     CCAppLog(@"appprobe disabled by appprobe.off");
                     return;
                 }

@@ -1,5 +1,5 @@
 #!/bin/sh
-# CallCaption Pro 1.0.0-pro1
+# CallCaption Pro 1.0.0-pro1.1
 # 独立包：安装时暂停稳定版（0.20.7.1）的注入/守护进程/设置入口，
 # 卸载时自动恢复稳定版。稳定版文件、配置、日志都不删除。
 JB=/var/jb
@@ -11,6 +11,12 @@ KILLALL=/var/jb/usr/bin/killall
 [ -x "$KILLALL" ] || KILLALL=killall
 
 log "pro postinst start"
+
+# Pro 运行目录：daemon/helper 以 mobile 运行，Settings 也在 mobile 沙盒，
+# 模型包可能已由 dpkg 以 root 创建该目录，必须统一交回 mobile 可写。
+mkdir -p /var/mobile/Library/CallCaptionPro
+chown -R mobile:mobile /var/mobile/Library/CallCaptionPro 2>/dev/null || true
+chmod 0755 /var/mobile/Library/CallCaptionPro 2>/dev/null || true
 
 # Pro daemon 所有权/权限
 chown 0:0 "$JB/usr/local/bin/CallCaptionProAudioService" 2>/dev/null || true
@@ -48,6 +54,8 @@ P="$JB/Library/PreferenceLoader/Preferences/callcaption.plist"
 if [ -f "$P" ]; then
   mv -f "$P" "$P.disabled" 2>/dev/null && log "disabled stable settings entry"
 fi
+# PreferenceLoader 会把旧条目缓存在 Preferences 进程里，杀掉才能立刻消失
+"$KILLALL" -9 Preferences >/dev/null 2>&1 || true
 
 # 启动 Pro daemon
 launchctl bootstrap system "$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist" >/dev/null 2>&1 \

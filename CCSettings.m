@@ -1126,8 +1126,9 @@ static NSString *CCApiTextFromJSON(NSString *engine, id json) {
     NSString *msg;
     if (![fm fileExistsAtPath:model]) {
         msg = @"模型未安装。请先安装 CallCaptionPro Models（x-asr-480ms）。";
-    } else if (![fm fileExistsAtPath:wav]) {
-        msg = @"没有测试音频。请先用 Pro 打一通电话，留下 local16k.wav。";
+    } else if (![fm fileExistsAtPath:wav] &&
+               ![fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"selftest16k.wav"]]) {
+        msg = @"没有测试音频（local16k.wav / selftest16k.wav 都不存在）。";
     } else {
         [@"" writeToFile:marker atomically:YES
                 encoding:NSUTF8StringEncoding error:nil];

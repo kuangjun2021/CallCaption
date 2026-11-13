@@ -336,6 +336,13 @@ static OSStatus CCHookedSetProp(AudioUnit unit, AudioUnitPropertyID prop,
         if (prop == kAudioUnitProperty_SetRenderCallback &&
             inData && inDataSize >= sizeof(AURenderCallbackStruct)) {
             const AURenderCallbackStruct *orig = (const AURenderCallbackStruct *)inData;
+            if (orig->inputProc == CCWrappedRender) {
+                // 已经是我们的回调，不能再套一层：否则内层先混 TTS，
+                // 外层 CCRecordCB 会把 TTS 一起录进 remote WAV，造成自回声。
+                CCAppLog(@"renderCB already wrapped; skip duplicate u%x b%u",
+                         (unsigned)((uintptr_t)unit & 0xffff), elem);
+                return g_origSetProp(unit, prop, scope, elem, inData, inDataSize);
+            }
             if (orig->inputProc) {
                 CCCB *c = CCMakeCB(unit, elem, orig);
                 if (c) {

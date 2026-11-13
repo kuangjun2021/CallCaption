@@ -20,6 +20,7 @@
 #include "sherpa-onnx/c-api/c-api.h"
 
 static volatile sig_atomic_t g_stop = 0;
+static BOOL g_ttsMute = NO;
 static void on_signal(int sig) { (void)sig; g_stop = 1; }
 
 static void Log(NSString *fmt, ...) {
@@ -269,7 +270,7 @@ static void ASRConfidence(const SherpaOnnxOnlineRecognizerResult *r,
     if (!_isLocal) {
         double until = ASRRemoteTTSUntilEpoch();
         double nowE = [[NSDate date] timeIntervalSince1970];
-        if (until > nowE) {
+        if (g_ttsMute && until > nowE) {
             if (!_mutedForTTS) {
                 _mutedForTTS = YES;
                 _lastText = @"";
@@ -496,6 +497,7 @@ int main(int argc, char **argv) {
             else if (!strcmp(argv[i], "--local-wav") && i + 1 < argc) localWav = @(argv[++i]);
             else if (!strcmp(argv[i], "--remote-wav") && i + 1 < argc) remoteWav = @(argv[++i]);
             else if (!strcmp(argv[i], "--hotwords") && i + 1 < argc) hotwordsPath = @(argv[++i]);
+            else if (!strcmp(argv[i], "--tts-mute") && i + 1 < argc) g_ttsMute = atoi(argv[++i]) != 0;
             else if (!strcmp(argv[i], "--local") && i + 1 < argc) localOn = atoi(argv[++i]) != 0;
             else if (!strcmp(argv[i], "--remote") && i + 1 < argc) remoteOn = atoi(argv[++i]) != 0;
             else if (!strcmp(argv[i], "--model-dir") && i + 1 < argc) modelDir = @(argv[++i]);
@@ -517,8 +519,8 @@ int main(int argc, char **argv) {
             }
         }
         if (live) {
-            Log(@"start mode=live local=%d remote=%d localWav=%@ remoteWav=%@ model=%@ threads=2",
-                localOn, remoteOn, localWav.lastPathComponent,
+            Log(@"start mode=live local=%d remote=%d ttsMute=%d localWav=%@ remoteWav=%@ model=%@ threads=2",
+                localOn, remoteOn, g_ttsMute, localWav.lastPathComponent,
                 remoteWav.lastPathComponent, modelDir.lastPathComponent);
         } else {
             Log(@"start mode=offline wav=%@ model=%@ threads=2",

@@ -1,9 +1,14 @@
 #!/bin/sh
-# CallCaption Pro 1.0.0-pro2.1.3
+# CallCaption Pro 1.0.0-pro2.1.4
 # 独立包：安装时暂停稳定版（0.20.7.1）的注入/守护进程/设置入口，
 # 卸载时自动恢复稳定版。稳定版文件、配置、日志都不删除。
 JB=/var/jb
-LOG=/tmp/callcaptionpro_install.log
+# 直接写持久目录：/tmp 在重启后会清掉，用户一直找不到安装日志。
+LOG=/var/mobile/Library/CallCaptionPro/install.log
+mkdir -p /var/mobile/Library/CallCaptionPro 2>/dev/null || true
+chown mobile:mobile /var/mobile/Library/CallCaptionPro 2>/dev/null || true
+: > "$LOG" 2>/dev/null || true
+chmod 0666 "$LOG" 2>/dev/null || true
 
 log() { echo "[$(date '+%F %T')] $*" >> "$LOG" 2>/dev/null || true; }
 KILLALL=/var/jb/usr/bin/killall
@@ -69,7 +74,7 @@ fi
 LABEL=net.user.callcaptionpro.audioservice
 PLIST="$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist"
 HB=/var/mobile/Library/CallCaptionPro/daemon.heartbeat
-EXPECT_TAG=pro2.1.3
+EXPECT_TAG=pro2.1.4
 launchctl enable "system/$LABEL" >/dev/null 2>&1 || true
 
 log "launchctl print before:"
@@ -124,11 +129,9 @@ fi
 launchctl print "system/$LABEL" 2>/dev/null \
   | grep -E "state =|pid =" >> "$LOG" 2>/dev/null || true
 
-# 把安装日志持久化，重启后还能导出
-mkdir -p /var/mobile/Library/CallCaptionPro
-cp "$LOG" /var/mobile/Library/CallCaptionPro/install.log 2>/dev/null || true
-chown mobile:mobile /var/mobile/Library/CallCaptionPro/install.log 2>/dev/null || true
-chmod 0666 /var/mobile/Library/CallCaptionPro/install.log 2>/dev/null || true
+# 日志本身已经在持久目录；把权限交回 mobile
+chown mobile:mobile "$LOG" 2>/dev/null || true
+chmod 0666 "$LOG" 2>/dev/null || true
 
 # 让 Pro SpringBoard/AppProbe 立刻加载
 "$KILLALL" -9 WhatsApp >/dev/null 2>&1 || true

@@ -1530,6 +1530,7 @@ static CFAbsoluteTime g_asrLastSpawn = 0;
 static BOOL g_asrRingAttempted = NO;
 static CFAbsoluteTime g_asrResidentRetryAt = 0;
 static double g_remoteTTSPlaybackUntil = 0;   // epoch 秒
+static time_t g_daemonBinMtime = 0;
 
 static NSString *CCASRHelperPath(void) {
     return @"/var/jb/usr/local/bin/CallCaptionProASR";
@@ -1623,6 +1624,7 @@ static void CCStartASRHelper(void) {
     BOOL waitArm = [preload isEqualToString:@"ring"] ||
                    [preload isEqualToString:@"resident"];
     BOOL resident = [preload isEqualToString:@"resident"];
+    BOOL ttsMute = CCPrefBool(CC_K_ASR_TTS_MUTE, NO);
     CCWriteASRHotwords();
     NSString *localWav = [CC_DIR stringByAppendingPathComponent:@"local16k.wav"];
     NSString *remoteWav = [CC_DIR stringByAppendingPathComponent:@"remote16k.wav"];
@@ -1637,6 +1639,7 @@ static void CCStartASRHelper(void) {
     argv[n++] = "--remote-wav"; argv[n++] = remoteWav.UTF8String;
     argv[n++] = "--model-dir"; argv[n++] = CCASRModelDir().UTF8String;
     argv[n++] = "--hotwords"; argv[n++] = hotwords.UTF8String;
+    argv[n++] = "--tts-mute"; argv[n++] = ttsMute ? "1" : "0";
     if (waitArm) argv[n++] = "--wait-arm";
     if (resident) argv[n++] = "--resident";
     argv[n] = NULL;
@@ -1658,8 +1661,8 @@ static void CCStartASRHelper(void) {
     if (r == 0) {
         g_asrPid = pid;
         g_asrSettingsDirty = NO;
-        CCLogf(@"asr helper started pid=%d local=%d remote=%d preload=%@",
-               (int)pid, localCPU, remoteCPU, preload);
+        CCLogf(@"asr helper started pid=%d local=%d remote=%d preload=%@ ttsMute=%d",
+               (int)pid, localCPU, remoteCPU, preload, ttsMute);
     } else {
         CCLogf(@"asr helper spawn failed %d", r);
     }
@@ -1766,7 +1769,7 @@ static void CheckArm(void) {
         static CFAbsoluteTime lastHb;
         if (now - lastHb > 15.0) {
             lastHb = now;
-            NSString *hb = [NSString stringWithFormat:@"%.0f pro2.1.3\n",
+            NSString *hb = [NSString stringWithFormat:@"%.0f pro2.1.4\n",
                             [[NSDate date] timeIntervalSince1970]];
             NSString *hp = [CC_DIR stringByAppendingPathComponent:@"daemon.heartbeat"];
             [hb writeToFile:hp atomically:YES encoding:NSUTF8StringEncoding error:nil];
@@ -1803,6 +1806,20 @@ static void CheckArm(void) {
         // 不需要再 setActive，避免打断 WhatsApp 已建立的音频路由。
         BOOL prepared = CCPrepareValid();
         if (prepared && !g_daemonAudioActive) CCAudioSessionSetActive(YES);
+        // 覆盖安装后新二进制已落盘：空闲时主动退出，让 launchd KeepAlive
+        // 拉起新版本。这样 2.1.4 之后的升级不再需要用户空间重启。
+        static CFAbsoluteTime lastSelfCheck;
+        if (now - lastSelfCheck > 5.0) {
+            lastSelfCheck = now;
+            struct stat selfSt;
+            if (g_daemonBinMtime > 0 &&
+                stat("/var/jb/usr/local/bin/CallCaptionProAudioService", &selfSt) == 0 &&
+                selfSt.st_mtime > g_daemonBinMtime &&
+                !armed && !prepared) {
+                CCLogf(@"daemon binary updated; exit for launchd restart");
+                exit(0);
+            }
+        }
         // Pro2.1：预加载。ring 在响铃时拉起 helper，模型加载完等 arm；
         // resident 空闲就常驻，模型一直热着；off 仍然等接通再启动。
         NSString *preloadMode = CCPreloadMode();
@@ -2218,7 +2235,10 @@ int main(int argc, char *argv[]) {
         }
         CCPrefsReload();
 #ifdef CC_PRO
-        CCLogLine(@"audioservice started (pro2.1.3)");
+        CCLogLine(@"audioservice started (pro2.1.4)");
+        struct stat selfSt;
+        if (stat("/var/jb/usr/local/bin/CallCaptionProAudioService", &selfSt) == 0)
+            g_daemonBinMtime = selfSt.st_mtime;
 #else
         CCLogLine(@"audioservice started (v0.17.0)");
 #endif

@@ -77,6 +77,7 @@
 #define CC_K_REMOTE_ASR       @"RemoteASRBackend"     // Pro: tencent / cpu（同一 Recognizer 第二条流）
 #define CC_K_ASR_PRELOAD      @"AsrPreloadMode"       // ring / resident / off
 #define CC_K_ASR_HOTWORDS     @"AsrHotwords"          // 逗号分隔热词
+#define CC_K_ASR_TTS_MUTE     @"AsrTTSMute"           // 1=对方 TTS 时暂停识别（防回声），默认 0
 #define CC_K_REMOTE_TRANSLATE_ENGINE @"RemoteTranslateEngine"  // google / deepl / bing / ai
 #define CC_K_LOCAL_TRANSLATE_ENGINE  @"LocalTranslateEngine"   // deepl / google / bing / ai
 

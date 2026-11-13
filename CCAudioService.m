@@ -1518,6 +1518,98 @@ static void CCWriteAppCfg(BOOL armed) {
     }
 }
 
+// v1.0.0-pro1：CPU ASR helper（arm64 独立进程，Sherpa-ONNX）
+static pid_t g_asrPid = -1;
+
+static NSString *CCASRHelperPath(void) {
+    return @"/var/jb/usr/local/bin/CallCaptionProASR";
+}
+static NSString *CCASRModelDir(void) {
+    return [CC_DIR stringByAppendingPathComponent:@"models/x-asr-480ms"];
+}
+static void CCStopASRHelper(void) {
+    if (g_asrPid > 0) {
+        kill(g_asrPid, SIGTERM);
+        waitpid(g_asrPid, NULL, WNOHANG);
+        CCLogf(@"asr helper stopped pid=%d", (int)g_asrPid);
+        g_asrPid = -1;
+    }
+}
+static BOOL CCASRHelperAvailable(void) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:CCASRHelperPath()]) {
+        CCLogf(@"asr helper missing %@", CCASRHelperPath());
+        return NO;
+    }
+    NSString *enc = [CCASRModelDir() stringByAppendingPathComponent:@"encoder.int8.onnx"];
+    if (![fm fileExistsAtPath:enc]) {
+        CCLogf(@"asr model missing %@", CCASRModelDir());
+        return NO;
+    }
+    return YES;
+}
+static void CCStartASRHelper(void) {
+    if (g_asrPid > 0) return;
+    if (!CCASRHelperAvailable()) return;
+    NSString *wav = [CC_DIR stringByAppendingPathComponent:@"local16k.wav"];
+    const char *argv[] = {
+        CCASRHelperPath().UTF8String,
+        "--mode", "live",
+        "--wav", wav.UTF8String,
+        "--model-dir", CCASRModelDir().UTF8String,
+        NULL
+    };
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+    posix_spawn_file_actions_addopen(&fa, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+    pid_t pid = -1;
+    int r = posix_spawn(&pid, CCASRHelperPath().fileSystemRepresentation,
+                        &fa, NULL, (char *const *)argv, NULL);
+    posix_spawn_file_actions_destroy(&fa);
+    if (r == 0) {
+        g_asrPid = pid;
+        CCLogf(@"asr helper started pid=%d", (int)pid);
+    } else {
+        CCLogf(@"asr helper spawn failed %d", r);
+    }
+}
+static void CCStartASROfflineTest(void) {
+    if (!CCASRHelperAvailable()) return;
+    NSString *wav = [CC_DIR stringByAppendingPathComponent:@"local16k.wav"];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:wav]) {
+        CCLogf(@"asr selftest: no local16k.wav");
+        return;
+    }
+    const char *argv[] = {
+        CCASRHelperPath().UTF8String,
+        "--mode", "offline",
+        "--fast",
+        "--wav", wav.UTF8String,
+        "--model-dir", CCASRModelDir().UTF8String,
+        NULL
+    };
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+    posix_spawn_file_actions_addopen(&fa, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+    pid_t pid = -1;
+    int r = posix_spawn(&pid, CCASRHelperPath().fileSystemRepresentation,
+                        &fa, NULL, (char *const *)argv, NULL);
+    posix_spawn_file_actions_destroy(&fa);
+    if (r == 0) CCLogf(@"asr selftest started pid=%d", (int)pid);
+    else CCLogf(@"asr selftest spawn failed %d", r);
+}
+static void CCPollASRSelfTest(void) {
+    NSString *marker = [CC_DIR stringByAppendingPathComponent:@"asr_selftest"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if ([fm fileExistsAtPath:marker]) {
+        [fm removeItemAtPath:marker error:nil];
+        CCLogf(@"asr selftest requested");
+        CCStartASROfflineTest();
+    }
+}
+
 static void CheckArm(void) {
     @try {
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
@@ -1525,6 +1617,7 @@ static void CheckArm(void) {
             g_lastPrefsLoad = now;
             CCPrefsReload();
         }
+        CCPollASRSelfTest();
 
         // SB 中文播报窗口：tts_until 文件里是结束时刻（epoch 秒）
         @try {
@@ -1601,6 +1694,12 @@ static void CheckArm(void) {
             g_localStartAfter = CFAbsoluteTimeGetCurrent() + 1.0;
             CCSnapshotProbeFileSizes();
             CCTencentStart();
+            // Pro1：我方走 CPU ASR 时，启动独立 arm64 helper；否则确保它停掉。
+            BOOL localOnArm = CCPrefBool(CC_K_LOCAL_ENABLED, YES);
+            BOOL localCPU = localOnArm &&
+                [[CCPrefStr(CC_K_LOCAL_ASR, @"tencent") lowercaseString]
+                 isEqualToString:@"cpu"];
+            if (localCPU) CCStartASRHelper(); else CCStopASRHelper();
             CCLogf(@"arm: bridge wav cleared (local tap in 1.0s)");
         }
         lastArmed = armed;
@@ -1624,6 +1723,7 @@ static void CheckArm(void) {
             }
             [g_remote stop];
             [g_local stop];
+            CCStopASRHelper();
             // prepared=1 表示还在拨号/响铃，会话要留给即将接通的通话；
             // prepared=0 才是真正挂断/响铃取消，这时释放。
             if (!prepared) CCAudioSessionSetActive(NO);
@@ -1663,8 +1763,9 @@ static void CheckArm(void) {
                 g_local->lastAttempt = now;
                 [g_local start];
             }
-        } else if (g_local->capturing) {
-            [g_local stop];
+        } else {
+            if (g_local->capturing) [g_local stop];
+            CCStopASRHelper();
         }
 
         NSArray<CCChannel *> *chans = @[g_remote, g_local];

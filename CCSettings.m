@@ -529,6 +529,9 @@ static void VoiceLists(NSString *prefix,
         MkText(@"TencentAppID", @"AppID", @"", NO, @"10 位数字"),
         MkText(@"TencentSecretID", @"SecretId", @"", NO, @"SecretId"),
         MkText(@"TencentSecretKey", @"SecretKey", @"", YES, @"SecretKey（密文）"),
+        MkChoice(@"LocalASRBackend", @"我方识别引擎", @"tencent",
+                 @[@"tencent", @"cpu"],
+                 @[@"腾讯云（默认）", @"本机 CPU（Sherpa）"]),
         MkChoice(@"RemoteTranslateEngine", @"来电翻译引擎", @"google",
                  @[@"google", @"deepl", @"bing", @"ai"],
                  @[@"Google（推荐）", @"DeepL", @"Bing/MyMemory（免费）", @"AI 自定义"]),
@@ -587,6 +590,7 @@ static void VoiceLists(NSString *prefix,
         MkChoice(@"TapStallSec", @"Tap 断流重启阈值", @"4",
                  @[@"2", @"3", @"4", @"5", @"6", @"8", @"10"],
                  @[@"2s（激进）", @"3s", @"4s（推荐）", @"5s", @"6s", @"8s", @"10s（保守）"]),
+        MkAction(@"cpuAsrTest", @"CPU ASR 离线测试"),
         MkAction(@"openLog", @"打开诊断日志"),
     ];
 
@@ -799,6 +803,8 @@ static void VoiceLists(NSString *prefix,
             [self presentLogMenu:[tv cellForRowAtIndexPath:ip]];
         } else if ([row.key isEqualToString:@"testApi"]) {
             [self runApiTest];
+        } else if ([row.key isEqualToString:@"cpuAsrTest"]) {
+            [self runCPUASRTest];
         }
     }
 }
@@ -1106,6 +1112,37 @@ static NSString *CCApiTextFromJSON(NSString *engine, id json) {
             [self presentViewController:vc animated:YES completion:nil];
         }];
     });
+}
+
+- (void)runCPUASRTest {
+    NSString *dir = @"/var/mobile/Library/CallCaptionPro";
+    NSString *marker = [dir stringByAppendingPathComponent:@"asr_selftest"];
+    NSString *wav = [dir stringByAppendingPathComponent:@"local16k.wav"];
+    NSString *model = [dir stringByAppendingPathComponent:
+                       @"models/x-asr-480ms/encoder.int8.onnx"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm createDirectoryAtPath:dir withIntermediateDirectories:YES
+                   attributes:nil error:nil];
+    NSString *msg;
+    if (![fm fileExistsAtPath:model]) {
+        msg = @"模型未安装。请先安装 CallCaptionPro Models（x-asr-480ms）。";
+    } else if (![fm fileExistsAtPath:wav]) {
+        msg = @"没有测试音频。请先用 Pro 打一通电话，留下 local16k.wav。";
+    } else {
+        [@"" writeToFile:marker atomically:YES
+                encoding:NSUTF8StringEncoding error:nil];
+        msg = @"已启动 CPU ASR 离线测试，约 20 秒。\n"
+               "结果在 /var/mobile/Library/CallCaptionPro/asr_test.txt。\n"
+               "测试期间不要打电话。";
+    }
+    UIAlertController *a = [UIAlertController
+        alertControllerWithTitle:@"CPU ASR 离线测试"
+                         message:msg
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"好"
+                                         style:UIAlertActionStyleDefault
+                                       handler:nil]];
+    [self presentViewController:a animated:YES completion:nil];
 }
 
 - (void)presentLogMenu:(UITableViewCell *)cell {

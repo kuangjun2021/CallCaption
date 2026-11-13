@@ -71,6 +71,7 @@
 #define CC_K_TC_MAX_SPEAK     @"TencentMaxSpeak"      // 5000..90000 ms
 #define CC_K_TC_SAMPLE_RATE   @"TencentSampleRate"    // 16000 / 8000，双开卡时用 8000
 #define CC_K_TC_LOCAL_ENGINE  @"TencentLocalEngine"   // 旧混合 A 设置，B1 不再使用
+#define CC_K_LOCAL_ASR        @"LocalASRBackend"      // Pro: tencent / cpu（Sherpa arm64 helper）
 #define CC_K_REMOTE_TRANSLATE_ENGINE @"RemoteTranslateEngine"  // google / deepl / bing / ai
 #define CC_K_LOCAL_TRANSLATE_ENGINE  @"LocalTranslateEngine"   // deepl / google / bing / ai
 

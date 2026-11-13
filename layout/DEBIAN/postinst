@@ -1,5 +1,5 @@
 #!/bin/sh
-# CallCaption Pro 1.0.0-pro0.1
+# CallCaption Pro 1.0.0-pro1
 # 独立包：安装时暂停稳定版（0.20.7.1）的注入/守护进程/设置入口，
 # 卸载时自动恢复稳定版。稳定版文件、配置、日志都不删除。
 JB=/var/jb
@@ -15,6 +15,8 @@ log "pro postinst start"
 # Pro daemon 所有权/权限
 chown 0:0 "$JB/usr/local/bin/CallCaptionProAudioService" 2>/dev/null || true
 chmod 0755 "$JB/usr/local/bin/CallCaptionProAudioService" 2>/dev/null || true
+chown 0:0 "$JB/usr/local/bin/CallCaptionProASR" 2>/dev/null || true
+chmod 0755 "$JB/usr/local/bin/CallCaptionProASR" 2>/dev/null || true
 chown 0:0 "$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist" 2>/dev/null || true
 chmod 0644 "$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist" 2>/dev/null || true
 

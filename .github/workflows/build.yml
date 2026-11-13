@@ -22,6 +22,26 @@ jobs:
           cp -R /tmp/sdks/sdks-master/iPhoneOS16.5.sdk $HOME/theos/sdks/
           ls $HOME/theos/sdks
 
+      - name: Download sherpa-onnx iOS static xcframework
+        run: |
+          mkdir -p vendor
+          curl -L --fail -o /tmp/sherpa-ios.zip \
+            https://github.com/k2-fsa/sherpa-onnx/releases/download/xcframework/sherpa-onnx-v2.0.1-ios-static.xcframework.zip
+          unzip -q /tmp/sherpa-ios.zip -d vendor
+          ls -la vendor/sherpa-onnx.xcframework/ios-arm64/SherpaOnnxC.framework
+
+      - name: Build arm64 CPU ASR helper
+        run: |
+          export THEOS=$HOME/theos
+          make -C asr-helper
+          mkdir -p layout/usr/local/bin
+          BIN=$(find asr-helper/.theos -type f -name CallCaptionProASR | head -1)
+          echo "helper=$BIN"
+          test -n "$BIN"
+          cp "$BIN" layout/usr/local/bin/CallCaptionProASR
+          file layout/usr/local/bin/CallCaptionProASR
+          lipo -info layout/usr/local/bin/CallCaptionProASR || true
+
       - name: Build package
         run: |
           export THEOS=$HOME/theos
@@ -40,6 +60,32 @@ jobs:
           mkdir -p out
           cp /tmp/rp/fixed.deb out/
 
+      - name: Build model resource package (installed once)
+        run: |
+          mkdir -p model-package/DEBIAN \
+                   model-package/var/mobile/Library/CallCaptionPro/models/x-asr-480ms
+          cat > model-package/DEBIAN/control <<'EOF'
+Package: net.user.callcaptionpro.models
+Name: CallCaption Pro Models
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: X-ASR 480ms zh-en int8 streaming model for CallCaption Pro.
+Maintainer: user <user@localhost>
+Author: user
+Section: Tweaks
+EOF
+          curl -L --fail -o /tmp/asr-model.tar.bz2 \
+            https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05.tar.bz2
+          rm -rf /tmp/asr-model && mkdir -p /tmp/asr-model
+          tar -xjf /tmp/asr-model.tar.bz2 -C /tmp/asr-model
+          SRC=$(find /tmp/asr-model -maxdepth 1 -type d -name "sherpa-onnx-x-asr-480ms-*" | head -1)
+          echo "model src=$SRC"
+          test -n "$SRC"
+          cp "$SRC/encoder.int8.onnx" "$SRC/decoder.onnx" "$SRC/joiner.int8.onnx" \
+             "$SRC/tokens.txt" "$SRC/bpe.model" \
+             model-package/var/mobile/Library/CallCaptionPro/models/x-asr-480ms/
+          dpkg-deb -b model-package out/net.user.callcaptionpro.models_1.0.0_iphoneos-arm64.deb
+          ls -lh out/
 
       - name: Upload deb
         uses: actions/upload-artifact@v4

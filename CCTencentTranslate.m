@@ -843,11 +843,18 @@ void CCTencentStart(void) {
     BOOL localOn = CCPrefBool(CC_K_LOCAL_ENABLED, YES);
     if (!remoteOn && !localOn) return;
 
+    // v1.0.0-pro1：我方可以切到本机 CPU ASR（arm64 helper），
+    // 这时不再启动本地腾讯 WS，只保留对方腾讯通道。
+    BOOL localCPU = localOn &&
+        [[CCPrefStr(CC_K_LOCAL_ASR, @"tencent") lowercaseString]
+         isEqualToString:@"cpu"];
+    BOOL startLocal = localOn && !localCPU;
+
     CCRingInit(&g_remoteRing, 16000 * 10);
     CCRingInit(&g_localRing, 16000 * 10);
     CCRingClear(&g_remoteRing);
     CCRingClear(&g_localRing);
-    atomic_store(&g_tcLocalOn, localOn ? 1 : 0);
+    atomic_store(&g_tcLocalOn, startLocal ? 1 : 0);
     atomic_store(&g_tcActive, 1);
     if (!g_sessions) g_sessions = [NSMutableArray array];
 
@@ -862,14 +869,15 @@ void CCTencentStart(void) {
         [g_sessions addObject:s];
         dispatch_async(s->q, ^{ [s start]; });
     }
-    if (localOn) {
+    if (startLocal) {
         CCTencentSession *s = [[CCTencentSession alloc] initWithLocal:YES
             appid:appid secretid:sid secretkey:skey model:localModel
             voiceType:@"" volume:@"" speed:@"" tencentTTS:NO asrMode:YES];
         [g_sessions addObject:s];
         dispatch_async(s->q, ^{ [s start]; });
     }
-    CCLogf(@"tencent asr started remote=%d local=%d", remoteOn, localOn);
+    CCLogf(@"tencent asr started remote=%d local=%d localEngine=%@",
+           remoteOn, startLocal, localCPU ? @"cpu" : @"tencent");
     CCASendState(@"● 腾讯 ASR 已启动");
 }
 

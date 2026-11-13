@@ -64,16 +64,16 @@ jobs:
         run: |
           mkdir -p model-package/DEBIAN \
                    model-package/var/mobile/Library/CallCaptionPro/models/x-asr-480ms
-          cat > model-package/DEBIAN/control <<'EOF'
-Package: net.user.callcaptionpro.models
-Name: CallCaption Pro Models
-Version: 1.0.0
-Architecture: iphoneos-arm64
-Description: X-ASR 480ms zh-en int8 streaming model for CallCaption Pro.
-Maintainer: user <user@localhost>
-Author: user
-Section: Tweaks
-EOF
+          printf '%s\n' \
+            'Package: net.user.callcaptionpro.models' \
+            'Name: CallCaption Pro Models' \
+            'Version: 1.0.0' \
+            'Architecture: iphoneos-arm64' \
+            'Description: X-ASR 480ms zh-en int8 streaming model for CallCaption Pro.' \
+            'Maintainer: user <user@localhost>' \
+            'Author: user' \
+            'Section: Tweaks' \
+            > model-package/DEBIAN/control
           curl -L --fail -o /tmp/asr-model.tar.bz2 \
             https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05.tar.bz2
           rm -rf /tmp/asr-model && mkdir -p /tmp/asr-model

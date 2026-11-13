@@ -1132,7 +1132,7 @@ static NSString *CCApiTextFromJSON(NSString *engine, id json) {
     } else {
         [@"" writeToFile:marker atomically:YES
                 encoding:NSUTF8StringEncoding error:nil];
-        msg = @"已启动 CPU ASR 离线测试，约 20 秒。\n"
+        msg = @"已启动 CPU ASR 离线测试：首次加载 169MB 模型约 20–60 秒。\n"
                "结果在 /var/mobile/Library/CallCaptionPro/asr_test.txt。\n"
                "测试期间不要打电话。";
     }

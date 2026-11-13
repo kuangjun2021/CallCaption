@@ -156,8 +156,9 @@ int main(int argc, char **argv) {
         cfg.model_config.tokens = tokens.UTF8String;
         cfg.model_config.num_threads = 2;
         cfg.model_config.provider = "cpu";
-        // model_type 留空，由 transducer 文件自动判定；显式写 "zipformer2"
-        // 在 C API 里是非法 override，会导致 CreateOnlineRecognizer 失败。
+        // 官方模型 encoder 元数据就是 zipformer2；显式指定可避免 sherpa
+        // 为探测模型类型而把 169MB 模型加载两遍（首包延迟翻倍）。
+        cfg.model_config.model_type = "zipformer2";
         cfg.decoding_method = "greedy_search";
         cfg.max_active_paths = 4;
         cfg.enable_endpoint = 1;

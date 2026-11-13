@@ -62,45 +62,48 @@ fi
 # PreferenceLoader 会把旧条目缓存在 Preferences 进程里，杀掉才能立刻消失
 "$KILLALL" -9 Preferences >/dev/null 2>&1 || true
 
-# 启动 Pro daemon
-# 覆盖安装时直接用 kickstart -k 原地重启最稳：旧的已注册 job 会 exec 新二进制，
-# 不会出现 pro1.3 那种“bootout 杀了旧的、bootstrap 还没成功”的空窗。
+# 启动/重启 Pro daemon
+# 关键：不要 bootout。旧 job 已注册时 kickstart -k 会原地 exec 新二进制；
+# 只有 job 未注册时才 bootstrap/load。bootout 会造成“旧进程已杀、新进程没起”的空窗，
+# 重启 SpringBoard 不会重启 launchd job，所以只能等用户空间重启才看到新版本。
 LABEL=net.user.callcaptionpro.audioservice
 PLIST="$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist"
+HB=/var/mobile/Library/CallCaptionPro/daemon.heartbeat
+EXPECT_TAG=pro2.1.2
 launchctl enable "system/$LABEL" >/dev/null 2>&1 || true
-daemon_running() {
-  launchctl print "system/$LABEL" 2>/dev/null | grep -q "pid ="
-}
-if launchctl print "system/$LABEL" >/dev/null 2>&1; then
-  log "pro daemon registered; kickstart"
-  launchctl kickstart -k "system/$LABEL" >/dev/null 2>&1 || true
+
+log "launchctl print before:"
+launchctl print "system/$LABEL" >>"$LOG" 2>&1 || log "print rc=$?"
+
+# 已注册：原地重启；未注册：bootstrap/load。所有结果写安装日志，不再吞掉。
+if launchctl kickstart -k "system/$LABEL" >>"$LOG" 2>&1; then
+  log "kickstart ok"
+else
+  log "kickstart failed; trying bootstrap/load"
+  if launchctl bootstrap system "$PLIST" >>"$LOG" 2>&1; then
+    log "bootstrap ok"
+  elif launchctl load "$PLIST" >>"$LOG" 2>&1; then
+    log "load ok"
+  else
+    log "bootstrap/load failed"
+  fi
 fi
-if ! daemon_running; then
-  log "pro daemon not running; bootout + retry bootstrap"
-  launchctl bootout "system/$LABEL" >/dev/null 2>&1 \
-    || launchctl bootout system "$PLIST" >/dev/null 2>&1 || true
-  i=0
-  while [ "$i" -lt 8 ]; do
-    launchctl print "system/$LABEL" >/dev/null 2>&1 || break
-    sleep 1
-    i=$((i+1))
-  done
-  n=0
-  while [ "$n" -lt 3 ]; do
-    launchctl bootstrap system "$PLIST" >/dev/null 2>&1 && break
-    launchctl load "$PLIST" >/dev/null 2>&1 && break
-    launchctl kickstart -k "system/$LABEL" >/dev/null 2>&1 && break
-    launchctl start "$LABEL" >/dev/null 2>&1 && break
-    sleep 1
-    n=$((n+1))
-  done
+
+# 等 heartbeat 变成新版本；这比解析 launchctl print 的 pid 可靠。
+i=0
+while [ "$i" -lt 12 ]; do
+  if [ -f "$HB" ] && grep -q "$EXPECT_TAG" "$HB" 2>/dev/null; then
+    log "daemon heartbeat updated to $EXPECT_TAG"
+    break
+  fi
+  sleep 1
+  i=$((i+1))
+done
+if ! grep -q "$EXPECT_TAG" "$HB" 2>/dev/null; then
+  log "daemon heartbeat NOT $EXPECT_TAG after 12s; userspace reboot may be required"
 fi
-sleep 1
 launchctl print "system/$LABEL" 2>/dev/null \
   | grep -E "state =|pid =" >> "$LOG" 2>/dev/null || true
-if ! daemon_running; then
-  log "pro daemon STILL NOT RUNNING after restart attempts"
-fi
 
 # 让 Pro SpringBoard/AppProbe 立刻加载
 "$KILLALL" -9 WhatsApp >/dev/null 2>&1 || true

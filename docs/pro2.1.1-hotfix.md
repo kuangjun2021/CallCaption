@@ -29,7 +29,7 @@ Pro2.0 没有预加载路径，所以没有这个问题。
 ## 产物
 
 - `net.user.callcaptionpro_1.0.0-pro2.1.2_arm64e.deb`
-  - 6,513,688 B
-  - SHA256 `3dc0ded07bffd33f52d7865f5c69c0838aa065fc3f23d90379b9f6daee4f97de`
+  - 6,512,532 B
+  - SHA256 `f3ac1d3c4c3ea4bd1c7175c235d980b6a0c0de303a6c143415f07bf6aa1e9bbe`
 - 回退基线 `net.user.callcaptionpro_1.0.0-pro2.0_arm64e.deb`
   - SHA256 `37fdfa185d816da6e70a3575dfc87ee223b33648c746bd85a9e2b347f7156f13`

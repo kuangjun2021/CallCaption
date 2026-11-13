@@ -17,6 +17,8 @@ chown 0:0 "$JB/usr/local/bin/CallCaptionProAudioService" 2>/dev/null || true
 chmod 0755 "$JB/usr/local/bin/CallCaptionProAudioService" 2>/dev/null || true
 chown 0:0 "$JB/usr/local/bin/CallCaptionProASR" 2>/dev/null || true
 chmod 0755 "$JB/usr/local/bin/CallCaptionProASR" 2>/dev/null || true
+chown 0:0 "$JB/Library/Frameworks/SherpaOnnxC.framework/SherpaOnnxC" 2>/dev/null || true
+chmod 0755 "$JB/Library/Frameworks/SherpaOnnxC.framework/SherpaOnnxC" 2>/dev/null || true
 chown 0:0 "$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist" 2>/dev/null || true
 chmod 0644 "$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist" 2>/dev/null || true
 

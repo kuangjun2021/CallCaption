@@ -22,13 +22,13 @@ jobs:
           cp -R /tmp/sdks/sdks-master/iPhoneOS16.5.sdk $HOME/theos/sdks/
           ls $HOME/theos/sdks
 
-      - name: Download sherpa-onnx iOS static xcframework
+      - name: Download sherpa-onnx iOS shared + ONNX Runtime static xcframework
         run: |
           mkdir -p vendor
           curl -L --fail -o /tmp/sherpa-ios.zip \
-            https://github.com/k2-fsa/sherpa-onnx/releases/download/xcframework/sherpa-onnx-v2.0.1-ios-static.xcframework.zip
+            https://github.com/k2-fsa/sherpa-onnx/releases/download/xcframework/sherpa-onnx-v2.0.1-ios-shared-onnxruntime-static.xcframework.zip
           unzip -q /tmp/sherpa-ios.zip -d vendor
-          ls -la vendor/sherpa-onnx.xcframework/ios-arm64/SherpaOnnxC.framework
+          ls -la vendor/SherpaOnnxC.xcframework/ios-arm64/SherpaOnnxC.framework
 
       - name: Build arm64 CPU ASR helper
         run: |
@@ -41,6 +41,12 @@ jobs:
           cp "$BIN" layout/usr/local/bin/CallCaptionProASR
           file layout/usr/local/bin/CallCaptionProASR
           lipo -info layout/usr/local/bin/CallCaptionProASR || true
+          mkdir -p layout/Library/Frameworks
+          rm -rf layout/Library/Frameworks/SherpaOnnxC.framework
+          cp -R vendor/SherpaOnnxC.xcframework/ios-arm64/SherpaOnnxC.framework \
+                layout/Library/Frameworks/
+          chmod 0755 layout/Library/Frameworks/SherpaOnnxC.framework/SherpaOnnxC
+          ls -lh layout/Library/Frameworks/SherpaOnnxC.framework/
 
       - name: Build package
         run: |

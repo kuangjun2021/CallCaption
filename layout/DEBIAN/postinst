@@ -1,5 +1,7 @@
 #!/bin/sh
-# CallCaption Pro 1.0.0-pro2.1.4
+# CallCaption Pro 1.0.0-pro2.1.5
+set +e
+# 不启用 set -e：任何一步失败都要继续跑完并留下日志。
 # 独立包：安装时暂停稳定版（0.20.7.1）的注入/守护进程/设置入口，
 # 卸载时自动恢复稳定版。稳定版文件、配置、日志都不删除。
 JB=/var/jb
@@ -22,11 +24,15 @@ export PATH
 
 log "pro postinst start"
 
-# Pro 运行目录：daemon/helper 以 mobile 运行，Settings 也在 mobile 沙盒，
-# 模型包可能已由 dpkg 以 root 创建该目录，必须统一交回 mobile 可写。
-mkdir -p /var/mobile/Library/CallCaptionPro
-chown -R mobile:mobile /var/mobile/Library/CallCaptionPro 2>/dev/null || true
+# Pro 运行目录：daemon/helper 以 mobile 运行，Settings 也在 mobile 沙盒。
+# 不要对 169MB 模型目录做递归 chown，Sileo 可能等不及把脚本杀掉；
+# 模型目录 root:wheel 0755 对 mobile 是只读可用的。
+mkdir -p /var/mobile/Library/CallCaptionPro 2>/dev/null || true
+chown mobile:mobile /var/mobile/Library/CallCaptionPro 2>/dev/null || true
 chmod 0755 /var/mobile/Library/CallCaptionPro 2>/dev/null || true
+find /var/mobile/Library/CallCaptionPro -maxdepth 1 -type f \
+  -exec chown mobile:mobile {} \; 2>/dev/null || true
+log "step: Pro dir ready"
 
 # Pro daemon 所有权/权限
 chown 0:0 "$JB/usr/local/bin/CallCaptionProAudioService" 2>/dev/null || true
@@ -66,6 +72,7 @@ if [ -f "$P" ]; then
 fi
 # PreferenceLoader 会把旧条目缓存在 Preferences 进程里，杀掉才能立刻消失
 "$KILLALL" -9 Preferences >/dev/null 2>&1 || true
+log "step: stable disabled"
 
 # 启动/重启 Pro daemon
 # 关键：不要 bootout。旧 job 已注册时 kickstart -k 会原地 exec 新二进制；
@@ -74,7 +81,8 @@ fi
 LABEL=net.user.callcaptionpro.audioservice
 PLIST="$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist"
 HB=/var/mobile/Library/CallCaptionPro/daemon.heartbeat
-EXPECT_TAG=pro2.1.4
+EXPECT_TAG=pro2.1.5
+log "step: daemon restart begin"
 launchctl enable "system/$LABEL" >/dev/null 2>&1 || true
 
 log "launchctl print before:"
@@ -128,6 +136,7 @@ if ! grep -q "$EXPECT_TAG" "$HB" 2>/dev/null; then
 fi
 launchctl print "system/$LABEL" 2>/dev/null \
   | grep -E "state =|pid =" >> "$LOG" 2>/dev/null || true
+log "step: daemon restart end"
 
 # 日志本身已经在持久目录；把权限交回 mobile
 chown mobile:mobile "$LOG" 2>/dev/null || true

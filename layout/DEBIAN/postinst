@@ -1,27 +1,21 @@
 #!/bin/sh
-# CallCaption Pro 1.0.0-pro2.1.11
-# 包内文件现在由 CI 用 --root-owner-group 打成 root:root，launchd 不会再报
-# "bad ownership/permissions"。这个脚本只做一次快速 kickstart/bootstrap，
-# 不再 chown、不再 killall、不再后台长任务，也不主动杀 SpringBoard。
+# CallCaption Pro 1.0.0-pro2.1.12 postinst
+# 只做一次快速 launchctl，不做 chown/killall/后台任务，也不杀 SpringBoard。
+# 稳定版禁用已移到 preinst，保证这个脚本能在 Sileo 注销前正常结束。
 set +e
 
 JB=/var/jb
 LOG=/var/mobile/Library/CallCaptionPro/install.log
 mkdir -p /var/mobile/Library/CallCaptionPro 2>/dev/null || true
 chown mobile:mobile /var/mobile/Library/CallCaptionPro 2>/dev/null || true
-: > "$LOG" 2>/dev/null || true
 chmod 0666 "$LOG" 2>/dev/null || true
 
 log() { echo "[$(date '+%F %T')] $*" >> "$LOG" 2>/dev/null || true; }
-KILLALL=/var/jb/usr/bin/killall
-[ -x "$KILLALL" ] || KILLALL=/usr/bin/killall
-[ -x "$KILLALL" ] || KILLALL=killall
 LABEL=net.user.callcaptionpro.audioservice
 PLIST="$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist"
 
 log "pro postinst start"
 
-# 1. 已注册：kickstart -k 原地重启；未注册：bootstrap；再失败 load。
 launchctl kickstart -k "system/$LABEL" >>"$LOG" 2>&1
 RC=$?
 log "kickstart rc=$RC"
@@ -31,20 +25,5 @@ if [ "$RC" -ne 0 ]; then
   launchctl load "$PLIST" >>"$LOG" 2>&1
   log "load rc=$?"
 fi
-log "step: daemon start attempted"
-
-# 2. 暂停稳定版注入/设置/daemon 自启（只改名，不删除）。
-#    这一步放在 daemon 启动之后，即使被 Sileo 注销打断也不影响新 daemon。
-for f in CallCaption.plist CallCaptionAppProbe.plist CallCaptionAudioHook.plist; do
-  P="$JB/Library/MobileSubstrate/DynamicLibraries/$f"
-  [ -f "$P" ] && mv -f "$P" "$P.disabled" 2>/dev/null && log "disabled $f"
-done
-P="$JB/Library/LaunchDaemons/net.user.callcaption.audioservice.plist"
-[ -f "$P" ] && mv -f "$P" "$P.disabled" 2>/dev/null && log "disabled stable daemon plist"
-P="$JB/Library/PreferenceLoader/Preferences/callcaption.plist"
-[ -f "$P" ] && mv -f "$P" "$P.disabled" 2>/dev/null && log "disabled stable settings entry"
-"$KILLALL" -9 Preferences >/dev/null 2>&1 || true
-log "step: stable disabled"
-
 log "pro postinst done"
 exit 0

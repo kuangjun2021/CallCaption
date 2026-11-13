@@ -1,0 +1,32 @@
+#!/bin/sh
+# CallCaption Pro 1.0.0-pro2.1.12 preinst
+# 把耗时/容易被打断的稳定版禁用放到 preinst；postinst 只保留一次快速
+# launchctl，安装脚本能正常结束，Sileo 才会恢复“执行→完成→注销”流程。
+set +e
+
+JB=/var/jb
+LOG=/var/mobile/Library/CallCaptionPro/install.log
+mkdir -p /var/mobile/Library/CallCaptionPro 2>/dev/null || true
+chown mobile:mobile /var/mobile/Library/CallCaptionPro 2>/dev/null || true
+: > "$LOG" 2>/dev/null || true
+chmod 0666 "$LOG" 2>/dev/null || true
+
+log() { echo "[$(date '+%F %T')] $*" >> "$LOG" 2>/dev/null || true; }
+KILLALL=/var/jb/usr/bin/killall
+[ -x "$KILLALL" ] || KILLALL=/usr/bin/killall
+[ -x "$KILLALL" ] || KILLALL=killall
+
+log "pro preinst start"
+
+for f in CallCaption.plist CallCaptionAppProbe.plist CallCaptionAudioHook.plist; do
+  P="$JB/Library/MobileSubstrate/DynamicLibraries/$f"
+  [ -f "$P" ] && mv -f "$P" "$P.disabled" 2>/dev/null && log "disabled $f"
+done
+P="$JB/Library/LaunchDaemons/net.user.callcaption.audioservice.plist"
+[ -f "$P" ] && mv -f "$P" "$P.disabled" 2>/dev/null && log "disabled stable daemon plist"
+P="$JB/Library/PreferenceLoader/Preferences/callcaption.plist"
+[ -f "$P" ] && mv -f "$P" "$P.disabled" 2>/dev/null && log "disabled stable settings entry"
+"$KILLALL" -9 Preferences >/dev/null 2>&1 || true
+
+log "pro preinst done"
+exit 0

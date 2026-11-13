@@ -1769,7 +1769,7 @@ static void CheckArm(void) {
         static CFAbsoluteTime lastHb;
         if (now - lastHb > 15.0) {
             lastHb = now;
-            NSString *hb = [NSString stringWithFormat:@"%.0f pro2.1.10\n",
+            NSString *hb = [NSString stringWithFormat:@"%.0f pro2.1.11\n",
                             [[NSDate date] timeIntervalSince1970]];
             NSString *hp = [CC_DIR stringByAppendingPathComponent:@"daemon.heartbeat"];
             [hb writeToFile:hp atomically:YES encoding:NSUTF8StringEncoding error:nil];
@@ -2235,7 +2235,7 @@ int main(int argc, char *argv[]) {
         }
         CCPrefsReload();
 #ifdef CC_PRO
-        CCLogLine(@"audioservice started (pro2.1.10)");
+        CCLogLine(@"audioservice started (pro2.1.11)");
         struct stat selfSt;
         if (stat("/var/jb/usr/local/bin/CallCaptionProAudioService", &selfSt) == 0)
             g_daemonBinMtime = selfSt.st_mtime;

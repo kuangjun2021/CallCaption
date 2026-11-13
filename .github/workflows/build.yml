@@ -70,7 +70,9 @@ jobs:
           mkdir -p /tmp/rp/pkg/var/mobile/Library/CallCaptionPro/models/x-asr-480ms
           cp resources/bpe.vocab /tmp/rp/pkg/var/mobile/Library/CallCaptionPro/models/x-asr-480ms/bpe.vocab
           chmod 0644 /tmp/rp/pkg/var/mobile/Library/CallCaptionPro/models/x-asr-480ms/bpe.vocab
-          dpkg-deb -b /tmp/rp/pkg /tmp/rp/fixed.deb
+          # launchd 要求 LaunchDaemon plist 等文件属于 root:wheel；
+          # CI 默认用 runner 用户打包，必须强制 root 属主。
+          dpkg-deb --root-owner-group -Zxz -b /tmp/rp/pkg /tmp/rp/fixed.deb
           mkdir -p out
           cp /tmp/rp/fixed.deb out/
 
@@ -106,7 +108,7 @@ jobs:
           cp "$SRC/encoder.int8.onnx" "$SRC/decoder.onnx" "$SRC/joiner.int8.onnx" \
              "$SRC/tokens.txt" "$SRC/bpe.model" \
              model-package/var/mobile/Library/CallCaptionPro/models/x-asr-480ms/
-          dpkg-deb -b model-package out/net.user.callcaptionpro.models_1.0.0_iphoneos-arm64.deb
+          dpkg-deb --root-owner-group -Zxz -b model-package out/net.user.callcaptionpro.models_1.0.0_iphoneos-arm64.deb
           ls -lh out/
 
       - name: Upload deb

@@ -1,8 +1,8 @@
 #!/bin/sh
-# CallCaption Pro 1.0.0-pro2.1.10
-# Sileo 可能在 postinst 开始后约 1 秒就自动注销，把脚本一起带走。
-# 所以第一件事就是杀旧 daemon（几毫秒），让 launchd KeepAlive 拉起
-# 已经落盘的新二进制；稳定版禁用放到后面，能做多少做多少。
+# CallCaption Pro 1.0.0-pro2.1.11
+# 包内文件现在由 CI 用 --root-owner-group 打成 root:root，launchd 不会再报
+# "bad ownership/permissions"。这个脚本只做一次快速 kickstart/bootstrap，
+# 不再 chown、不再 killall、不再后台长任务，也不主动杀 SpringBoard。
 set +e
 
 JB=/var/jb
@@ -16,55 +16,25 @@ log() { echo "[$(date '+%F %T')] $*" >> "$LOG" 2>/dev/null || true; }
 KILLALL=/var/jb/usr/bin/killall
 [ -x "$KILLALL" ] || KILLALL=/usr/bin/killall
 [ -x "$KILLALL" ] || KILLALL=killall
+LABEL=net.user.callcaptionpro.audioservice
+PLIST="$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist"
 
 log "pro postinst start"
 
-# 0. launchd 强制要求 LaunchDaemon plist 是 root:wheel 且不可 group/other 写。
-#    deb 里的文件属主是打包用户，必须先在安装脚本里修正，否则 bootstrap
-#    会返回 122 "Path had bad ownership/permissions"，重启用户空间也不会加载。
-LABEL=net.user.callcaptionpro.audioservice
-PLIST="$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist"
-BIN="$JB/usr/local/bin/CallCaptionProAudioService"
-HELPER="$JB/usr/local/bin/CallCaptionProASR"
-FW="$JB/Library/Frameworks/SherpaOnnxC.framework/SherpaOnnxC"
-chown 0:0 "$PLIST" 2>/dev/null; chmod 0644 "$PLIST" 2>/dev/null
-chown 0:0 "$BIN" 2>/dev/null;   chmod 0755 "$BIN" 2>/dev/null
-chown 0:0 "$HELPER" 2>/dev/null; chmod 0755 "$HELPER" 2>/dev/null
-chown 0:0 "$FW" 2>/dev/null;    chmod 0755 "$FW" 2>/dev/null
-log "step: daemon perms fixed"
-
-# 1. 最先杀旧 Pro daemon。全名通常匹配不到（进程名 15 字符截断），
-#    再试截断名；最后才用 pgrep，避免 ps/launchctl 在安装环境里卡住。
-KILLED=0
-"$KILLALL" -9 CallCaptionProAudioService >/dev/null 2>&1 && KILLED=1
-"$KILLALL" -9 CallCaptionProA >/dev/null 2>&1 && KILLED=1
-if [ "$KILLED" = "0" ] && command -v pgrep >/dev/null 2>&1; then
-  for p in $(pgrep -f CallCaptionProAudioService 2>/dev/null); do
-    [ "$p" -gt 1 ] 2>/dev/null && kill -9 "$p" 2>/dev/null && KILLED=1
-  done
-fi
-log "step: old daemon killed=$KILLED"
-
-# 2. 立即拉起新 daemon。killed=0 说明 job 根本没在跑，必须 bootstrap；
-#    已注册但停止时 kickstart 会直接启动。全部赶在 Sileo 注销前完成。
-if [ "$KILLED" = "1" ]; then
-  launchctl kickstart -k "system/$LABEL" >>"$LOG" 2>&1
-  log "kickstart after kill rc=$?"
-else
+# 1. 已注册：kickstart -k 原地重启；未注册：bootstrap；再失败 load。
+launchctl kickstart -k "system/$LABEL" >>"$LOG" 2>&1
+RC=$?
+log "kickstart rc=$RC"
+if [ "$RC" -ne 0 ]; then
   launchctl bootstrap system "$PLIST" >>"$LOG" 2>&1
-  RC=$?
-  log "bootstrap rc=$RC"
-  if [ "$RC" -ne 0 ]; then
-    launchctl load "$PLIST" >>"$LOG" 2>&1
-    log "load rc=$?"
-    launchctl kickstart -k "system/$LABEL" >>"$LOG" 2>&1
-    log "kickstart rc=$?"
-  fi
+  log "bootstrap rc=$?"
+  launchctl load "$PLIST" >>"$LOG" 2>&1
+  log "load rc=$?"
 fi
 log "step: daemon start attempted"
 
-# 3. 暂停稳定版注入/设置/daemon 自启（只改名，不删除）。
-#    即使这一步被注销打断，旧 daemon 已经被杀，新 daemon 会由 launchd 拉起。
+# 2. 暂停稳定版注入/设置/daemon 自启（只改名，不删除）。
+#    这一步放在 daemon 启动之后，即使被 Sileo 注销打断也不影响新 daemon。
 for f in CallCaption.plist CallCaptionAppProbe.plist CallCaptionAudioHook.plist; do
   P="$JB/Library/MobileSubstrate/DynamicLibraries/$f"
   [ -f "$P" ] && mv -f "$P" "$P.disabled" 2>/dev/null && log "disabled $f"
@@ -76,5 +46,5 @@ P="$JB/Library/PreferenceLoader/Preferences/callcaption.plist"
 "$KILLALL" -9 Preferences >/dev/null 2>&1 || true
 log "step: stable disabled"
 
-log "pro postinst done (no forced respring)"
+log "pro postinst done"
 exit 0

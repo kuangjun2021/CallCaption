@@ -1,166 +1,57 @@
 #!/bin/sh
-# CallCaption Pro 1.0.0-pro2.1.6
+# CallCaption Pro 1.0.0-pro2.1.7
+# Sileo 会在 postinst 退出后立刻注销，长任务/后台进程都会被带走。
+# 所以这里只做几秒钟内能完成的快速动作：禁稳定版 + 杀旧 daemon，
+# 新 daemon 由 launchd KeepAlive 拉起（二进制已在 postinst 之前落盘）。
 set +e
-# 不启用 set -e：任何一步失败都要继续跑完并留下日志。
-# 独立包：安装时暂停稳定版（0.20.7.1）的注入/守护进程/设置入口，
-# 卸载时自动恢复稳定版。稳定版文件、配置、日志都不删除。
+
 JB=/var/jb
-# 直接写持久目录：/tmp 在重启后会清掉，用户一直找不到安装日志。
 LOG=/var/mobile/Library/CallCaptionPro/install.log
 mkdir -p /var/mobile/Library/CallCaptionPro 2>/dev/null || true
 chown mobile:mobile /var/mobile/Library/CallCaptionPro 2>/dev/null || true
+: > "$LOG" 2>/dev/null || true
+chmod 0666 "$LOG" 2>/dev/null || true
 
 log() { echo "[$(date '+%F %T')] $*" >> "$LOG" 2>/dev/null || true; }
 KILLALL=/var/jb/usr/bin/killall
 [ -x "$KILLALL" ] || KILLALL=/usr/bin/killall
 [ -x "$KILLALL" ] || KILLALL=killall
+LABEL=net.user.callcaptionpro.audioservice
 
-# 优先用系统 launchctl。/var/jb 里可能还有 procursus launchctl，
-# 它管理 system domain 的行为不一致，pro1.3 的 bootstrap 就是在这里失败的。
-PATH=/bin:/usr/bin:/usr/sbin:/sbin:$PATH
-export PATH
+log "pro postinst start"
 
-# Sileo 安装/注销会杀掉 postinst 子进程，导致脚本只写一行就消失。
-# 前台只做 detach：复制脚本到 Pro 目录，后台继续执行完整安装逻辑。
-if [ "$CC_SETUP_BG" != "1" ]; then
-  : > "$LOG" 2>/dev/null || true
-  chmod 0666 "$LOG" 2>/dev/null || true
-  log "pro postinst start"
-  RUN=/var/mobile/Library/CallCaptionPro/postinst.run
-  if cp "$0" "$RUN" 2>/dev/null && chmod 0755 "$RUN" 2>/dev/null; then
-    if command -v nohup >/dev/null 2>&1; then
-      CC_SETUP_BG=1 nohup /bin/sh "$RUN" >/dev/null 2>&1 &
-    else
-      (CC_SETUP_BG=1 /bin/sh "$RUN" >/dev/null 2>&1 &)
-    fi
-    log "background setup spawned"
-    exit 0
-  fi
-  log "background copy failed; continue in foreground"
-fi
-
-log "pro postinst background start"
-
-# Pro 运行目录：daemon/helper 以 mobile 运行，Settings 也在 mobile 沙盒。
-# 不要对 169MB 模型目录做递归 chown，Sileo 可能等不及把脚本杀掉；
-# 模型目录 root:wheel 0755 对 mobile 是只读可用的。
-mkdir -p /var/mobile/Library/CallCaptionPro 2>/dev/null || true
-chown mobile:mobile /var/mobile/Library/CallCaptionPro 2>/dev/null || true
-chmod 0755 /var/mobile/Library/CallCaptionPro 2>/dev/null || true
-find /var/mobile/Library/CallCaptionPro -maxdepth 1 -type f \
-  -exec chown mobile:mobile {} \; 2>/dev/null || true
-log "step: Pro dir ready"
-
-# Pro daemon 所有权/权限
-chown 0:0 "$JB/usr/local/bin/CallCaptionProAudioService" 2>/dev/null || true
-chmod 0755 "$JB/usr/local/bin/CallCaptionProAudioService" 2>/dev/null || true
-chown 0:0 "$JB/usr/local/bin/CallCaptionProASR" 2>/dev/null || true
-chmod 0755 "$JB/usr/local/bin/CallCaptionProASR" 2>/dev/null || true
-chown 0:0 "$JB/Library/Frameworks/SherpaOnnxC.framework/SherpaOnnxC" 2>/dev/null || true
-chmod 0755 "$JB/Library/Frameworks/SherpaOnnxC.framework/SherpaOnnxC" 2>/dev/null || true
-chown 0:0 "$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist" 2>/dev/null || true
-chmod 0644 "$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist" 2>/dev/null || true
-
-# Pro prefs bundle：清掉遗留的“类名 plist”（已知闪退源）
-B="$JB/Library/PreferenceBundles/CallCaptionProPrefs.bundle"
-if [ -d "$B" ]; then
-  find "$B" -maxdepth 1 -name "*.plist" ! -name "Root.plist" ! -name "Info.plist" -delete 2>/dev/null || true
-fi
-
-# 暂停稳定版：先停 daemon（bootout 失败时用 disable，防止 KeepAlive 再拉起）
-launchctl bootout system/net.user.callcaption.audioservice >/dev/null 2>&1 || true
-launchctl disable system/net.user.callcaption.audioservice >/dev/null 2>&1 || true
-"$KILLALL" -9 CallCaptionAudioService >/dev/null 2>&1 || true
-
-# 暂停稳定版注入/设置/daemon 自启（只改名，不删除）
+# 1. 暂停稳定版注入/设置/daemon 自启（只改名，不删除）
 for f in CallCaption.plist CallCaptionAppProbe.plist CallCaptionAudioHook.plist; do
   P="$JB/Library/MobileSubstrate/DynamicLibraries/$f"
-  if [ -f "$P" ]; then
-    mv -f "$P" "$P.disabled" 2>/dev/null && log "disabled $f"
-  fi
+  [ -f "$P" ] && mv -f "$P" "$P.disabled" 2>/dev/null && log "disabled $f"
 done
 P="$JB/Library/LaunchDaemons/net.user.callcaption.audioservice.plist"
-if [ -f "$P" ]; then
-  mv -f "$P" "$P.disabled" 2>/dev/null && log "disabled stable daemon plist"
-fi
+[ -f "$P" ] && mv -f "$P" "$P.disabled" 2>/dev/null && log "disabled stable daemon plist"
 P="$JB/Library/PreferenceLoader/Preferences/callcaption.plist"
-if [ -f "$P" ]; then
-  mv -f "$P" "$P.disabled" 2>/dev/null && log "disabled stable settings entry"
-fi
-# PreferenceLoader 会把旧条目缓存在 Preferences 进程里，杀掉才能立刻消失
+[ -f "$P" ] && mv -f "$P" "$P.disabled" 2>/dev/null && log "disabled stable settings entry"
 "$KILLALL" -9 Preferences >/dev/null 2>&1 || true
 log "step: stable disabled"
 
-# 启动/重启 Pro daemon
-# 关键：不要 bootout。旧 job 已注册时 kickstart -k 会原地 exec 新二进制；
-# 只有 job 未注册时才 bootstrap/load。bootout 会造成“旧进程已杀、新进程没起”的空窗，
-# 重启 SpringBoard 不会重启 launchd job，所以只能等用户空间重启才看到新版本。
-LABEL=net.user.callcaptionpro.audioservice
-PLIST="$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist"
-HB=/var/mobile/Library/CallCaptionPro/daemon.heartbeat
-EXPECT_TAG=pro2.1.6
-log "step: daemon restart begin"
-launchctl enable "system/$LABEL" >/dev/null 2>&1 || true
-
-log "launchctl print before:"
-launchctl print "system/$LABEL" >>"$LOG" 2>&1 || log "print rc=$?"
-
-# 已注册：原地重启；未注册：bootstrap/load。所有结果写安装日志，不再吞掉。
-if launchctl kickstart -k "system/$LABEL" >>"$LOG" 2>&1; then
-  log "kickstart ok"
-else
-  log "kickstart failed; trying bootstrap/load"
-  if launchctl bootstrap system "$PLIST" >>"$LOG" 2>&1; then
-    log "bootstrap ok"
-  elif launchctl load "$PLIST" >>"$LOG" 2>&1; then
-    log "load ok"
-  else
-    log "bootstrap/load failed"
-  fi
+# 2. 快速杀旧 Pro daemon；launchd KeepAlive 会 exec 同路径的新二进制。
+PIDS=""
+CID=$(launchctl print "system/$LABEL" 2>/dev/null \
+      | sed -n 's/.*pid = \([0-9][0-9]*\).*/\1/p' | head -1)
+[ -n "$CID" ] && PIDS="$CID"
+# killall 对 >15 字符进程名不可靠，额外用截断名/全名各试一次
+"$KILLALL" -9 CallCaptionProAudioService >/dev/null 2>&1 || true
+"$KILLALL" -9 CallCaptionProA >/dev/null 2>&1 || true
+if command -v pgrep >/dev/null 2>&1; then
+  P2=$(pgrep -f CallCaptionProAudioService 2>/dev/null | tr '\n' ' ')
+  [ -n "$P2" ] && PIDS="$PIDS $P2"
 fi
-
-# 等 heartbeat 变成新版本；这比解析 launchctl print 的 pid 可靠。
-i=0
-while [ "$i" -lt 12 ]; do
-  if [ -f "$HB" ] && grep -q "$EXPECT_TAG" "$HB" 2>/dev/null; then
-    log "daemon heartbeat updated to $EXPECT_TAG"
-    break
+for p in $PIDS; do
+  if [ "$p" -gt 1 ] 2>/dev/null; then
+    kill -9 "$p" 2>/dev/null && log "killed old daemon pid=$p"
   fi
-  sleep 1
-  i=$((i+1))
 done
-if ! grep -q "$EXPECT_TAG" "$HB" 2>/dev/null; then
-  # 最后兜底：launchd job 若还在跑旧二进制，kill -9 后由 KeepAlive 拉起新二进制。
-  PID=$(launchctl print "system/$LABEL" 2>/dev/null \
-        | sed -n 's/.*pid = \([0-9][0-9]*\).*/\1/p' | head -1)
-  log "heartbeat still old; daemon pid=$PID"
-  if [ -n "$PID" ] && [ "$PID" -gt 1 ] 2>/dev/null; then
-    log "kill -9 daemon pid=$PID; waiting for KeepAlive restart"
-    kill -9 "$PID" 2>/dev/null || true
-    i=0
-    while [ "$i" -lt 10 ]; do
-      if grep -q "$EXPECT_TAG" "$HB" 2>/dev/null; then
-        log "daemon heartbeat updated after kill"
-        break
-      fi
-      sleep 1
-      i=$((i+1))
-    done
-  fi
-fi
-if ! grep -q "$EXPECT_TAG" "$HB" 2>/dev/null; then
-  log "daemon heartbeat NOT $EXPECT_TAG; userspace reboot may be required"
-fi
-launchctl print "system/$LABEL" 2>/dev/null \
-  | grep -E "state =|pid =" >> "$LOG" 2>/dev/null || true
-log "step: daemon restart end"
+log "step: old daemon killed"
 
-# 日志本身已经在持久目录；把权限交回 mobile
-chown mobile:mobile "$LOG" 2>/dev/null || true
-chmod 0666 "$LOG" 2>/dev/null || true
-
-# 让 Pro SpringBoard/AppProbe 立刻加载
-"$KILLALL" -9 WhatsApp >/dev/null 2>&1 || true
-"$KILLALL" -9 SpringBoard >/dev/null 2>&1 || true
-log "pro postinst done"
+# 3. 不再 kill SpringBoard。Sileo 安装结束会给出注销/重启提示；
+#    若它自动注销，新 daemon 由 launchd 拉起；若没有，用户手动注销一次。
+log "pro postinst done (no forced respring)"
 exit 0

@@ -1525,6 +1525,9 @@ static void CCWriteAppCfg(BOOL armed) {
 static pid_t g_asrPid = -1;
 static CFAbsoluteTime g_asrSelfTestUntil = 0;
 static BOOL g_asrSettingsDirty = NO;
+static CFAbsoluteTime g_asrLastSpawn = 0;
+static BOOL g_asrRingAttempted = NO;
+static CFAbsoluteTime g_asrResidentRetryAt = 0;
 
 static NSString *CCASRHelperPath(void) {
     return @"/var/jb/usr/local/bin/CallCaptionProASR";
@@ -1554,9 +1557,9 @@ static BOOL CCASRHelperAvailable(void) {
     return YES;
 }
 static NSString *CCPreloadMode(void) {
-    NSString *m = [CCPrefStr(CC_K_ASR_PRELOAD, @"ring") lowercaseString];
-    if (![m isEqualToString:@"resident"] && ![m isEqualToString:@"off"])
-        return @"ring";
+    NSString *m = [CCPrefStr(CC_K_ASR_PRELOAD, @"off") lowercaseString];
+    if (![m isEqualToString:@"resident"] && ![m isEqualToString:@"ring"] && ![m isEqualToString:@"off"])
+        return @"off";
     return m;
 }
 static BOOL CCAnyCPUASR(void) {
@@ -1620,6 +1623,13 @@ static void CCStartASRHelper(void) {
     if (waitArm) argv[n++] = "--wait-arm";
     if (resident) argv[n++] = "--resident";
     argv[n] = NULL;
+    // 防御：任何路径 bug 都不允许 3 秒内重复拉起 169MB 模型。
+    CFAbsoluteTime spawnNow = CFAbsoluteTimeGetCurrent();
+    if (spawnNow - g_asrLastSpawn < 3.0) {
+        CCLogf(@"asr helper spawn throttled (%.1fs)", spawnNow - g_asrLastSpawn);
+        return;
+    }
+    g_asrLastSpawn = spawnNow;
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
     posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
@@ -1702,7 +1712,7 @@ static void CheckArm(void) {
         static CFAbsoluteTime lastHb;
         if (now - lastHb > 15.0) {
             lastHb = now;
-            NSString *hb = [NSString stringWithFormat:@"%.0f pro2.1\n",
+            NSString *hb = [NSString stringWithFormat:@"%.0f pro2.1.1\n",
                             [[NSDate date] timeIntervalSince1970]];
             NSString *hp = [CC_DIR stringByAppendingPathComponent:@"daemon.heartbeat"];
             [hb writeToFile:hp atomically:YES encoding:NSUTF8StringEncoding error:nil];
@@ -1715,8 +1725,12 @@ static void CheckArm(void) {
             int st = 0;
             pid_t r = waitpid(g_asrPid, &st, WNOHANG);
             if (r == g_asrPid) {
-                CCLogf(@"asr helper exited pid=%d status=%d", (int)g_asrPid, st);
+                int code = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+                CCLogf(@"asr helper exited pid=%d status=%d code=%d",
+                       (int)g_asrPid, st, code);
                 g_asrPid = -1;
+                // 非正常退出后 60 秒内不要常驻重拉，避免模型加载失败时循环占内存。
+                if (code != 0) g_asrResidentRetryAt = now + 60.0;
             }
         }
 
@@ -1752,6 +1766,8 @@ static void CheckArm(void) {
         } else if (![lastASRSig isEqualToString:asrSig]) {
             lastASRSig = [asrSig copy];
             g_asrSettingsDirty = YES;
+            g_asrResidentRetryAt = 0;
+            g_asrRingAttempted = NO;
             CCLogf(@"asr settings changed: %@", asrSig);
             if (!armed && g_asrPid > 0) {
                 CCLogf(@"asr settings changed while idle; restart helper");
@@ -1761,17 +1777,20 @@ static void CheckArm(void) {
         if ([preloadMode isEqualToString:@"resident"]) {
             static CFAbsoluteTime lastResidentTry;
             if (!armed && CCAnyCPUASR() && g_asrPid <= 0 &&
-                now > g_asrSelfTestUntil &&
+                now > g_asrSelfTestUntil && now > g_asrResidentRetryAt &&
                 now - lastResidentTry > 10.0) {
                 lastResidentTry = now;
                 CCLogf(@"resident preload: starting asr helper");
                 CCStartASRHelper();
             }
         } else if ([preloadMode isEqualToString:@"ring"] &&
-                   prepared && !armed && g_asrPid <= 0 && CCAnyCPUASR()) {
-            CCLogf(@"ring preload: starting asr helper");
+                   prepared && !armed && g_asrPid <= 0 &&
+                   CCAnyCPUASR() && !g_asrRingAttempted) {
+            g_asrRingAttempted = YES;
+            CCLogf(@"ring preload: starting asr helper (once per ring)");
             CCStartASRHelper();
         }
+        if (!prepared) g_asrRingAttempted = NO;
         BOOL wasArmed = lastArmed;
         if (armed && !lastArmed) {
             // 新通话：重置 Tap 探测，从 speaker(-2) 开始，最多试 -1 / -3。
@@ -1873,15 +1892,19 @@ static void CheckArm(void) {
             }
             [g_remote stop];
             [g_local stop];
-            // resident 模式挂断后保留热模型；ring/off 模式直接停掉。
-            // 通话中改过预加载/热词/引擎设置，则挂断后强制重启 helper。
+            // 注意：这个 if(!armed) 分支每 0.5 秒都会执行，不能无条件杀 helper。
+            // 响铃预加载时 prepared=1、wasArmed=0，helper 必须保留到接通；
+            // 只有真正挂断(wasArmed)或响铃取消(!prepared)才清理 ring/off helper。
+            BOOL stopASR = NO;
             if (g_asrSettingsDirty) {
                 CCLogf(@"asr settings changed during call; restart helper");
-                CCStopASRHelper();
                 g_asrSettingsDirty = NO;
-            } else if (!([CCPreloadMode() isEqualToString:@"resident"] && CCAnyCPUASR())) {
-                CCStopASRHelper();
+                stopASR = YES;
+            } else if (wasArmed || !prepared) {
+                if (!([CCPreloadMode() isEqualToString:@"resident"] && CCAnyCPUASR()))
+                    stopASR = YES;
             }
+            if (stopASR) CCStopASRHelper();
             // prepared=1 表示还在拨号/响铃，会话要留给即将接通的通话；
             // prepared=0 才是真正挂断/响铃取消，这时释放。
             if (!prepared) CCAudioSessionSetActive(NO);
@@ -2128,7 +2151,7 @@ int main(int argc, char *argv[]) {
         }
         CCPrefsReload();
 #ifdef CC_PRO
-        CCLogLine(@"audioservice started (pro2.1)");
+        CCLogLine(@"audioservice started (pro2.1.1)");
 #else
         CCLogLine(@"audioservice started (v0.17.0)");
 #endif

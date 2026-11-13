@@ -114,6 +114,46 @@ static NSString *Join(NSString *dir, NSString *name) {
     return [dir stringByAppendingPathComponent:name];
 }
 
+// 单实例锁：即使 daemon 逻辑再次出错，也不允许同时加载多个 169MB 模型。
+static int g_lockFd = -1;
+static char g_lockPathC[512];
+static void ReleaseHelperLock(void) {
+    if (g_lockFd >= 0) { close(g_lockFd); g_lockFd = -1; }
+    if (!g_lockPathC[0]) return;
+    FILE *fp = fopen(g_lockPathC, "r");
+    int p = 0;
+    if (fp) { if (fscanf(fp, "%d", &p) != 1) p = 0; fclose(fp); }
+    if (p == (int)getpid()) unlink(g_lockPathC);
+}
+static BOOL AcquireHelperLock(void) {
+    NSString *p = [CC_DIR stringByAppendingPathComponent:@"asr_helper.lock"];
+    snprintf(g_lockPathC, sizeof(g_lockPathC), "%s", p.fileSystemRepresentation);
+    for (int i = 0; i < 3; i++) {
+        int fd = open(g_lockPathC, O_CREAT | O_EXCL | O_WRONLY, 0666);
+        if (fd >= 0) {
+            char b[32];
+            int n = snprintf(b, sizeof(b), "%d\n", (int)getpid());
+            if (n > 0) write(fd, b, n);
+            g_lockFd = fd;
+            return YES;
+        }
+        FILE *fp = fopen(g_lockPathC, "r");
+        int pid = 0;
+        if (fp) { if (fscanf(fp, "%d", &pid) != 1) pid = 0; fclose(fp); }
+        if (pid <= 0) {
+            usleep(100000);
+            fp = fopen(g_lockPathC, "r");
+            if (fp) { if (fscanf(fp, "%d", &pid) != 1) pid = 0; fclose(fp); }
+        }
+        if (pid > 0 && kill((pid_t)pid, 0) == 0) {
+            Log(@"another asr helper pid=%d is running, exit", pid);
+            return NO;
+        }
+        unlink(g_lockPathC);
+    }
+    return NO;
+}
+
 // ---------- Pro2：一个 Recognizer + 两条 OnlineStream ----------
 
 @interface CCASRStream : NSObject
@@ -340,6 +380,8 @@ int main(int argc, char **argv) {
         [[NSFileManager defaultManager] createDirectoryAtPath:CC_DIR
                                   withIntermediateDirectories:YES
                                                    attributes:nil error:nil];
+        if (!AcquireHelperLock()) return 8;
+        atexit(ReleaseHelperLock);
 
         NSString *mode = @"offline";
         NSString *wav = [CC_DIR stringByAppendingPathComponent:@"local16k.wav"];

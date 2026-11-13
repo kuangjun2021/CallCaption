@@ -1523,6 +1523,7 @@ static void CCWriteAppCfg(BOOL armed) {
 
 // v1.0.0-pro1：CPU ASR helper（arm64 独立进程，Sherpa-ONNX）
 static pid_t g_asrPid = -1;
+static CFAbsoluteTime g_asrSelfTestUntil = 0;
 
 static NSString *CCASRHelperPath(void) {
     return @"/var/jb/usr/local/bin/CallCaptionProASR";
@@ -1551,6 +1552,40 @@ static BOOL CCASRHelperAvailable(void) {
     }
     return YES;
 }
+static NSString *CCPreloadMode(void) {
+    NSString *m = [CCPrefStr(CC_K_ASR_PRELOAD, @"ring") lowercaseString];
+    if (![m isEqualToString:@"resident"] && ![m isEqualToString:@"off"])
+        return @"ring";
+    return m;
+}
+static BOOL CCAnyCPUASR(void) {
+    BOOL localOn = CCPrefBool(CC_K_LOCAL_ENABLED, YES);
+    BOOL remoteOn = CCPrefBool(CC_K_REMOTE_ENABLED, YES);
+    BOOL localCPU = localOn &&
+        [[CCPrefStr(CC_K_LOCAL_ASR, @"cpu") lowercaseString] isEqualToString:@"cpu"];
+    BOOL remoteCPU = remoteOn &&
+        [[CCPrefStr(CC_K_REMOTE_ASR, @"cpu") lowercaseString] isEqualToString:@"cpu"];
+    return localCPU || remoteCPU;
+}
+static NSString *CCASRHotwordsPath(void) {
+    return [CC_DIR stringByAppendingPathComponent:@"asr_hotwords.txt"];
+}
+static void CCWriteASRHotwords(void) {
+    // 设置里用逗号/分号分隔，落盘成一行一个热词；bpe 模型会自动编码。
+    NSString *raw = CCPrefStr(CC_K_ASR_HOTWORDS,
+                              @"去电,字幕,翻译,微信,WhatsApp");
+    NSArray *parts = [raw componentsSeparatedByCharactersInSet:
+        [NSCharacterSet characterSetWithCharactersInString:@",，;；\n\r"]];
+    NSMutableString *out = [NSMutableString string];
+    for (NSString *p in parts) {
+        NSString *t = [p stringByTrimmingCharactersInSet:
+                       [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (t.length) [out appendFormat:@"%@\n", t];
+    }
+    NSString *path = CCASRHotwordsPath();
+    [out writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    chmod(path.fileSystemRepresentation, 0666);
+}
 static void CCStartASRHelper(void) {
     if (g_asrPid > 0) return;
     if (!CCASRHelperAvailable()) return;
@@ -1563,18 +1598,27 @@ static void CCStartASRHelper(void) {
         [[CCPrefStr(CC_K_REMOTE_ASR, @"cpu") lowercaseString]
          isEqualToString:@"cpu"];
     if (!localCPU && !remoteCPU) return;
+    NSString *preload = CCPreloadMode();
+    BOOL waitArm = [preload isEqualToString:@"ring"] ||
+                   [preload isEqualToString:@"resident"];
+    BOOL resident = [preload isEqualToString:@"resident"];
+    CCWriteASRHotwords();
     NSString *localWav = [CC_DIR stringByAppendingPathComponent:@"local16k.wav"];
     NSString *remoteWav = [CC_DIR stringByAppendingPathComponent:@"remote16k.wav"];
-    const char *argv[] = {
-        CCASRHelperPath().UTF8String,
-        "--mode", "live",
-        "--local", localCPU ? "1" : "0",
-        "--remote", remoteCPU ? "1" : "0",
-        "--local-wav", localWav.UTF8String,
-        "--remote-wav", remoteWav.UTF8String,
-        "--model-dir", CCASRModelDir().UTF8String,
-        NULL
-    };
+    NSString *hotwords = CCASRHotwordsPath();
+    const char *argv[24];
+    int n = 0;
+    argv[n++] = CCASRHelperPath().UTF8String;
+    argv[n++] = "--mode"; argv[n++] = "live";
+    argv[n++] = "--local"; argv[n++] = localCPU ? "1" : "0";
+    argv[n++] = "--remote"; argv[n++] = remoteCPU ? "1" : "0";
+    argv[n++] = "--local-wav"; argv[n++] = localWav.UTF8String;
+    argv[n++] = "--remote-wav"; argv[n++] = remoteWav.UTF8String;
+    argv[n++] = "--model-dir"; argv[n++] = CCASRModelDir().UTF8String;
+    argv[n++] = "--hotwords"; argv[n++] = hotwords.UTF8String;
+    if (waitArm) argv[n++] = "--wait-arm";
+    if (resident) argv[n++] = "--resident";
+    argv[n] = NULL;
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
     posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
@@ -1585,8 +1629,8 @@ static void CCStartASRHelper(void) {
     posix_spawn_file_actions_destroy(&fa);
     if (r == 0) {
         g_asrPid = pid;
-        CCLogf(@"asr helper started pid=%d local=%d remote=%d",
-               (int)pid, localCPU, remoteCPU);
+        CCLogf(@"asr helper started pid=%d local=%d remote=%d preload=%@",
+               (int)pid, localCPU, remoteCPU, preload);
     } else {
         CCLogf(@"asr helper spawn failed %d", r);
     }
@@ -1629,6 +1673,17 @@ static void CCPollASRSelfTest(void) {
     if ([fm fileExistsAtPath:marker]) {
         [fm removeItemAtPath:marker error:nil];
         CCLogf(@"asr selftest requested");
+        if (access(CC_ARM_PATH.fileSystemRepresentation, F_OK) == 0) {
+            CCLogf(@"asr selftest skipped: call active");
+            return;
+        }
+        // 常驻 helper 会占 ~200MB；先停掉再跑离线测试，避免双模型被 jetsam。
+        g_asrSelfTestUntil = CFAbsoluteTimeGetCurrent() + 90.0;
+        if (g_asrPid > 0) {
+            CCLogf(@"asr selftest: stop resident helper first");
+            CCStopASRHelper();
+            usleep(300000);
+        }
         CCStartASROfflineTest();
     }
 }
@@ -1645,7 +1700,7 @@ static void CheckArm(void) {
         static CFAbsoluteTime lastHb;
         if (now - lastHb > 15.0) {
             lastHb = now;
-            NSString *hb = [NSString stringWithFormat:@"%.0f pro2.0\n",
+            NSString *hb = [NSString stringWithFormat:@"%.0f pro2.1\n",
                             [[NSDate date] timeIntervalSince1970]];
             NSString *hp = [CC_DIR stringByAppendingPathComponent:@"daemon.heartbeat"];
             [hb writeToFile:hp atomically:YES encoding:NSUTF8StringEncoding error:nil];
@@ -1678,6 +1733,23 @@ static void CheckArm(void) {
         // 不需要再 setActive，避免打断 WhatsApp 已建立的音频路由。
         BOOL prepared = [[NSFileManager defaultManager] fileExistsAtPath:CC_PREPARE_PATH];
         if (prepared && !g_daemonAudioActive) CCAudioSessionSetActive(YES);
+        // Pro2.1：预加载。ring 在响铃时拉起 helper，模型加载完等 arm；
+        // resident 空闲就常驻，模型一直热着；off 仍然等接通再启动。
+        NSString *preloadMode = CCPreloadMode();
+        if ([preloadMode isEqualToString:@"resident"]) {
+            static CFAbsoluteTime lastResidentTry;
+            if (!armed && CCAnyCPUASR() && g_asrPid <= 0 &&
+                now > g_asrSelfTestUntil &&
+                now - lastResidentTry > 10.0) {
+                lastResidentTry = now;
+                CCLogf(@"resident preload: starting asr helper");
+                CCStartASRHelper();
+            }
+        } else if ([preloadMode isEqualToString:@"ring"] &&
+                   prepared && !armed && g_asrPid <= 0 && CCAnyCPUASR()) {
+            CCLogf(@"ring preload: starting asr helper");
+            CCStartASRHelper();
+        }
         BOOL wasArmed = lastArmed;
         if (armed && !lastArmed) {
             // 新通话：重置 Tap 探测，从 speaker(-2) 开始，最多试 -1 / -3。
@@ -1736,6 +1808,13 @@ static void CheckArm(void) {
                 chmod(ureset.fileSystemRepresentation, 0666);
             }
             g_localStartAfter = CFAbsoluteTimeGetCurrent() + 1.0;
+            // Pro2.1：WAV 已经清空后写 asr_go。预加载/常驻 helper 看到 arm 后
+            // 必须等这个标记变化才开文件，避免把上一通的旧 WAV 再识别一遍。
+            NSString *go = [NSString stringWithFormat:@"%.3f",
+                            CFAbsoluteTimeGetCurrent()];
+            [go writeToFile:CC_ASR_GO_PATH atomically:YES
+                   encoding:NSUTF8StringEncoding error:nil];
+            chmod(CC_ASR_GO_PATH.fileSystemRepresentation, 0666);
             CCSnapshotProbeFileSizes();
             CCTencentStart();
             // Pro2：任一方向走 CPU ASR 都启动同一个 helper（一个 Recognizer，两条流）。
@@ -1772,7 +1851,9 @@ static void CheckArm(void) {
             }
             [g_remote stop];
             [g_local stop];
-            CCStopASRHelper();
+            // resident 模式挂断后保留热模型；ring/off 模式直接停掉。
+            if (!([CCPreloadMode() isEqualToString:@"resident"] && CCAnyCPUASR()))
+                CCStopASRHelper();
             // prepared=1 表示还在拨号/响铃，会话要留给即将接通的通话；
             // prepared=0 才是真正挂断/响铃取消，这时释放。
             if (!prepared) CCAudioSessionSetActive(NO);
@@ -2019,7 +2100,7 @@ int main(int argc, char *argv[]) {
         }
         CCPrefsReload();
 #ifdef CC_PRO
-        CCLogLine(@"audioservice started (pro2.0)");
+        CCLogLine(@"audioservice started (pro2.1)");
 #else
         CCLogLine(@"audioservice started (v0.17.0)");
 #endif

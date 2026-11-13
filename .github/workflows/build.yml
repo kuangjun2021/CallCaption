@@ -66,6 +66,10 @@ jobs:
           mkdir -p /tmp/rp/pkg/var/mobile/Library/CallCaptionPro
           cp resources/selftest16k.wav /tmp/rp/pkg/var/mobile/Library/CallCaptionPro/selftest16k.wav
           chmod 0644 /tmp/rp/pkg/var/mobile/Library/CallCaptionPro/selftest16k.wav
+          # 热词 BPE 词表（由模型 bpe.model 导出，空格分隔），放主包避免重装模型包
+          mkdir -p /tmp/rp/pkg/var/mobile/Library/CallCaptionPro/models/x-asr-480ms
+          cp resources/bpe.vocab /tmp/rp/pkg/var/mobile/Library/CallCaptionPro/models/x-asr-480ms/bpe.vocab
+          chmod 0644 /tmp/rp/pkg/var/mobile/Library/CallCaptionPro/models/x-asr-480ms/bpe.vocab
           dpkg-deb -b /tmp/rp/pkg /tmp/rp/fixed.deb
           mkdir -p out
           cp /tmp/rp/fixed.deb out/

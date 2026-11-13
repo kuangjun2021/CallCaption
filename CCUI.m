@@ -1217,6 +1217,21 @@ void CCUILocalFinalText(NSString *text) {
                   CFAbsoluteTimeGetCurrent() - g_callActiveAt < 3.0);
     CCLogf(@"local final raw=%@ len=%lu filler=%d early=%d",
            text, (unsigned long)text.length, explicitFiller ? 1 : 0, early ? 1 : 0);
+    // Pro2.1：非语气词的单字（如咳嗽被识别成“下”“一”）只上字幕，
+    // 不翻译、不 TTS，避免对方听到莫名其妙的单词。
+    if (trimmed.length == 1 && !explicitFiller) {
+        static NSSet *allow;
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            allow = [NSSet setWithObjects:@"对", @"好", @"是", @"行",
+                     @"嗯", @"啊", @"哦", @"呃", @"喂", @"在", @"到",
+                     @"有", @"不", @"没", @"要", @"ok", nil];
+        });
+        if (![allow containsObject:[trimmed lowercaseString]]) {
+            CCLogf(@"local single-char ignored: %@", trimmed);
+            return;
+        }
+    }
     if (early && (explicitFiller || trimmed.length <= 1)) return;
     NSUInteger seq = g_callSeq;
     if (!g_callActive && !(g_graceActive && g_graceSeq == seq)) return;

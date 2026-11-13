@@ -148,6 +148,16 @@ static NSString *Join(NSString *dir, NSString *name) {
     if (_stream) SherpaOnnxDestroyOnlineStream(_stream);
 }
 - (NSString *)tag { return _isLocal ? @"L" : @"R"; }
+- (void)resetForNextCall:(const SherpaOnnxOnlineRecognizer *)rec {
+    if (_fp) { fclose(_fp); _fp = NULL; }
+    _offset = 44;
+    _lastText = @"";
+    _lastPartialAt = 0;
+    _firstAt = 0;
+    _finals = 0;
+    _samples = 0;
+    if (_stream) SherpaOnnxOnlineStreamReset(rec, _stream);
+}
 - (BOOL)ensureOpen {
     if (_fp) return YES;
     if (![[NSFileManager defaultManager] fileExistsAtPath:_path]) return NO;
@@ -226,9 +236,20 @@ static NSString *Join(NSString *dir, NSString *name) {
 }
 @end
 
+static double ASRGoStamp(void) {
+    NSString *s = [NSString stringWithContentsOfFile:CC_ASR_GO_PATH
+                                            encoding:NSUTF8StringEncoding error:nil];
+    return s.length ? s.doubleValue : 0.0;
+}
+static BOOL ASRParentAlive(void) {
+    // daemon 被 launchd 重启后，helper 会被 reparent 到 launchd(PID 1)。
+    return getppid() != 1;
+}
+
 static int RunLive(const SherpaOnnxOnlineRecognizer *rec,
                    BOOL localOn, BOOL remoteOn,
                    NSString *localWav, NSString *remoteWav,
+                   BOOL waitArm, BOOL resident,
                    CFAbsoluteTime t0) {
     NSMutableArray<CCASRStream *> *streams = [NSMutableArray array];
     if (localOn) {
@@ -249,25 +270,65 @@ static int RunLive(const SherpaOnnxOnlineRecognizer *rec,
         Log(@"no live stream enabled");
         return 7;
     }
-    Log(@"live streams local=%d remote=%d", localOn, remoteOn);
+    Log(@"live streams local=%d remote=%d waitArm=%d resident=%d",
+        localOn, remoteOn, waitArm, resident);
 
+    double go0 = ASRGoStamp();
     while (!g_stop) {
-        if (access(CC_ARM_PATH.fileSystemRepresentation, F_OK) != 0) {
-            Log(@"armed file gone, exit");
-            break;
-        }
-        BOOL did = NO;
-        for (CCASRStream *s in streams) {
-            @autoreleasepool {
-                if ([s feedRecognizer:rec t0:t0]) did = YES;
+        if (waitArm) {
+            Log(@"%@ waiting for arm", resident ? @"resident" : @"ring");
+            while (!g_stop) {
+                if (!ASRParentAlive()) {
+                    Log(@"parent gone while waiting");
+                    return 0;
+                }
+                if (access(CC_ARM_PATH.fileSystemRepresentation, F_OK) == 0) break;
+                if (!resident &&
+                    access(CC_PREPARE_PATH.fileSystemRepresentation, F_OK) != 0) {
+                    Log(@"prepare gone before arm, exit");
+                    return 0;
+                }
+                usleep(100000);
             }
+            if (g_stop) break;
+            // daemon 在清空 WAV 后才更新 asr_go；先等到它变化再开文件，
+            // 防止预加载 helper 把上一通的旧 WAV 再识别一遍。
+            CFAbsoluteTime waitStart = CFAbsoluteTimeGetCurrent();
+            while (!g_stop && ASRGoStamp() <= go0 &&
+                   CFAbsoluteTimeGetCurrent() - waitStart < 5.0) {
+                usleep(50000);
+            }
+            go0 = ASRGoStamp();
+            Log(@"arm seen, starting streams");
         }
-        if (!did) usleep(100000);
-    }
 
-    for (CCASRStream *s in streams) {
-        Log(@"%@ done samples=%lu finals=%lu", s.tag,
-            s.samples, s.finals);
+        while (!g_stop) {
+            if (!ASRParentAlive()) {
+                Log(@"parent gone, exit");
+                break;
+            }
+            if (access(CC_ARM_PATH.fileSystemRepresentation, F_OK) != 0) {
+                Log(@"armed file gone");
+                break;
+            }
+            BOOL did = NO;
+            for (CCASRStream *s in streams) {
+                @autoreleasepool {
+                    if ([s feedRecognizer:rec t0:t0]) did = YES;
+                }
+            }
+            if (!did) usleep(100000);
+        }
+
+        for (CCASRStream *s in streams) {
+            Log(@"%@ done samples=%lu finals=%lu", s.tag,
+                s.samples, s.finals);
+        }
+        if (!resident || g_stop) break;
+
+        // 常驻模式：清掉本通状态，等下一通 arm。
+        for (CCASRStream *s in streams) [s resetForNextCall:rec];
+        Log(@"resident: call ended, waiting next arm");
     }
     return 0;
 }
@@ -285,20 +346,26 @@ int main(int argc, char **argv) {
         NSString *localWav = [CC_DIR stringByAppendingPathComponent:@"local16k.wav"];
         NSString *remoteWav = [CC_DIR stringByAppendingPathComponent:@"remote16k.wav"];
         NSString *modelDir = [CC_DIR stringByAppendingPathComponent:@"models/x-asr-480ms"];
+        NSString *hotwordsPath = [CC_DIR stringByAppendingPathComponent:@"asr_hotwords.txt"];
         double maxSec = 0;
         BOOL fast = NO;
         BOOL localOn = YES;
         BOOL remoteOn = NO;
+        BOOL waitArm = NO;
+        BOOL resident = NO;
         for (int i = 1; i < argc; i++) {
             if (!strcmp(argv[i], "--mode") && i + 1 < argc) mode = @(argv[++i]);
             else if (!strcmp(argv[i], "--wav") && i + 1 < argc) wav = @(argv[++i]);
             else if (!strcmp(argv[i], "--local-wav") && i + 1 < argc) localWav = @(argv[++i]);
             else if (!strcmp(argv[i], "--remote-wav") && i + 1 < argc) remoteWav = @(argv[++i]);
+            else if (!strcmp(argv[i], "--hotwords") && i + 1 < argc) hotwordsPath = @(argv[++i]);
             else if (!strcmp(argv[i], "--local") && i + 1 < argc) localOn = atoi(argv[++i]) != 0;
             else if (!strcmp(argv[i], "--remote") && i + 1 < argc) remoteOn = atoi(argv[++i]) != 0;
             else if (!strcmp(argv[i], "--model-dir") && i + 1 < argc) modelDir = @(argv[++i]);
             else if (!strcmp(argv[i], "--max-seconds") && i + 1 < argc) maxSec = atof(argv[++i]);
             else if (!strcmp(argv[i], "--fast")) fast = YES;
+            else if (!strcmp(argv[i], "--wait-arm")) waitArm = YES;
+            else if (!strcmp(argv[i], "--resident")) { resident = YES; waitArm = YES; }
         }
         BOOL live = [mode isEqualToString:@"live"];
         NSString *encoder = Join(modelDir, @"encoder.int8.onnx");
@@ -334,8 +401,23 @@ int main(int argc, char **argv) {
         // 官方模型 encoder 元数据就是 zipformer2；显式指定可避免 sherpa
         // 为探测模型类型而把 169MB 模型加载两遍（首包延迟翻倍）。
         cfg.model_config.model_type = "zipformer2";
-        cfg.decoding_method = "greedy_search";
-        cfg.max_active_paths = 4;
+        // 热词只在 modified_beam_search 下生效；这个模型用 SentencePiece BPE，
+        // bpe.vocab 由 bpe.model 导出（空格分隔），modeling_unit 必须是 bpe。
+        NSDictionary *hwAttrs = [fm attributesOfItemAtPath:hotwordsPath error:nil];
+        BOOL hasHotwords = [hwAttrs[NSFileSize] unsignedLongLongValue] > 0;
+        NSString *bpeVocab = Join(modelDir, @"bpe.vocab");
+        BOOL hotwordsOK = hasHotwords && [fm fileExistsAtPath:bpeVocab];
+        if (hotwordsOK) {
+            cfg.decoding_method = "modified_beam_search";
+            cfg.max_active_paths = 4;
+            cfg.hotwords_file = hotwordsPath.UTF8String;
+            cfg.hotwords_score = 1.5f;
+            cfg.model_config.modeling_unit = "bpe";
+            cfg.model_config.bpe_vocab = bpeVocab.UTF8String;
+        } else {
+            cfg.decoding_method = "greedy_search";
+            cfg.max_active_paths = 4;
+        }
         cfg.enable_endpoint = 1;
         cfg.rule1_min_trailing_silence = 1.2f;
         cfg.rule2_min_trailing_silence = 0.8f;
@@ -347,10 +429,14 @@ int main(int argc, char **argv) {
             Log(@"create recognizer failed");
             return 3;
         }
-        Log(@"model loaded in %.2fs", CFAbsoluteTimeGetCurrent() - t0);
+        NSString *decodeName = cfg.decoding_method
+            ? [NSString stringWithUTF8String:cfg.decoding_method] : @"?";
+        Log(@"model loaded in %.2fs (hotwords=%d decode=%@)",
+            CFAbsoluteTimeGetCurrent() - t0, hotwordsOK, decodeName);
 
         if (live) {
-            int rc = RunLive(rec, localOn, remoteOn, localWav, remoteWav, t0);
+            int rc = RunLive(rec, localOn, remoteOn, localWav, remoteWav,
+                             waitArm, resident, t0);
             SherpaOnnxDestroyOnlineRecognizer(rec);
             Log(@"exit rc=%d", rc);
             return rc;

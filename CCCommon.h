@@ -13,6 +13,7 @@
 #define CC_SPOOL_PATH     @"/var/mobile/Library/CallCaptionPro/spool.txt"
 #define CC_ARM_PATH       @"/var/mobile/Library/CallCaptionPro/armed"
 #define CC_PREPARE_PATH   @"/var/mobile/Library/CallCaptionPro/prepare"
+#define CC_ASR_GO_PATH    @"/var/mobile/Library/CallCaptionPro/asr_go"
 #define CC_PREFS_PATH     @"/var/mobile/Library/Preferences/net.user.callcaptionpro.plist"
 #else
 #define CC_DOMAIN         @"net.user.callcaption"
@@ -73,6 +74,8 @@
 #define CC_K_TC_LOCAL_ENGINE  @"TencentLocalEngine"   // 旧混合 A 设置，B1 不再使用
 #define CC_K_LOCAL_ASR        @"LocalASRBackend"      // Pro: tencent / cpu（Sherpa arm64 helper）
 #define CC_K_REMOTE_ASR       @"RemoteASRBackend"     // Pro: tencent / cpu（同一 Recognizer 第二条流）
+#define CC_K_ASR_PRELOAD      @"AsrPreloadMode"       // ring / resident / off
+#define CC_K_ASR_HOTWORDS     @"AsrHotwords"          // 逗号分隔热词
 #define CC_K_REMOTE_TRANSLATE_ENGINE @"RemoteTranslateEngine"  // google / deepl / bing / ai
 #define CC_K_LOCAL_TRANSLATE_ENGINE  @"LocalTranslateEngine"   // deepl / google / bing / ai
 

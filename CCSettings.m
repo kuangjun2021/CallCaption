@@ -535,6 +535,12 @@ static void VoiceLists(NSString *prefix,
         MkChoice(@"RemoteASRBackend", @"对方识别引擎", @"cpu",
                  @[@"tencent", @"cpu"],
                  @[@"腾讯云 16k_en", @"本机 CPU（Sherpa，默认）"]),
+        MkChoice(@"AsrPreloadMode", @"CPU ASR 预加载", @"ring",
+                 @[@"ring", @"resident", @"off"],
+                 @[@"响铃预加载（推荐）", @"常驻内存（最快，约200MB）", @"接通时启动（最省内存）"]),
+        MkText(@"AsrHotwords", @"热词（逗号分隔）",
+               @"去电,字幕,翻译,微信,WhatsApp", NO,
+               @"去电,字幕,翻译,微信,WhatsApp"),
         MkChoice(@"RemoteTranslateEngine", @"来电翻译引擎", @"google",
                  @[@"google", @"deepl", @"bing", @"ai"],
                  @[@"Google（推荐）", @"DeepL", @"Bing/MyMemory（免费）", @"AI 自定义"]),
@@ -1134,7 +1140,7 @@ static NSString *CCApiTextFromJSON(NSString *engine, id json) {
     BOOL daemonOK = hbAt && [[NSDate date] timeIntervalSinceDate:hbAt] < 60.0;
     if (!daemonOK) {
         msg = @"Pro 音频守护进程未运行，或仍是旧版本。\n"
-               "请重启手机后再试；若仍不行，重新安装 pro1.2。";
+               "请重启手机后再试；若仍不行，重新安装 pro2.1。";
     } else if (![fm fileExistsAtPath:model]) {
         msg = @"模型未安装。请先安装 CallCaptionPro Models（x-asr-480ms）。";
     } else if (![fm fileExistsAtPath:wav] &&

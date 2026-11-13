@@ -383,7 +383,8 @@ static void SBDeliverLine(NSString *line) {
     BOOL content = [line hasPrefix:@"R|"] || [line hasPrefix:@"RP|"] ||
                    [line hasPrefix:@"I|"] || [line hasPrefix:@"LR|"] ||
                    [line hasPrefix:@"LRP|"] || [line hasPrefix:@"LI|"] ||
-                   [line hasPrefix:@"RQ|"] || [line hasPrefix:@"LQ|"];
+                   [line hasPrefix:@"RQ|"] || [line hasPrefix:@"LQ|"] ||
+                   [line hasPrefix:@"RC|"] || [line hasPrefix:@"LC|"];
     static NSString *lastLine = nil;
     static CFAbsoluteTime lastLineAt = 0;
     CFAbsoluteTime nowLine = CFAbsoluteTimeGetCurrent();
@@ -399,7 +400,13 @@ static void SBDeliverLine(NSString *line) {
     //          LR|<我方最终英文译文>  /  LRP|<我方临时译文>  /  LI|<我方原文>
     //          RE|<对方实际引擎>  /  LE|<我方实际引擎>
     // 只有最终译文才 TTS；临时译文只更新字幕，避免 partial 阶段反复播报。
-    if ([line hasPrefix:@"LRP|"]) {
+    if ([line hasPrefix:@"RC|"]) {
+        CCUIDeliverRemoteOriginal(@"");
+        CCUIDeliverRemoteTranslated(@"");
+    } else if ([line hasPrefix:@"LC|"]) {
+        CCUIDeliverLocalOriginal(@"");
+        CCUIDeliverLocalTranslated(@"");
+    } else if ([line hasPrefix:@"LRP|"]) {
         CCUIDeliverLocalTranslated([line substringFromIndex:4]);
     } else if ([line hasPrefix:@"LR|"]) {
         NSString *t = [line substringFromIndex:3];

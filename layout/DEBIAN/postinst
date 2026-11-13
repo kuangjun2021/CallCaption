@@ -1,5 +1,5 @@
 #!/bin/sh
-# CallCaption Pro 1.0.0-pro2.1.2
+# CallCaption Pro 1.0.0-pro2.1.3
 # 独立包：安装时暂停稳定版（0.20.7.1）的注入/守护进程/设置入口，
 # 卸载时自动恢复稳定版。稳定版文件、配置、日志都不删除。
 JB=/var/jb
@@ -69,7 +69,7 @@ fi
 LABEL=net.user.callcaptionpro.audioservice
 PLIST="$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist"
 HB=/var/mobile/Library/CallCaptionPro/daemon.heartbeat
-EXPECT_TAG=pro2.1.2
+EXPECT_TAG=pro2.1.3
 launchctl enable "system/$LABEL" >/dev/null 2>&1 || true
 
 log "launchctl print before:"
@@ -100,10 +100,35 @@ while [ "$i" -lt 12 ]; do
   i=$((i+1))
 done
 if ! grep -q "$EXPECT_TAG" "$HB" 2>/dev/null; then
-  log "daemon heartbeat NOT $EXPECT_TAG after 12s; userspace reboot may be required"
+  # 最后兜底：launchd job 若还在跑旧二进制，kill -9 后由 KeepAlive 拉起新二进制。
+  PID=$(launchctl print "system/$LABEL" 2>/dev/null \
+        | sed -n 's/.*pid = \([0-9][0-9]*\).*/\1/p' | head -1)
+  log "heartbeat still old; daemon pid=$PID"
+  if [ -n "$PID" ] && [ "$PID" -gt 1 ] 2>/dev/null; then
+    log "kill -9 daemon pid=$PID; waiting for KeepAlive restart"
+    kill -9 "$PID" 2>/dev/null || true
+    i=0
+    while [ "$i" -lt 10 ]; do
+      if grep -q "$EXPECT_TAG" "$HB" 2>/dev/null; then
+        log "daemon heartbeat updated after kill"
+        break
+      fi
+      sleep 1
+      i=$((i+1))
+    done
+  fi
+fi
+if ! grep -q "$EXPECT_TAG" "$HB" 2>/dev/null; then
+  log "daemon heartbeat NOT $EXPECT_TAG; userspace reboot may be required"
 fi
 launchctl print "system/$LABEL" 2>/dev/null \
   | grep -E "state =|pid =" >> "$LOG" 2>/dev/null || true
+
+# 把安装日志持久化，重启后还能导出
+mkdir -p /var/mobile/Library/CallCaptionPro
+cp "$LOG" /var/mobile/Library/CallCaptionPro/install.log 2>/dev/null || true
+chown mobile:mobile /var/mobile/Library/CallCaptionPro/install.log 2>/dev/null || true
+chmod 0666 /var/mobile/Library/CallCaptionPro/install.log 2>/dev/null || true
 
 # 让 Pro SpringBoard/AppProbe 立刻加载
 "$KILLALL" -9 WhatsApp >/dev/null 2>&1 || true

@@ -11,6 +11,7 @@
 #import <objc/runtime.h>
 #import <sys/stat.h>
 #import <stdio.h>
+#import <string.h>
 #import <unistd.h>
 #import <spawn.h>
 #import <signal.h>
@@ -1528,6 +1529,7 @@ static BOOL g_asrSettingsDirty = NO;
 static CFAbsoluteTime g_asrLastSpawn = 0;
 static BOOL g_asrRingAttempted = NO;
 static CFAbsoluteTime g_asrResidentRetryAt = 0;
+static double g_remoteTTSPlaybackUntil = 0;   // epoch 秒
 
 static NSString *CCASRHelperPath(void) {
     return @"/var/jb/usr/local/bin/CallCaptionProASR";
@@ -1572,9 +1574,9 @@ static BOOL CCPrepareValid(void) {
     return YES;
 }
 static NSString *CCPreloadMode(void) {
-    NSString *m = [CCPrefStr(CC_K_ASR_PRELOAD, @"off") lowercaseString];
+    NSString *m = [CCPrefStr(CC_K_ASR_PRELOAD, @"ring") lowercaseString];
     if (![m isEqualToString:@"resident"] && ![m isEqualToString:@"ring"] && ![m isEqualToString:@"off"])
-        return @"off";
+        return @"ring";
     return m;
 }
 static BOOL CCAnyCPUASR(void) {
@@ -1715,6 +1717,43 @@ static void CCPollASRSelfTest(void) {
     }
 }
 
+// TTS 回声门控：把“对方中文 TTS 播放到什么时候”写给 helper，
+// helper 在该窗口内丢弃 remote16k.wav，避免把自己的 TTS 再识别一遍。
+static double CCWavDurationSec(NSString *path) {
+    NSData *d = [NSData dataWithContentsOfFile:path
+                                       options:NSDataReadingMappedIfSafe
+                                         error:nil];
+    if (d.length < 44) return 0;
+    const uint8_t *p = d.bytes;
+    if (memcmp(p, "RIFF", 4) || memcmp(p + 8, "WAVE", 4)) return 0;
+    uint32_t rate = 0, dataSz = 0;
+    uint16_t ch = 0, bits = 0;
+    NSUInteger o = 12;
+    while (o + 8 <= d.length) {
+        uint32_t sz = (uint32_t)p[o + 4] | ((uint32_t)p[o + 5] << 8) |
+                      ((uint32_t)p[o + 6] << 16) | ((uint32_t)p[o + 7] << 24);
+        if (!memcmp(p + o, "fmt ", 4) && sz >= 16 && o + 24 <= d.length) {
+            ch = (uint16_t)(p[o + 10] | (p[o + 11] << 8));
+            rate = (uint32_t)p[o + 12] | ((uint32_t)p[o + 13] << 8) |
+                   ((uint32_t)p[o + 14] << 16) | ((uint32_t)p[o + 15] << 24);
+            bits = (uint16_t)(p[o + 22] | (p[o + 23] << 8));
+        } else if (!memcmp(p + o, "data", 4)) {
+            dataSz = sz;
+            if (dataSz > d.length - (o + 8)) dataSz = (uint32_t)(d.length - (o + 8));
+            break;
+        }
+        o += 8 + sz + (sz & 1);
+    }
+    if (!rate || !ch || !bits) return 0;
+    return (double)dataSz / ((double)rate * (double)ch * (bits / 8.0));
+}
+static void CCSetRemoteTTSUntil(double until) {
+    NSString *s = [NSString stringWithFormat:@"%.3f", until];
+    [s writeToFile:CC_REMOTE_TTS_UNTIL_PATH atomically:YES
+          encoding:NSUTF8StringEncoding error:nil];
+    chmod(CC_REMOTE_TTS_UNTIL_PATH.fileSystemRepresentation, 0666);
+}
+
 static void CheckArm(void) {
     @try {
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
@@ -1727,7 +1766,7 @@ static void CheckArm(void) {
         static CFAbsoluteTime lastHb;
         if (now - lastHb > 15.0) {
             lastHb = now;
-            NSString *hb = [NSString stringWithFormat:@"%.0f pro2.1.2\n",
+            NSString *hb = [NSString stringWithFormat:@"%.0f pro2.1.3\n",
                             [[NSDate date] timeIntervalSince1970]];
             NSString *hp = [CC_DIR stringByAppendingPathComponent:@"daemon.heartbeat"];
             [hb writeToFile:hp atomically:YES encoding:NSUTF8StringEncoding error:nil];
@@ -1871,6 +1910,8 @@ static void CheckArm(void) {
             [go writeToFile:CC_ASR_GO_PATH atomically:YES
                    encoding:NSUTF8StringEncoding error:nil];
             chmod(CC_ASR_GO_PATH.fileSystemRepresentation, 0666);
+            g_remoteTTSPlaybackUntil = 0;
+            CCSetRemoteTTSUntil(0);
             CCSnapshotProbeFileSizes();
             CCTencentStart();
             // Pro2：任一方向走 CPU ASR 都启动同一个 helper（一个 Recognizer，两条流）。
@@ -1895,6 +1936,8 @@ static void CheckArm(void) {
             g_remoteCallStarted = NO;
             CCTencentStop();
             if (wasArmed) {
+                g_remoteTTSPlaybackUntil = 0;
+                CCSetRemoteTTSUntil(0);
                 NSString *waDocs = CCFindWhatsAppDocs();
                 if (waDocs) {
                     NSString *reset = [waDocs stringByAppendingPathComponent:@"cc_tts_reset"];
@@ -2084,6 +2127,15 @@ static void CheckArm(void) {
                     BOOL ok = [fm copyItemAtPath:src toPath:dst error:nil];
                     if (ok) {
                         chmod(dst.fileSystemRepresentation, 0666);
+                        double dur = CCWavDurationSec(src);
+                        if (dur > 0.05) {
+                            double nowE = [[NSDate date] timeIntervalSince1970];
+                            double start = MAX(nowE, g_remoteTTSPlaybackUntil);
+                            g_remoteTTSPlaybackUntil = start + dur + 0.35;
+                            CCSetRemoteTTSUntil(g_remoteTTSPlaybackUntil);
+                            CCLogf(@"tts zh gate %.2fs (dur=%.2fs)",
+                                   g_remoteTTSPlaybackUntil - nowE, dur);
+                        }
                         [fm removeItemAtPath:src error:nil];
                     }
                     CCLogf(@"tts zh copied %@ ok=%d", f, ok);
@@ -2166,7 +2218,7 @@ int main(int argc, char *argv[]) {
         }
         CCPrefsReload();
 #ifdef CC_PRO
-        CCLogLine(@"audioservice started (pro2.1.2)");
+        CCLogLine(@"audioservice started (pro2.1.3)");
 #else
         CCLogLine(@"audioservice started (v0.17.0)");
 #endif

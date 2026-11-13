@@ -14,6 +14,7 @@
 #define CC_ARM_PATH       @"/var/mobile/Library/CallCaptionPro/armed"
 #define CC_PREPARE_PATH   @"/var/mobile/Library/CallCaptionPro/prepare"
 #define CC_ASR_GO_PATH    @"/var/mobile/Library/CallCaptionPro/asr_go"
+#define CC_REMOTE_TTS_UNTIL_PATH @"/var/mobile/Library/CallCaptionPro/remote_tts_until"
 #define CC_PREFS_PATH     @"/var/mobile/Library/Preferences/net.user.callcaptionpro.plist"
 #else
 #define CC_DOMAIN         @"net.user.callcaption"

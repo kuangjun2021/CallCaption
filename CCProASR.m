@@ -8,6 +8,7 @@
 #import "CCCommon.h"
 #import <Foundation/Foundation.h>
 #import <signal.h>
+#import <math.h>
 #import <stdio.h>
 #import <stdlib.h>
 #import <string.h>
@@ -156,6 +157,10 @@ static BOOL AcquireHelperLock(void) {
 
 // ---------- Pro2：一个 Recognizer + 两条 OnlineStream ----------
 
+static double ASRRemoteTTSUntilEpoch(void);
+static void ASRConfidence(const SherpaOnnxOnlineRecognizerResult *r,
+                          double *avg, double *minp, int *count);
+
 @interface CCASRStream : NSObject
 @property (nonatomic, assign) const SherpaOnnxOnlineStream *stream;
 @property (nonatomic, copy) NSString *path;
@@ -167,6 +172,7 @@ static BOOL AcquireHelperLock(void) {
 @property (nonatomic, assign) CFAbsoluteTime firstAt;
 @property (nonatomic, assign) unsigned long finals;
 @property (nonatomic, assign) unsigned long samples;
+@property (nonatomic, assign) BOOL mutedForTTS;
 @end
 
 @implementation CCASRStream
@@ -196,6 +202,7 @@ static BOOL AcquireHelperLock(void) {
     _firstAt = 0;
     _finals = 0;
     _samples = 0;
+    _mutedForTTS = NO;
     if (_stream) SherpaOnnxOnlineStreamReset(rec, _stream);
 }
 - (BOOL)ensureOpen {
@@ -213,25 +220,41 @@ static BOOL AcquireHelperLock(void) {
 - (void)handleResult:(NSString *)text
         recognizer:(const SherpaOnnxOnlineRecognizer *)rec
                 now:(CFAbsoluteTime)now
-                 t0:(CFAbsoluteTime)t0 {
-    if (text.length && !_firstAt) {
+                 t0:(CFAbsoluteTime)t0
+            confAvg:(double)confAvg
+            confMin:(double)confMin
+              confN:(int)confN {
+    BOOL lowPartial = (!_isLocal && confN > 0 && confAvg < -1.4);
+    if (text.length && !_firstAt && !lowPartial) {
         _firstAt = now;
         Log(@"%@ first +%.2fs: %@", self.tag, now - t0, text);
     }
-    if (text.length && ![text isEqualToString:_lastText] &&
+    if (text.length && !lowPartial && ![text isEqualToString:_lastText] &&
         now - _lastPartialAt > 0.3) {
         _lastPartialAt = now;
         _lastText = text;
         AppendSpool([(_isLocal ? @"LI|" : @"I|") stringByAppendingString:text]);
         Log(@"%@ partial +%.2fs: %@", self.tag, now - t0, text);
+    } else if (text.length && lowPartial && now - _lastPartialAt > 0.5) {
+        _lastPartialAt = now;
+        Log(@"%@ partial suppressed conf avg=%.2f min=%.2f text=%@",
+            self.tag, confAvg, confMin, text);
     }
     BOOL endpoint = SherpaOnnxOnlineStreamIsEndpoint(rec, _stream) ? YES : NO;
     if (endpoint) {
-        if (text.length) {
+        BOOL drop = (!_isLocal && text.length && confN > 0 &&
+                     (confAvg < -1.4 ||
+                      (text.length <= 2 && confAvg < -1.3)));
+        if (text.length && !drop) {
             _finals++;
             AppendSpool([(_isLocal ? @"LI|" : @"I|") stringByAppendingString:text]);
             AppendSpool([(_isLocal ? @"LQ|" : @"RQ|") stringByAppendingString:text]);
             Log(@"%@ final +%.2fs: %@", self.tag, now - t0, text);
+        } else if (drop) {
+            // 清掉可能已经显示出去的噪声 partial，避免残留假字幕。
+            AppendSpool(_isLocal ? @"LC|" : @"RC|");
+            Log(@"%@ final DROPPED conf avg=%.2f min=%.2f text=%@",
+                self.tag, confAvg, confMin, text);
         }
         SherpaOnnxOnlineStreamReset(rec, _stream);
         _lastText = @"";
@@ -240,7 +263,33 @@ static BOOL AcquireHelperLock(void) {
 }
 - (BOOL)feedRecognizer:(const SherpaOnnxOnlineRecognizer *)rec
                     t0:(CFAbsoluteTime)t0 {
+    // 先打开再判断 TTS 静音：这样 TTS 期间出现的 remote WAV 也会被直接推到文件尾，
+    // 不会等 TTS 结束再从 44 字节处把整段 TTS 重新识别一遍。
     if (![self ensureOpen]) return NO;
+    if (!_isLocal) {
+        double until = ASRRemoteTTSUntilEpoch();
+        double nowE = [[NSDate date] timeIntervalSince1970];
+        if (until > nowE) {
+            if (!_mutedForTTS) {
+                _mutedForTTS = YES;
+                _lastText = @"";
+                _lastPartialAt = 0;
+                SherpaOnnxOnlineStreamReset(rec, _stream);
+                AppendSpool(@"RC|");
+                Log(@"R muted for remote TTS %.2fs", until - nowE);
+            }
+            // TTS 已经混进下行并会被 speaker Tap 抓回；直接丢掉这段字节。
+            if (_fp) {
+                fseek(_fp, 0, SEEK_END);
+                long sz = ftell(_fp);
+                if (sz > _offset) _offset = sz;
+            }
+            return NO;
+        } else if (_mutedForTTS) {
+            _mutedForTTS = NO;
+            Log(@"R unmuted after remote TTS");
+        }
+    }
     fseek(_fp, 0, SEEK_END);
     long size = ftell(_fp);
     if (size < _offset) {
@@ -270,7 +319,11 @@ static BOOL AcquireHelperLock(void) {
         SherpaOnnxGetOnlineStreamResult(rec, _stream);
     NSString *text = r && r->text ? @(r->text) : @"";
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    [self handleResult:text recognizer:rec now:now t0:t0];
+    double confAvg = NAN, confMin = NAN;
+    int confN = 0;
+    if (!_isLocal && text.length) ASRConfidence(r, &confAvg, &confMin, &confN);
+    [self handleResult:text recognizer:rec now:now t0:t0
+               confAvg:confAvg confMin:confMin confN:confN];
     if (r) SherpaOnnxDestroyOnlineRecognizerResult(r);
     return YES;
 }
@@ -284,6 +337,36 @@ static double ASRGoStamp(void) {
 static BOOL ASRParentAlive(void) {
     // daemon 被 launchd 重启后，helper 会被 reparent 到 launchd(PID 1)。
     return getppid() != 1;
+}
+static double ASRRemoteTTSUntilEpoch(void) {
+    NSString *s = [NSString stringWithContentsOfFile:CC_REMOTE_TTS_UNTIL_PATH
+                                            encoding:NSUTF8StringEncoding error:nil];
+    return s.length ? s.doubleValue : 0.0;
+}
+// 只用于 final：解析 sherpa JSON 里的 ys_probs（对数概率）。
+static void ASRConfidence(const SherpaOnnxOnlineRecognizerResult *r,
+                          double *avg, double *minp, int *count) {
+    if (avg) *avg = NAN;
+    if (minp) *minp = NAN;
+    if (count) *count = 0;
+    if (!r || !r->json) return;
+    NSData *d = [NSData dataWithBytes:r->json length:strlen(r->json)];
+    id obj = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
+    if (![obj isKindOfClass:[NSDictionary class]]) return;
+    NSArray *ys = ((NSDictionary *)obj)[@"ys_probs"];
+    if (![ys isKindOfClass:[NSArray class]] || !ys.count) return;
+    double sum = 0, mn = 0;
+    int n = 0;
+    for (id v in ys) {
+        double x = [v doubleValue];
+        sum += x;
+        if (n == 0 || x < mn) mn = x;
+        n++;
+    }
+    if (!n) return;
+    if (avg) *avg = sum / n;
+    if (minp) *minp = mn;
+    if (count) *count = n;
 }
 
 static int RunLive(const SherpaOnnxOnlineRecognizer *rec,
@@ -382,6 +465,18 @@ int main(int argc, char **argv) {
                                                    attributes:nil error:nil];
         if (!AcquireHelperLock()) return 8;
         atexit(ReleaseHelperLock);
+
+        // 每次 helper 启动轮转日志，避免旧版本留下的非法 UTF-8 污染本次日志。
+        @try {
+            NSFileManager *lgfm = [NSFileManager defaultManager];
+            NSString *logp = Join(CC_DIR, @"asr.log");
+            NSString *prev = Join(CC_DIR, @"asr.log.prev");
+            NSDictionary *la = [lgfm attributesOfItemAtPath:logp error:nil];
+            if ([la[NSFileSize] unsignedLongLongValue] > 0) {
+                [lgfm removeItemAtPath:prev error:nil];
+                [lgfm moveItemAtPath:logp toPath:prev error:nil];
+            }
+        } @catch (NSException *e) { }
 
         NSString *mode = @"offline";
         NSString *wav = [CC_DIR stringByAppendingPathComponent:@"local16k.wav"];

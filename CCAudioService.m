@@ -1524,6 +1524,7 @@ static void CCWriteAppCfg(BOOL armed) {
 // v1.0.0-pro1：CPU ASR helper（arm64 独立进程，Sherpa-ONNX）
 static pid_t g_asrPid = -1;
 static CFAbsoluteTime g_asrSelfTestUntil = 0;
+static BOOL g_asrSettingsDirty = NO;
 
 static NSString *CCASRHelperPath(void) {
     return @"/var/jb/usr/local/bin/CallCaptionProASR";
@@ -1629,6 +1630,7 @@ static void CCStartASRHelper(void) {
     posix_spawn_file_actions_destroy(&fa);
     if (r == 0) {
         g_asrPid = pid;
+        g_asrSettingsDirty = NO;
         CCLogf(@"asr helper started pid=%d local=%d remote=%d preload=%@",
                (int)pid, localCPU, remoteCPU, preload);
     } else {
@@ -1736,6 +1738,26 @@ static void CheckArm(void) {
         // Pro2.1：预加载。ring 在响铃时拉起 helper，模型加载完等 arm；
         // resident 空闲就常驻，模型一直热着；off 仍然等接通再启动。
         NSString *preloadMode = CCPreloadMode();
+        // 预加载模式/CPU 引擎/热词变化时，空闲期重启 helper，保证设置立即生效。
+        static NSString *lastASRSig;
+        NSString *asrSig = [NSString stringWithFormat:@"%@|%@|%@|%d|%d|%@",
+            preloadMode,
+            CCPrefStr(CC_K_LOCAL_ASR, @"cpu"),
+            CCPrefStr(CC_K_REMOTE_ASR, @"cpu"),
+            CCPrefBool(CC_K_LOCAL_ENABLED, YES) ? 1 : 0,
+            CCPrefBool(CC_K_REMOTE_ENABLED, YES) ? 1 : 0,
+            CCPrefStr(CC_K_ASR_HOTWORDS, @"去电,字幕,翻译,微信,WhatsApp")];
+        if (!lastASRSig) {
+            lastASRSig = [asrSig copy];
+        } else if (![lastASRSig isEqualToString:asrSig]) {
+            lastASRSig = [asrSig copy];
+            g_asrSettingsDirty = YES;
+            CCLogf(@"asr settings changed: %@", asrSig);
+            if (!armed && g_asrPid > 0) {
+                CCLogf(@"asr settings changed while idle; restart helper");
+                CCStopASRHelper();
+            }
+        }
         if ([preloadMode isEqualToString:@"resident"]) {
             static CFAbsoluteTime lastResidentTry;
             if (!armed && CCAnyCPUASR() && g_asrPid <= 0 &&
@@ -1852,8 +1874,14 @@ static void CheckArm(void) {
             [g_remote stop];
             [g_local stop];
             // resident 模式挂断后保留热模型；ring/off 模式直接停掉。
-            if (!([CCPreloadMode() isEqualToString:@"resident"] && CCAnyCPUASR()))
+            // 通话中改过预加载/热词/引擎设置，则挂断后强制重启 helper。
+            if (g_asrSettingsDirty) {
+                CCLogf(@"asr settings changed during call; restart helper");
                 CCStopASRHelper();
+                g_asrSettingsDirty = NO;
+            } else if (!([CCPreloadMode() isEqualToString:@"resident"] && CCAnyCPUASR())) {
+                CCStopASRHelper();
+            }
             // prepared=1 表示还在拨号/响铃，会话要留给即将接通的通话；
             // prepared=0 才是真正挂断/响铃取消，这时释放。
             if (!prepared) CCAudioSessionSetActive(NO);

@@ -17,6 +17,8 @@
 #import <sys/wait.h>
 #import <fcntl.h>
 
+extern char **environ;
+
 static void CCLocalTeeWriteFloat(const float *src, UInt32 n);
 static void CCLocalTeeFlush(void);
 
@@ -1566,7 +1568,7 @@ static void CCStartASRHelper(void) {
     posix_spawn_file_actions_addopen(&fa, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
     pid_t pid = -1;
     int r = posix_spawn(&pid, CCASRHelperPath().fileSystemRepresentation,
-                        &fa, NULL, (char *const *)argv, NULL);
+                        &fa, NULL, (char *const *)argv, environ);
     posix_spawn_file_actions_destroy(&fa);
     if (r == 0) {
         g_asrPid = pid;
@@ -1602,7 +1604,7 @@ static void CCStartASROfflineTest(void) {
     posix_spawn_file_actions_addopen(&fa, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
     pid_t pid = -1;
     int r = posix_spawn(&pid, CCASRHelperPath().fileSystemRepresentation,
-                        &fa, NULL, (char *const *)argv, NULL);
+                        &fa, NULL, (char *const *)argv, environ);
     posix_spawn_file_actions_destroy(&fa);
     if (r == 0) CCLogf(@"asr selftest started pid=%d", (int)pid);
     else CCLogf(@"asr selftest spawn failed %d", r);

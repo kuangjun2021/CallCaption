@@ -33,16 +33,17 @@ P="$JB/Library/PreferenceLoader/Preferences/callcaption.plist"
 log "step: stable disabled"
 
 # 2. 快速杀旧 Pro daemon；launchd KeepAlive 会 exec 同路径的新二进制。
+#    这里不调用 launchctl print，避免它在安装环境里卡住整个 postinst。
 PIDS=""
-CID=$(launchctl print "system/$LABEL" 2>/dev/null \
-      | sed -n 's/.*pid = \([0-9][0-9]*\).*/\1/p' | head -1)
-[ -n "$CID" ] && PIDS="$CID"
-# killall 对 >15 字符进程名不可靠，额外用截断名/全名各试一次
+# killall 对 >15 字符进程名不可靠，全名/截断名各试一次
 "$KILLALL" -9 CallCaptionProAudioService >/dev/null 2>&1 || true
 "$KILLALL" -9 CallCaptionProA >/dev/null 2>&1 || true
 if command -v pgrep >/dev/null 2>&1; then
-  P2=$(pgrep -f CallCaptionProAudioService 2>/dev/null | tr '\n' ' ')
-  [ -n "$P2" ] && PIDS="$PIDS $P2"
+  PIDS=$(pgrep -f CallCaptionProAudioService 2>/dev/null | tr '\n' ' ')
+fi
+if [ -z "$PIDS" ] && command -v ps >/dev/null 2>&1; then
+  PIDS=$(ps -A -o pid=,comm= 2>/dev/null \
+         | awk '/CallCaptionProAudioService|CallCaptionProA/ {print $1}' | tr '\n' ' ')
 fi
 for p in $PIDS; do
   if [ "$p" -gt 1 ] 2>/dev/null; then

@@ -1574,7 +1574,7 @@ static NSString *CCASRHotwordsPath(void) {
 static void CCWriteASRHotwords(void) {
     // 设置里用逗号/分号分隔，落盘成一行一个热词；bpe 模型会自动编码。
     NSString *raw = CCPrefStr(CC_K_ASR_HOTWORDS,
-                              @"去电,字幕,翻译,微信,WhatsApp");
+                              @"去电,来电,字幕,翻译,微信,WhatsApp");
     NSArray *parts = [raw componentsSeparatedByCharactersInSet:
         [NSCharacterSet characterSetWithCharactersInString:@",，;；\n\r"]];
     NSMutableString *out = [NSMutableString string];
@@ -1746,7 +1746,7 @@ static void CheckArm(void) {
             CCPrefStr(CC_K_REMOTE_ASR, @"cpu"),
             CCPrefBool(CC_K_LOCAL_ENABLED, YES) ? 1 : 0,
             CCPrefBool(CC_K_REMOTE_ENABLED, YES) ? 1 : 0,
-            CCPrefStr(CC_K_ASR_HOTWORDS, @"去电,字幕,翻译,微信,WhatsApp")];
+            CCPrefStr(CC_K_ASR_HOTWORDS, @"去电,来电,字幕,翻译,微信,WhatsApp")];
         if (!lastASRSig) {
             lastASRSig = [asrSig copy];
         } else if (![lastASRSig isEqualToString:asrSig]) {

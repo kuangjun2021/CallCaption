@@ -18,7 +18,7 @@
   - `resident`：helper 常驻，模型一直热着（约 200MB）
   - `off`：接通后才启动
 - `asr_go` 同步标记：预加载/常驻 helper 看到 arm 后，等 daemon 清空 WAV 并写 `asr_go` 才开文件，避免重识别上一通旧 WAV。
-- 设置新增 `热词（逗号分隔）`，默认 `去电,字幕,翻译,微信,WhatsApp`。
+- 设置新增 `热词（逗号分隔）`，默认 `去电,来电,字幕,翻译,微信,WhatsApp`。
   - 助手用 `modified_beam_search` + `modeling_unit=bpe` + `bpe.vocab`（由 `bpe.model` 导出，空格分隔）。
   - 主包 repack 时把 `bpe.vocab` 放到 `models/x-asr-480ms/bpe.vocab`，不需要重装模型包。
 - 单字过滤：非语气词单字（如误识别的“下”“一”）只上字幕，不翻译、不 TTS。

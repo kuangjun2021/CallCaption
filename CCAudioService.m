@@ -1554,11 +1554,24 @@ static BOOL CCASRHelperAvailable(void) {
 static void CCStartASRHelper(void) {
     if (g_asrPid > 0) return;
     if (!CCASRHelperAvailable()) return;
-    NSString *wav = [CC_DIR stringByAppendingPathComponent:@"local16k.wav"];
+    BOOL localOn = CCPrefBool(CC_K_LOCAL_ENABLED, YES);
+    BOOL remoteOn = CCPrefBool(CC_K_REMOTE_ENABLED, YES);
+    BOOL localCPU = localOn &&
+        [[CCPrefStr(CC_K_LOCAL_ASR, @"cpu") lowercaseString]
+         isEqualToString:@"cpu"];
+    BOOL remoteCPU = remoteOn &&
+        [[CCPrefStr(CC_K_REMOTE_ASR, @"cpu") lowercaseString]
+         isEqualToString:@"cpu"];
+    if (!localCPU && !remoteCPU) return;
+    NSString *localWav = [CC_DIR stringByAppendingPathComponent:@"local16k.wav"];
+    NSString *remoteWav = [CC_DIR stringByAppendingPathComponent:@"remote16k.wav"];
     const char *argv[] = {
         CCASRHelperPath().UTF8String,
         "--mode", "live",
-        "--wav", wav.UTF8String,
+        "--local", localCPU ? "1" : "0",
+        "--remote", remoteCPU ? "1" : "0",
+        "--local-wav", localWav.UTF8String,
+        "--remote-wav", remoteWav.UTF8String,
         "--model-dir", CCASRModelDir().UTF8String,
         NULL
     };
@@ -1572,7 +1585,8 @@ static void CCStartASRHelper(void) {
     posix_spawn_file_actions_destroy(&fa);
     if (r == 0) {
         g_asrPid = pid;
-        CCLogf(@"asr helper started pid=%d", (int)pid);
+        CCLogf(@"asr helper started pid=%d local=%d remote=%d",
+               (int)pid, localCPU, remoteCPU);
     } else {
         CCLogf(@"asr helper spawn failed %d", r);
     }
@@ -1631,7 +1645,7 @@ static void CheckArm(void) {
         static CFAbsoluteTime lastHb;
         if (now - lastHb > 15.0) {
             lastHb = now;
-            NSString *hb = [NSString stringWithFormat:@"%.0f pro1.4\n",
+            NSString *hb = [NSString stringWithFormat:@"%.0f pro2.0\n",
                             [[NSDate date] timeIntervalSince1970]];
             NSString *hp = [CC_DIR stringByAppendingPathComponent:@"daemon.heartbeat"];
             [hb writeToFile:hp atomically:YES encoding:NSUTF8StringEncoding error:nil];
@@ -1724,12 +1738,17 @@ static void CheckArm(void) {
             g_localStartAfter = CFAbsoluteTimeGetCurrent() + 1.0;
             CCSnapshotProbeFileSizes();
             CCTencentStart();
-            // Pro1：我方走 CPU ASR 时，启动独立 arm64 helper；否则确保它停掉。
+            // Pro2：任一方向走 CPU ASR 都启动同一个 helper（一个 Recognizer，两条流）。
             BOOL localOnArm = CCPrefBool(CC_K_LOCAL_ENABLED, YES);
+            BOOL remoteOnArm = CCPrefBool(CC_K_REMOTE_ENABLED, YES);
             BOOL localCPU = localOnArm &&
-                [[CCPrefStr(CC_K_LOCAL_ASR, @"tencent") lowercaseString]
+                [[CCPrefStr(CC_K_LOCAL_ASR, @"cpu") lowercaseString]
                  isEqualToString:@"cpu"];
-            if (localCPU) CCStartASRHelper(); else CCStopASRHelper();
+            BOOL remoteCPU = remoteOnArm &&
+                [[CCPrefStr(CC_K_REMOTE_ASR, @"cpu") lowercaseString]
+                 isEqualToString:@"cpu"];
+            CCLogf(@"arm: cpu asr local=%d remote=%d", localCPU, remoteCPU);
+            if (localCPU || remoteCPU) CCStartASRHelper(); else CCStopASRHelper();
             CCLogf(@"arm: bridge wav cleared (local tap in 1.0s)");
         }
         lastArmed = armed;
@@ -2000,7 +2019,7 @@ int main(int argc, char *argv[]) {
         }
         CCPrefsReload();
 #ifdef CC_PRO
-        CCLogLine(@"audioservice started (pro1.4)");
+        CCLogLine(@"audioservice started (pro2.0)");
 #else
         CCLogLine(@"audioservice started (v0.17.0)");
 #endif

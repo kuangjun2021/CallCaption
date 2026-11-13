@@ -1153,11 +1153,28 @@ void CCUIEnqueueRemoteTTS(NSString *text) {
     CCTTSBuffer(text, @"zh-CN", @"cc_tts_zh.wav");
 }
 
+// Pro2：对方也可能说中文。中文字符不少于拉丁字母时，直接作为中文字幕，
+// 不再走 en→zh 翻译，避免把中文再翻译一遍产生垃圾。
+static BOOL CCRemoteTextIsMostlyChinese(NSString *text) {
+    NSUInteger cjk = 0, latin = 0;
+    for (NSUInteger i = 0; i < text.length; i++) {
+        unichar c = [text characterAtIndex:i];
+        if (c >= 0x4E00 && c <= 0x9FFF) cjk++;
+        else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) latin++;
+    }
+    return cjk > 0 && cjk >= latin;
+}
+
 // v0.20.0 B1：来电 ASR 最终文本 -> 独立翻译引擎（默认 Google）-> 中文字幕/TTS。
 void CCUIRemoteFinalText(NSString *text) {
     if (!text.length) return;
     NSUInteger seq = g_callSeq;
     if (!g_callActive && !(g_graceActive && g_graceSeq == seq)) return;
+    if (CCRemoteTextIsMostlyChinese(text)) {
+        // 对方本来就说中文：直接显示，不翻译、不做中文 TTS（避免回声）
+        CCUIDeliverRemoteTranslated(text);
+        return;
+    }
     NSString *eng = CCPrefStr(CC_K_REMOTE_TRANSLATE_ENGINE, @"google");
     CCTranslateWithEngine(text, @"en", @"zh", eng,
                           ^(NSString *out, NSString *used) {

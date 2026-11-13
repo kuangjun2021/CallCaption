@@ -114,6 +114,164 @@ static NSString *Join(NSString *dir, NSString *name) {
     return [dir stringByAppendingPathComponent:name];
 }
 
+// ---------- Pro2：一个 Recognizer + 两条 OnlineStream ----------
+
+@interface CCASRStream : NSObject
+@property (nonatomic, assign) const SherpaOnnxOnlineStream *stream;
+@property (nonatomic, copy) NSString *path;
+@property (nonatomic, assign) BOOL isLocal;
+@property (nonatomic, assign) FILE *fp;
+@property (nonatomic, assign) long offset;
+@property (nonatomic, copy) NSString *lastText;
+@property (nonatomic, assign) CFAbsoluteTime lastPartialAt;
+@property (nonatomic, assign) CFAbsoluteTime firstAt;
+@property (nonatomic, assign) unsigned long finals;
+@property (nonatomic, assign) unsigned long samples;
+@end
+
+@implementation CCASRStream
+- (instancetype)initWithRecognizer:(const SherpaOnnxOnlineRecognizer *)rec
+                              path:(NSString *)path
+                           isLocal:(BOOL)isLocal {
+    if ((self = [super init])) {
+        _stream = SherpaOnnxCreateOnlineStream(rec);
+        if (!_stream) return nil;
+        _path = [path copy];
+        _isLocal = isLocal;
+        _offset = 44;
+        _lastText = @"";
+    }
+    return self;
+}
+- (void)dealloc {
+    if (_fp) fclose(_fp);
+    if (_stream) SherpaOnnxDestroyOnlineStream(_stream);
+}
+- (NSString *)tag { return _isLocal ? @"L" : @"R"; }
+- (BOOL)ensureOpen {
+    if (_fp) return YES;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:_path]) return NO;
+    _fp = fopen(_path.fileSystemRepresentation, "rb");
+    if (!_fp) {
+        Log(@"%@ open live wav failed %@", self.tag, _path.lastPathComponent);
+        return NO;
+    }
+    _offset = 44;
+    Log(@"%@ stream open %@", self.tag, _path.lastPathComponent);
+    return YES;
+}
+- (void)handleResult:(NSString *)text
+        recognizer:(const SherpaOnnxOnlineRecognizer *)rec
+                now:(CFAbsoluteTime)now
+                 t0:(CFAbsoluteTime)t0 {
+    if (text.length && !_firstAt) {
+        _firstAt = now;
+        Log(@"%@ first +%.2fs: %@", self.tag, now - t0, text);
+    }
+    if (text.length && ![text isEqualToString:_lastText] &&
+        now - _lastPartialAt > 0.3) {
+        _lastPartialAt = now;
+        _lastText = text;
+        AppendSpool([(_isLocal ? @"LI|" : @"I|") stringByAppendingString:text]);
+        Log(@"%@ partial +%.2fs: %@", self.tag, now - t0, text);
+    }
+    BOOL endpoint = SherpaOnnxOnlineStreamIsEndpoint(rec, _stream) ? YES : NO;
+    if (endpoint) {
+        if (text.length) {
+            _finals++;
+            AppendSpool([(_isLocal ? @"LI|" : @"I|") stringByAppendingString:text]);
+            AppendSpool([(_isLocal ? @"LQ|" : @"RQ|") stringByAppendingString:text]);
+            Log(@"%@ final +%.2fs: %@", self.tag, now - t0, text);
+        }
+        SherpaOnnxOnlineStreamReset(rec, _stream);
+        _lastText = @"";
+        _lastPartialAt = 0;
+    }
+}
+- (BOOL)feedRecognizer:(const SherpaOnnxOnlineRecognizer *)rec
+                    t0:(CFAbsoluteTime)t0 {
+    if (![self ensureOpen]) return NO;
+    fseek(_fp, 0, SEEK_END);
+    long size = ftell(_fp);
+    if (size < _offset) {
+        // 文件被重建：从新文件头开始
+        _offset = 44;
+    }
+    if (size <= _offset) return NO;
+    fseek(_fp, _offset, SEEK_SET);
+    size_t want = MIN((size_t)6400, (size_t)(size - _offset));
+    want &= ~(size_t)1;
+    if (!want) return NO;
+
+    int16_t pcm[3200];
+    float flt[3200];
+    size_t got = fread(pcm, 1, want, _fp);
+    if (!got) return NO;
+    _offset += (long)got;
+    int n = (int)(got / 2);
+    _samples += (unsigned long)n;
+    for (int i = 0; i < n; i++) flt[i] = (float)pcm[i] / 32768.0f;
+
+    SherpaOnnxOnlineStreamAcceptWaveform(_stream, 16000, flt, n);
+    while (SherpaOnnxIsOnlineStreamReady(rec, _stream)) {
+        SherpaOnnxDecodeOnlineStream(rec, _stream);
+    }
+    const SherpaOnnxOnlineRecognizerResult *r =
+        SherpaOnnxGetOnlineStreamResult(rec, _stream);
+    NSString *text = r && r->text ? @(r->text) : @"";
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    [self handleResult:text recognizer:rec now:now t0:t0];
+    if (r) SherpaOnnxDestroyOnlineRecognizerResult(r);
+    return YES;
+}
+@end
+
+static int RunLive(const SherpaOnnxOnlineRecognizer *rec,
+                   BOOL localOn, BOOL remoteOn,
+                   NSString *localWav, NSString *remoteWav,
+                   CFAbsoluteTime t0) {
+    NSMutableArray<CCASRStream *> *streams = [NSMutableArray array];
+    if (localOn) {
+        CCASRStream *s = [[CCASRStream alloc] initWithRecognizer:rec
+                                                            path:localWav
+                                                         isLocal:YES];
+        if (!s) { Log(@"create local stream failed"); return 4; }
+        [streams addObject:s];
+    }
+    if (remoteOn) {
+        CCASRStream *s = [[CCASRStream alloc] initWithRecognizer:rec
+                                                            path:remoteWav
+                                                         isLocal:NO];
+        if (!s) { Log(@"create remote stream failed"); return 4; }
+        [streams addObject:s];
+    }
+    if (!streams.count) {
+        Log(@"no live stream enabled");
+        return 7;
+    }
+    Log(@"live streams local=%d remote=%d", localOn, remoteOn);
+
+    while (!g_stop) {
+        if (access(CC_ARM_PATH.fileSystemRepresentation, F_OK) != 0) {
+            Log(@"armed file gone, exit");
+            break;
+        }
+        BOOL did = NO;
+        for (CCASRStream *s in streams) {
+            @autoreleasepool {
+                if ([s feedRecognizer:rec t0:t0]) did = YES;
+            }
+        }
+        if (!did) usleep(100000);
+    }
+
+    for (CCASRStream *s in streams) {
+        Log(@"%@ done samples=%lu finals=%lu", s.tag,
+            s.samples, s.finals);
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     @autoreleasepool {
         signal(SIGTERM, on_signal);
@@ -124,12 +282,20 @@ int main(int argc, char **argv) {
 
         NSString *mode = @"offline";
         NSString *wav = [CC_DIR stringByAppendingPathComponent:@"local16k.wav"];
+        NSString *localWav = [CC_DIR stringByAppendingPathComponent:@"local16k.wav"];
+        NSString *remoteWav = [CC_DIR stringByAppendingPathComponent:@"remote16k.wav"];
         NSString *modelDir = [CC_DIR stringByAppendingPathComponent:@"models/x-asr-480ms"];
         double maxSec = 0;
         BOOL fast = NO;
+        BOOL localOn = YES;
+        BOOL remoteOn = NO;
         for (int i = 1; i < argc; i++) {
             if (!strcmp(argv[i], "--mode") && i + 1 < argc) mode = @(argv[++i]);
             else if (!strcmp(argv[i], "--wav") && i + 1 < argc) wav = @(argv[++i]);
+            else if (!strcmp(argv[i], "--local-wav") && i + 1 < argc) localWav = @(argv[++i]);
+            else if (!strcmp(argv[i], "--remote-wav") && i + 1 < argc) remoteWav = @(argv[++i]);
+            else if (!strcmp(argv[i], "--local") && i + 1 < argc) localOn = atoi(argv[++i]) != 0;
+            else if (!strcmp(argv[i], "--remote") && i + 1 < argc) remoteOn = atoi(argv[++i]) != 0;
             else if (!strcmp(argv[i], "--model-dir") && i + 1 < argc) modelDir = @(argv[++i]);
             else if (!strcmp(argv[i], "--max-seconds") && i + 1 < argc) maxSec = atof(argv[++i]);
             else if (!strcmp(argv[i], "--fast")) fast = YES;
@@ -146,8 +312,14 @@ int main(int argc, char **argv) {
                 return 2;
             }
         }
-        Log(@"start mode=%@ wav=%@ model=%@ threads=2", mode, wav.lastPathComponent,
-            modelDir.lastPathComponent);
+        if (live) {
+            Log(@"start mode=live local=%d remote=%d localWav=%@ remoteWav=%@ model=%@ threads=2",
+                localOn, remoteOn, localWav.lastPathComponent,
+                remoteWav.lastPathComponent, modelDir.lastPathComponent);
+        } else {
+            Log(@"start mode=offline wav=%@ model=%@ threads=2",
+                wav.lastPathComponent, modelDir.lastPathComponent);
+        }
 
         SherpaOnnxOnlineRecognizerConfig cfg;
         memset(&cfg, 0, sizeof(cfg));
@@ -175,13 +347,21 @@ int main(int argc, char **argv) {
             Log(@"create recognizer failed");
             return 3;
         }
+        Log(@"model loaded in %.2fs", CFAbsoluteTimeGetCurrent() - t0);
+
+        if (live) {
+            int rc = RunLive(rec, localOn, remoteOn, localWav, remoteWav, t0);
+            SherpaOnnxDestroyOnlineRecognizer(rec);
+            Log(@"exit rc=%d", rc);
+            return rc;
+        }
+
         const SherpaOnnxOnlineStream *stream = SherpaOnnxCreateOnlineStream(rec);
         if (!stream) {
             Log(@"create stream failed");
             SherpaOnnxDestroyOnlineRecognizer(rec);
             return 4;
         }
-        Log(@"model loaded in %.2fs", CFAbsoluteTimeGetCurrent() - t0);
 
         NSString *outPath = nil;
         FILE *outFp = NULL;

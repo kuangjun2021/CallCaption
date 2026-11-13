@@ -1,14 +1,14 @@
 # CallCaption Pro 2.1 — 预加载 + 热词 + 单字过滤
 
 基线：`pro2.0-stable` tag（commit d67e14c）
-构建：run `43390578725`，commit `fca4fb0`
+构建：run `43391678749`，commit `3053353`
 模型包不变，仍在 `releases/net.user.callcaptionpro.models_1.0.0_arm64e.deb`
 
 ## 产物
 
 | 文件 | 大小 | SHA256 |
 |---|---:|---|
-| `net.user.callcaptionpro_1.0.0-pro2.1_arm64e.deb` | 6,511,012 B | `a4922bf0899450ac700cbd46783a5a1ae2112cf65c526b88417b41617a7372c3` |
+| `net.user.callcaptionpro_1.0.0-pro2.1_arm64e.deb` | 6,512,008 B | `70b782d133040c5a826e6e884c64842d25a5c4b8e34c553b6ee8a809b6f3347c` |
 | `net.user.callcaptionpro_1.0.0-pro2.0_arm64e.deb`（回退基线） | 6,490,572 B | `37fdfa185d816da6e70a3575dfc87ee223b33648c746bd85a9e2b347f7156f13` |
 
 ## 2.1 改动

@@ -72,3 +72,15 @@
 
 - `CCAudioHook` 的 probe/off、`CCAppProbe` 的 appprobe.off、`CCUI` 的 tts_until/selftest.wav、`CCSupport` 的 markers.log、`CCAudioService` 的 sirihelper.pid 全部改用 `CC_DIR`。
 - Pro `postinst` 杀掉 `Preferences`，清 PreferenceLoader 缓存，避免稳定版设置入口残留。
+
+## 5. 安装完成界面被冲掉（已修，pro2.1.14/2.1.15）
+
+- 根因：dpkg 覆盖升级会执行**已安装旧包**的 `postrm upgrade`；Pro 2.0~2.1.13 的 postrm 不判断 `$1`，无条件 `killall -9 SpringBoard`，安装最后把 Sileo 完成页一起冲掉。
+- 2.1.13 的“无 preinst/postinst”对照包无效：升级时跑的仍是已安装 2.1.12 的 postrm。
+- 修复：
+  - `postrm`：仅 `remove/purge` 做事；`upgrade/abort-*` 直接退出；永不再杀 SpringBoard/WhatsApp。
+  - `postinst`：只启动 daemon，不杀进程、不 sleep。
+  - `preinst`：在 dpkg 调用旧 postrm 前做一次性 upgrade 拦截，保证 2.1.12/2.1.13 → 2.1.14 第一次安装就恢复完整流程。
+- 2.1.15：把 `pro2.1.15` 编译/写入守护进程与 Prefs Info.plist，修正 `probe.log` 仍显示 `pro2.1.12` 的问题。
+- 详见 `docs/pro2.1.15-release.md`。
+

@@ -1,5 +1,5 @@
 #!/bin/sh
-# CallCaption Pro 1.0.0-pro2.1.12 postinst
+# CallCaption Pro 1.0.0-pro2.1.13 postinst
 # 只做一次快速 launchctl，不做 chown/killall/后台任务，也不杀 SpringBoard。
 # 稳定版禁用已移到 preinst，保证这个脚本能在 Sileo 注销前正常结束。
 set +e

@@ -5,8 +5,15 @@
 #import <AVFoundation/AVFoundation.h>
 #import <stdio.h>
 
+#ifdef CC_PRO
+#define CC_DOMAIN @"net.user.callcaptionpro"
+#define CC_NOTIF  @"net.user.callcaptionpro.prefschanged"
+#define CC_PREFS_PATH @"/var/mobile/Library/Preferences/net.user.callcaptionpro.plist"
+#else
 #define CC_DOMAIN @"net.user.callcaption"
 #define CC_NOTIF  @"net.user.callcaption.prefschanged"
+#define CC_PREFS_PATH @"/var/mobile/Library/Preferences/net.user.callcaption.plist"
+#endif
 
 typedef NS_ENUM(NSInteger, CCPrefsItemKind) {
     CCPrefsItemKindSwitch = 0,
@@ -636,7 +643,7 @@ static void VoiceLists(NSString *prefix,
     // 所以“云端语音识别”等开关会出现“界面开着、日志里仍是 0”。
     // 这里直接合并写全局 plist（Preferences 进程对预置偏好目录有权限）。
     @try {
-        NSString *path = @"/var/mobile/Library/Preferences/net.user.callcaption.plist";
+        NSString *path = CC_PREFS_PATH;
         NSMutableDictionary *m = [NSMutableDictionary dictionaryWithContentsOfFile:path];
         if (!m) m = [NSMutableDictionary dictionary];
         m[key] = value ?: @"";

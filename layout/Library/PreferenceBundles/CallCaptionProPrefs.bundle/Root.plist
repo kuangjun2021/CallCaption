@@ -12,27 +12,27 @@
 	</dict>
 	<dict>
 		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<string>net.user.callcaptionpro.prefschanged</string>
 		<key>cell</key>
 		<string>PSSwitchCell</string>
 		<key>default</key>
 		<true/>
 		<key>defaults</key>
-		<string>net.user.callcaption</string>
+		<string>net.user.callcaptionpro</string>
 		<key>key</key>
 		<string>Enabled</string>
 		<key>label</key>
-		<string>启用 CallCaption</string>
+		<string>启用 CallCaption Pro</string>
 	</dict>
 	<dict>
 		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<string>net.user.callcaptionpro.prefschanged</string>
 		<key>cell</key>
 		<string>PSSwitchCell</string>
 		<key>default</key>
 		<true/>
 		<key>defaults</key>
-		<string>net.user.callcaption</string>
+		<string>net.user.callcaptionpro</string>
 		<key>key</key>
 		<string>RemoteEnabled</string>
 		<key>label</key>
@@ -40,13 +40,13 @@
 	</dict>
 	<dict>
 		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<string>net.user.callcaptionpro.prefschanged</string>
 		<key>cell</key>
 		<string>PSSwitchCell</string>
 		<key>default</key>
 		<false/>
 		<key>defaults</key>
-		<string>net.user.callcaption</string>
+		<string>net.user.callcaptionpro</string>
 		<key>key</key>
 		<string>LocalEnabled</string>
 		<key>label</key>
@@ -54,13 +54,13 @@
 	</dict>
 	<dict>
 		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<string>net.user.callcaptionpro.prefschanged</string>
 		<key>cell</key>
 		<string>PSSwitchCell</string>
 		<key>default</key>
 		<true/>
 		<key>defaults</key>
-		<string>net.user.callcaption</string>
+		<string>net.user.callcaptionpro</string>
 		<key>key</key>
 		<string>ShowRecognized</string>
 		<key>label</key>
@@ -68,13 +68,13 @@
 	</dict>
 	<dict>
 		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<string>net.user.callcaptionpro.prefschanged</string>
 		<key>cell</key>
 		<string>PSSwitchCell</string>
 		<key>default</key>
 		<true/>
 		<key>defaults</key>
-		<string>net.user.callcaption</string>
+		<string>net.user.callcaptionpro</string>
 		<key>key</key>
 		<string>ShowTranslated</string>
 		<key>label</key>
@@ -82,13 +82,13 @@
 	</dict>
 	<dict>
 		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<string>net.user.callcaptionpro.prefschanged</string>
 		<key>cell</key>
 		<string>PSSwitchCell</string>
 		<key>default</key>
 		<true/>
 		<key>defaults</key>
-		<string>net.user.callcaption</string>
+		<string>net.user.callcaptionpro</string>
 		<key>key</key>
 		<string>TTSEnabled</string>
 		<key>label</key>
@@ -96,13 +96,13 @@
 	</dict>
 	<dict>
 		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<string>net.user.callcaptionpro.prefschanged</string>
 		<key>cell</key>
 		<string>PSSwitchCell</string>
 		<key>default</key>
 		<true/>
 		<key>defaults</key>
-		<string>net.user.callcaption</string>
+		<string>net.user.callcaptionpro</string>
 		<key>key</key>
 		<string>CloudASR</string>
 		<key>label</key>
@@ -110,13 +110,13 @@
 	</dict>
 	<dict>
 		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<string>net.user.callcaptionpro.prefschanged</string>
 		<key>cell</key>
 		<string>PSSwitchCell</string>
 		<key>default</key>
 		<false/>
 		<key>defaults</key>
-		<string>net.user.callcaption</string>
+		<string>net.user.callcaptionpro</string>
 		<key>key</key>
 		<string>LargeCaptions</string>
 		<key>label</key>
@@ -124,13 +124,13 @@
 	</dict>
 	<dict>
 		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<string>net.user.callcaptionpro.prefschanged</string>
 		<key>cell</key>
 		<string>PSSwitchCell</string>
 		<key>default</key>
 		<false/>
 		<key>defaults</key>
-		<string>net.user.callcaption</string>
+		<string>net.user.callcaptionpro</string>
 		<key>key</key>
 		<string>AlwaysShowPanel</string>
 		<key>label</key>
@@ -146,13 +146,13 @@
 	</dict>
 	<dict>
 		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<string>net.user.callcaptionpro.prefschanged</string>
 		<key>cell</key>
 		<string>PSEditTextCell</string>
 		<key>default</key>
 		<string>en-US</string>
 		<key>defaults</key>
-		<string>net.user.callcaption</string>
+		<string>net.user.callcaptionpro</string>
 		<key>key</key>
 		<string>RemoteLocale</string>
 		<key>label</key>
@@ -162,13 +162,13 @@
 	</dict>
 	<dict>
 		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<string>net.user.callcaptionpro.prefschanged</string>
 		<key>cell</key>
 		<string>PSEditTextCell</string>
 		<key>default</key>
 		<string>zh-CN</string>
 		<key>defaults</key>
-		<string>net.user.callcaption</string>
+		<string>net.user.callcaptionpro</string>
 		<key>key</key>
 		<string>LocalLocale</string>
 		<key>label</key>
@@ -190,7 +190,7 @@
 		<key>default</key>
 		<string>auto</string>
 		<key>defaults</key>
-		<string>net.user.callcaption</string>
+		<string>net.user.callcaptionpro</string>
 		<key>key</key>
 		<string>Engine</string>
 		<key>label</key>
@@ -214,13 +214,13 @@
 	</dict>
 	<dict>
 		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<string>net.user.callcaptionpro.prefschanged</string>
 		<key>cell</key>
 		<string>PSEditTextCell</string>
 		<key>default</key>
 		<string></string>
 		<key>defaults</key>
-		<string>net.user.callcaption</string>
+		<string>net.user.callcaptionpro</string>
 		<key>key</key>
 		<string>DeepLKey</string>
 		<key>label</key>
@@ -228,13 +228,13 @@
 	</dict>
 	<dict>
 		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<string>net.user.callcaptionpro.prefschanged</string>
 		<key>cell</key>
 		<string>PSEditTextCell</string>
 		<key>default</key>
 		<string></string>
 		<key>defaults</key>
-		<string>net.user.callcaption</string>
+		<string>net.user.callcaptionpro</string>
 		<key>key</key>
 		<string>GoogleKey</string>
 		<key>label</key>
@@ -250,13 +250,13 @@
 	</dict>
 	<dict>
 		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<string>net.user.callcaptionpro.prefschanged</string>
 		<key>cell</key>
 		<string>PSEditTextCell</string>
 		<key>default</key>
 		<string>https://api.deepseek.com/v1/chat/completions</string>
 		<key>defaults</key>
-		<string>net.user.callcaption</string>
+		<string>net.user.callcaptionpro</string>
 		<key>key</key>
 		<string>AIURL</string>
 		<key>label</key>
@@ -264,13 +264,13 @@
 	</dict>
 	<dict>
 		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<string>net.user.callcaptionpro.prefschanged</string>
 		<key>cell</key>
 		<string>PSEditTextCell</string>
 		<key>default</key>
 		<string></string>
 		<key>defaults</key>
-		<string>net.user.callcaption</string>
+		<string>net.user.callcaptionpro</string>
 		<key>key</key>
 		<string>AIKey</string>
 		<key>label</key>
@@ -278,13 +278,13 @@
 	</dict>
 	<dict>
 		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<string>net.user.callcaptionpro.prefschanged</string>
 		<key>cell</key>
 		<string>PSEditTextCell</string>
 		<key>default</key>
 		<string>deepseek-chat</string>
 		<key>defaults</key>
-		<string>net.user.callcaption</string>
+		<string>net.user.callcaptionpro</string>
 		<key>key</key>
 		<string>AIModel</string>
 		<key>label</key>
@@ -322,13 +322,13 @@
 	</dict>
 	<dict>
 		<key>PostNotification</key>
-		<string>net.user.callcaption.prefschanged</string>
+		<string>net.user.callcaptionpro.prefschanged</string>
 		<key>cell</key>
 		<string>PSSwitchCell</string>
 		<key>default</key>
 		<true/>
 		<key>defaults</key>
-		<string>net.user.callcaption</string>
+		<string>net.user.callcaptionpro</string>
 		<key>key</key>
 		<string>Diagnostics</string>
 		<key>label</key>
@@ -354,7 +354,7 @@
 		<key>default</key>
 		<string>30</string>
 		<key>defaults</key>
-		<string>net.user.callcaption</string>
+		<string>net.user.callcaptionpro</string>
 		<key>key</key>
 		<string>RemoteOriginalVolume</string>
 		<key>label</key>
@@ -366,7 +366,7 @@
 		<key>default</key>
 		<string>30</string>
 		<key>defaults</key>
-		<string>net.user.callcaption</string>
+		<string>net.user.callcaptionpro</string>
 		<key>key</key>
 		<string>LocalOriginalVolume</string>
 		<key>label</key>

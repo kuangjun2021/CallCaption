@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>application-identifier</key>
+	<string>net.user.callcaptionpro.audioservice</string>
+	<key>platform-application</key>
+	<true/>
+	<key>get-task-allow</key>
+	<true/>
+
+	<!-- Core Audio：通话 Tap 的钥匙（参考 TrollRecorder / 电话助手） -->
+	<key>com.apple.coreaudio.CanRecordWithoutSessionActivation</key>
+	<true/>
+	<key>com.apple.coreaudio.CanTapTelephony</key>
+	<true/>
+	<key>com.apple.coreaudio.app-tap</key>
+	<true/>
+	<key>com.apple.coreaudio.private.SystemWideTap</key>
+	<true/>
+	<key>com.apple.audio.allows.mix.to.uplink</key>
+	<true/>
+
+	<!-- 无沙盒容器 -->
+	<key>com.apple.private.security.no-container</key>
+	<true/>
+	<key>com.apple.private.security.container-manager</key>
+	<true/>
+
+	<!-- TCC 直通：麦克风 + 语音识别 -->
+	<key>com.apple.private.tcc.allow</key>
+	<array>
+		<string>kTCCServiceMicrophone</string>
+		<string>kTCCServiceSpeechRecognition</string>
+	</array>
+	<key>com.apple.private.tcc.manager.check-by-audit-token</key>
+	<array>
+		<string>kTCCServiceMicrophone</string>
+	</array>
+
+	<!-- corespeechd（SFSpeechRecognizer 后端） -->
+	<key>com.apple.corespeech.xpc</key>
+	<true/>
+	<key>com.apple.corespeechd.activation</key>
+	<true/>
+	<key>com.apple.corespeech.corespeechd.activation.xpc</key>
+	<true/>
+	<key>com.apple.assistant.dictation.prerecorded</key>
+	<true/>
+
+	<!-- LCT 的 livecallhelper 里有、我们之前缺的（它用这些跑 SFSpeech/TTS/翻译） -->
+	<key>com.apple.developer.siri</key>
+	<true/>
+	<key>com.apple.assistant.settings</key>
+	<true/>
+	<key>com.apple.private.translation</key>
+	<true/>
+	<key>com.apple.private.tcc.manager</key>
+	<true/>
+	<key>com.apple.siri.VoiceShortcuts.xpc</key>
+	<true/>
+	<key>com.apple.siriknowledged</key>
+	<true/>
+</dict>
+</plist>

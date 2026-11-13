@@ -3,6 +3,18 @@
 #import <AudioToolbox/AudioToolbox.h>
 #import <stdatomic.h>
 
+#ifdef CC_PRO
+// v1.0.0-pro：完全独立的 Pro 包，不复用稳定版的任何域/目录/通知。
+#define CC_DOMAIN         @"net.user.callcaptionpro"
+#define CC_NOTIF_PREFIX   @"net.user.callcaptionpro."
+#define CC_NOTIF_PREFS    @"net.user.callcaptionpro.prefschanged"
+#define CC_DIR            @"/var/mobile/Library/CallCaptionPro"
+#define CC_LOG_PATH       @"/var/mobile/Library/CallCaptionPro/probe.log"
+#define CC_SPOOL_PATH     @"/var/mobile/Library/CallCaptionPro/spool.txt"
+#define CC_ARM_PATH       @"/var/mobile/Library/CallCaptionPro/armed"
+#define CC_PREPARE_PATH   @"/var/mobile/Library/CallCaptionPro/prepare"
+#define CC_PREFS_PATH     @"/var/mobile/Library/Preferences/net.user.callcaptionpro.plist"
+#else
 #define CC_DOMAIN         @"net.user.callcaption"
 #define CC_NOTIF_PREFIX   @"net.user.callcaption."
 #define CC_NOTIF_PREFS    @"net.user.callcaption.prefschanged"
@@ -15,6 +27,8 @@
 // 第二次通话出现 local tap 停帧、远端 WAV 只写一半。SB 在 ringing 写，
 // 守护进程只激活会话、不启动 ASR；接通后才 arm。
 #define CC_PREPARE_PATH   @"/var/mobile/Library/CallCaption/prepare"
+#define CC_PREFS_PATH     @"/var/mobile/Library/Preferences/net.user.callcaption.plist"
+#endif
 
 // ---------- 设置键（与 PreferenceLoader 面板一致） ----------
 #define CC_K_ENABLED          @"Enabled"          // 总开关

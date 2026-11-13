@@ -57,7 +57,7 @@ static void CCHookLog(NSString *fmt, ...) {
 
         // Darwin 通知 → SpringBoard 落盘。通知名压到 90 字符以内。
         NSString *shortMsg = msg.length > 90 ? [msg substringToIndex:90] : msg;
-        NSString *name = [NSString stringWithFormat:@"net.user.callcaption.log hook: %@", shortMsg];
+        NSString *name = [NSString stringWithFormat:@"%@log hook: %@", CC_NOTIF_PREFIX, shortMsg];
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                              (__bridge CFStringRef)name,
                                              NULL, NULL, true);

@@ -5,7 +5,7 @@
 	<key>entry</key>
 	<dict>
 		<key>bundle</key>
-		<string>CallCaptionPrefs</string>
+		<string>CallCaptionProPrefs</string>
 		<key>cell</key>
 		<string>PSLinkCell</string>
 		<key>detail</key>
@@ -15,7 +15,7 @@
 		<key>icon</key>
 		<string>icon.png</string>
 		<key>label</key>
-		<string>CallCaption 通话翻译</string>
+		<string>CallCaption Pro 通话翻译</string>
 	</dict>
 </dict>
 </plist>

@@ -1,0 +1,51 @@
+#!/bin/sh
+# CallCaption Pro 卸载：停止 Pro，恢复稳定版（0.20.7.1）的注入/守护进程/设置入口。
+# 稳定版的文件、偏好、日志都不动。
+JB=/var/jb
+LOG=/tmp/callcaptionpro_install.log
+
+log() { echo "[$(date '+%F %T')] $*" >> "$LOG" 2>/dev/null || true; }
+KILLALL=/var/jb/usr/bin/killall
+[ -x "$KILLALL" ] || KILLALL=/usr/bin/killall
+[ -x "$KILLALL" ] || KILLALL=killall
+
+log "pro postrm start"
+
+# 停 Pro daemon
+launchctl bootout system/net.user.callcaptionpro.audioservice >/dev/null 2>&1 || true
+"$KILLALL" -9 CallCaptionProAudioService >/dev/null 2>&1 || true
+
+# 恢复稳定版注入
+for f in CallCaption.plist CallCaptionAppProbe.plist CallCaptionAudioHook.plist; do
+  P="$JB/Library/MobileSubstrate/DynamicLibraries/$f"
+  if [ -f "$P.disabled" ]; then
+    mv -f "$P.disabled" "$P" 2>/dev/null && log "restored $f"
+  fi
+done
+
+# 恢复稳定版 daemon plist
+P="$JB/Library/LaunchDaemons/net.user.callcaption.audioservice.plist"
+if [ -f "$P.disabled" ]; then
+  mv -f "$P.disabled" "$P" 2>/dev/null && log "restored stable daemon plist"
+fi
+
+# 恢复稳定版设置入口
+P="$JB/Library/PreferenceLoader/Preferences/callcaption.plist"
+if [ -f "$P.disabled" ]; then
+  mv -f "$P.disabled" "$P" 2>/dev/null && log "restored stable settings entry"
+fi
+
+# 拉起稳定版 daemon
+launchctl enable system/net.user.callcaption.audioservice >/dev/null 2>&1 || true
+if [ -f "$JB/Library/LaunchDaemons/net.user.callcaption.audioservice.plist" ]; then
+  launchctl bootstrap system "$JB/Library/LaunchDaemons/net.user.callcaption.audioservice.plist" >/dev/null 2>&1 \
+    || launchctl load "$JB/Library/LaunchDaemons/net.user.callcaption.audioservice.plist" >/dev/null 2>&1 \
+    || true
+  "$KILLALL" -9 CallCaptionAudioService >/dev/null 2>&1 || true
+fi
+
+# 重新加载 SpringBoard/WhatsApp
+"$KILLALL" -9 WhatsApp >/dev/null 2>&1 || true
+"$KILLALL" -9 SpringBoard >/dev/null 2>&1 || true
+log "pro postrm done"
+exit 0

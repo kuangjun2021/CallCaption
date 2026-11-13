@@ -14,14 +14,17 @@ void CCProcessInit(void) {
     NSString *pn = [[NSProcessInfo processInfo] processName];
     g_sb = [pn isEqualToString:@"SpringBoard"];
     g_ms = [pn isEqualToString:@"mediaserverd"];
+#ifdef CC_PRO
+    g_as = [pn isEqualToString:@"CallCaptionProAudioService"];
+#else
     g_as = [pn isEqualToString:@"CallCaptionAudioService"];
+#endif
 }
 
 // ============ 设置 ============
 
 static NSDictionary *CCReadGlobalPrefs(void) {
-    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:
-                       @"/var/mobile/Library/Preferences/net.user.callcaption.plist"];
+    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:CC_PREFS_PATH];
     return [d isKindOfClass:[NSDictionary class]] ? d : @{};
 }
 
@@ -43,7 +46,8 @@ static NSDictionary *CCFindContainerPrefs(void) {
     NSDate *bestDate = nil;
     for (NSString *app in apps) {
         NSString *p = [[base stringByAppendingPathComponent:app]
-                       stringByAppendingPathComponent:@"Library/Preferences/net.user.callcaption.plist"];
+                       stringByAppendingPathComponent:
+                       [NSString stringWithFormat:@"Library/Preferences/%@.plist", CC_DOMAIN]];
         NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:nil];
         if (!attrs) continue;
         NSDate *m = attrs[NSFileModificationDate];
@@ -68,7 +72,7 @@ void CCPrefsReload(void) {
         // 读取顺序：全局 plist 为准；如果 Settings.app 的容器 plist 比全局文件更新，
         // 说明用户刚在设置 App 里改过 → 用容器值覆盖（否则会出现“开关开着、日志 cloud=0”）。
         if (CCIsAudioService() || CCIsSpringBoard()) {
-            NSString *gpath = @"/var/mobile/Library/Preferences/net.user.callcaption.plist";
+            NSString *gpath = CC_PREFS_PATH;
             NSDictionary *global = CCReadGlobalPrefs();
             NSMutableDictionary *m = [global mutableCopy] ?: [NSMutableDictionary dictionary];
             NSDictionary *container = CCFindContainerPrefs();
@@ -266,7 +270,7 @@ void CCSetPrefBool(NSString *key, BOOL value) {
     @try {
         // v0.13.16: 面板按钮也直接写守护进程读取的 mobile plist。
         // 之前只写 CFPreferences，而 CCPrefsReload 已改成读文件，导致面板开关“点了没反应”。
-        NSString *path = @"/var/mobile/Library/Preferences/net.user.callcaption.plist";
+        NSString *path = CC_PREFS_PATH;
         NSMutableDictionary *d = [[NSDictionary dictionaryWithContentsOfFile:path] mutableCopy]
                                  ?: [NSMutableDictionary dictionary];
         d[key] = @(value);

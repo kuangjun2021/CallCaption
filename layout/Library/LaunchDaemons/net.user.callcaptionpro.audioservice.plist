@@ -3,10 +3,10 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>net.user.callcaption.audioservice</string>
+	<string>net.user.callcaptionpro.audioservice</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/var/jb/usr/local/bin/CallCaptionAudioService</string>
+		<string>/var/jb/usr/local/bin/CallCaptionProAudioService</string>
 	</array>
 	<key>ProcessType</key>
 	<string>Interactive</string>

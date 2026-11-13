@@ -26,7 +26,7 @@ typedef void (*CCMSHookFunction)(void *symbol, void *hook, void **old);
 static CCMSHookFunction g_MSHook = NULL;
 static os_log_t g_oslog = NULL;
 
-#define CC_APP_LOG @"/var/mobile/Library/CallCaption/probe.log"
+#define CC_APP_LOG CC_LOG_PATH
 
 typedef OSStatus (*SetPropFn)(AudioUnit, AudioUnitPropertyID, AudioUnitScope,
                               AudioUnitElement, const void *, UInt32);
@@ -49,7 +49,7 @@ static void CCAppLog(NSString *fmt, ...) {
         os_log_with_type(g_oslog, OS_LOG_TYPE_DEFAULT, "%{public}s", msg.UTF8String);
 
         NSString *shortMsg = msg.length > 90 ? [msg substringToIndex:90] : msg;
-        NSString *name = [NSString stringWithFormat:@"net.user.callcaption.log hook: %@", shortMsg];
+        NSString *name = [NSString stringWithFormat:@"%@log hook: %@", CC_NOTIF_PREFIX, shortMsg];
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                              (__bridge CFStringRef)name,
                                              NULL, NULL, true);

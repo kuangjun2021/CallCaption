@@ -26,15 +26,16 @@ jobs:
         run: |
           export THEOS=$HOME/theos
           make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
-      - name: Repack - relocate bundle binary
+      - name: Repack - relocate Pro bundle binary
         run: |
           rm -rf /tmp/rp && mkdir -p /tmp/rp
           dpkg-deb -R packages/*.deb /tmp/rp/pkg
-          if [ -d /tmp/rp/pkg/var/jb/CallCaptionPrefs.bundle ]; then
-            mv /tmp/rp/pkg/var/jb/CallCaptionPrefs.bundle/* /tmp/rp/pkg/var/jb/Library/PreferenceBundles/CallCaptionPrefs.bundle/
-            rm -rf /tmp/rp/pkg/var/jb/CallCaptionPrefs.bundle
+          if [ -d /tmp/rp/pkg/var/jb/CallCaptionProPrefs.bundle ]; then
+            mkdir -p /tmp/rp/pkg/var/jb/Library/PreferenceBundles/CallCaptionProPrefs.bundle
+            mv /tmp/rp/pkg/var/jb/CallCaptionProPrefs.bundle/* /tmp/rp/pkg/var/jb/Library/PreferenceBundles/CallCaptionProPrefs.bundle/
+            rm -rf /tmp/rp/pkg/var/jb/CallCaptionProPrefs.bundle
           fi
-          chmod 755 /tmp/rp/pkg/var/jb/Library/PreferenceBundles/CallCaptionPrefs.bundle/CallCaptionPrefs 2>/dev/null || true
+          chmod 755 /tmp/rp/pkg/var/jb/Library/PreferenceBundles/CallCaptionProPrefs.bundle/CallCaptionProPrefs 2>/dev/null || true
           dpkg-deb -b /tmp/rp/pkg /tmp/rp/fixed.deb
           mkdir -p out
           cp /tmp/rp/fixed.deb out/

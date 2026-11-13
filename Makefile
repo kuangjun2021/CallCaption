@@ -5,42 +5,39 @@ INSTALL_TARGET_PROCESSES = SpringBoard mediaserverd
 
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME = CallCaption CallCaptionAudioHook CallCaptionAppProbe
-CallCaption_FILES = Tweak.x CCSupport.m CCTranslator.m CCEngine.m CCUI.m CCMicCapture.m CCSettings.m
-CallCaption_FRAMEWORKS = Foundation UIKit AudioToolbox CoreTelephony AVFoundation Speech CoreFoundation CallKit
-CallCaption_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-command-line-argument -Wno-unused-function -fno-objc-msgsend-selector-stubs -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
-CallCaption_LDFLAGS = -Wl,-fixup_chains
+# ===== CallCaption Pro：完全独立的包，不与稳定版共享域/目录/通知 =====
+TWEAK_NAME = CallCaptionPro CallCaptionProAudioHook CallCaptionProAppProbe
+CallCaptionPro_FILES = Tweak.x CCSupport.m CCTranslator.m CCEngine.m CCUI.m CCMicCapture.m CCSettings.m
+CallCaptionPro_FRAMEWORKS = Foundation UIKit AudioToolbox CoreTelephony AVFoundation Speech CoreFoundation CallKit
+CallCaptionPro_CFLAGS = -fobjc-arc -DCC_PRO -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-command-line-argument -Wno-unused-function -fno-objc-msgsend-selector-stubs -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
+CallCaptionPro_LDFLAGS = -Wl,-fixup_chains
 
-# 阶段 1：LCT 同款 AudioUnitRender/AudioUnitProcess 观察（只打 RMS，不改音频）
-CallCaptionAudioHook_FILES = CCAudioHook.m
-CallCaptionAudioHook_FRAMEWORKS = Foundation AudioToolbox
-CallCaptionAudioHook_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function -fno-objc-msgsend-selector-stubs -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
-CallCaptionAudioHook_LDFLAGS = -Wl,-fixup_chains
+# 阶段 1：AudioUnitRender/AudioUnitProcess 观察（只打 RMS，不改音频）
+CallCaptionProAudioHook_FILES = CCAudioHook.m
+CallCaptionProAudioHook_FRAMEWORKS = Foundation AudioToolbox
+CallCaptionProAudioHook_CFLAGS = -fobjc-arc -DCC_PRO -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function -fno-objc-msgsend-selector-stubs -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
+CallCaptionProAudioHook_LDFLAGS = -Wl,-fixup_chains
 
-# 阶段 2 诊断：注入通话 App（WhatsApp），包住 AudioUnit 的 render callback 抓对方 PCM
-CallCaptionAppProbe_FILES = CCAppProbe.m
-CallCaptionAppProbe_FRAMEWORKS = Foundation AudioToolbox
-CallCaptionAppProbe_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function -fno-objc-msgsend-selector-stubs -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
-CallCaptionAppProbe_LDFLAGS = -Wl,-fixup_chains
+# 阶段 2：注入 WhatsApp，包住 AudioUnit render callback 抓对方 PCM
+CallCaptionProAppProbe_FILES = CCAppProbe.m
+CallCaptionProAppProbe_FRAMEWORKS = Foundation AudioToolbox
+CallCaptionProAppProbe_CFLAGS = -fobjc-arc -DCC_PRO -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function -fno-objc-msgsend-selector-stubs -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
+CallCaptionProAppProbe_LDFLAGS = -Wl,-fixup_chains
 
+BUNDLE_NAME = CallCaptionProPrefs
+CallCaptionProPrefs_FILES = CallCaptionRootListController.m CCSettings.m
+CallCaptionProPrefs_FRAMEWORKS = Foundation UIKit AVFoundation
+CallCaptionProPrefs_CFLAGS = -fobjc-arc -Iinclude -DCC_PRO -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
+CallCaptionProPrefs_LDFLAGS = -Wl,-fixup_chains -Wl,-undefined,dynamic_lookup
 
-BUNDLE_NAME = CallCaptionPrefs
-CallCaptionPrefs_FILES = CallCaptionRootListController.m CCSettings.m
-CallCaptionPrefs_FRAMEWORKS = Foundation UIKit AVFoundation
-
-CallCaptionPrefs_CFLAGS = -fobjc-arc -Iinclude -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
-CallCaptionPrefs_LDFLAGS = -Wl,-fixup_chains -Wl,-undefined,dynamic_lookup
-
-# v0.10: 独立音频守护进程（系统级 Tap 抓取通话对方声音，无钩子/无 mediaserverd）
-TOOL_NAME = CallCaptionAudioService
-CallCaptionAudioService_FILES = CCAudioService.m CCSupport.m CCTranslator.m CCTencentTranslate.m
-CallCaptionAudioService_FRAMEWORKS = Foundation AudioToolbox AVFAudio AVFoundation Speech CoreFoundation
-CallCaptionAudioService_CFLAGS = -fobjc-arc -DCC_TOOL -Wno-deprecated-declarations -Wno-arc-performSelector-leaks -Wno-unused-variable -Wno-unused-function -fno-objc-msgsend-selector-stubs -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
-CallCaptionAudioService_LDFLAGS = -Wl,-fixup_chains
-CallCaptionAudioService_CODESIGN_FLAGS = -Sentitlements/CallCaptionAudioService.plist
-CallCaptionAudioService_INSTALL_PATH = /usr/local/bin
-
-
+# 独立音频守护进程（系统级 Tap）
+TOOL_NAME = CallCaptionProAudioService
+CallCaptionProAudioService_FILES = CCAudioService.m CCSupport.m CCTranslator.m CCTencentTranslate.m
+CallCaptionProAudioService_FRAMEWORKS = Foundation AudioToolbox AVFAudio AVFoundation Speech CoreFoundation
+CallCaptionProAudioService_CFLAGS = -fobjc-arc -DCC_TOOL -DCC_PRO -Wno-deprecated-declarations -Wno-arc-performSelector-leaks -Wno-unused-variable -Wno-unused-function -fno-objc-msgsend-selector-stubs -fptrauth-intrinsics -fptrauth-calls -fptrauth-returns
+CallCaptionProAudioService_LDFLAGS = -Wl,-fixup_chains
+CallCaptionProAudioService_CODESIGN_FLAGS = -Sentitlements/CallCaptionProAudioService.plist
+CallCaptionProAudioService_INSTALL_PATH = /usr/local/bin
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 include $(THEOS_MAKE_PATH)/bundle.mk

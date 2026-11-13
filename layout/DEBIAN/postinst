@@ -1,55 +1,58 @@
 #!/bin/sh
-# CallCaption v0.10.1 — 修复守护进程/LaunchDaemon 所有权（云端构建机产出 owner=501，launchd 会拒绝加载）
+# CallCaption Pro 1.0.0-pro0
+# 独立包：安装时暂停稳定版（0.20.7.1）的注入/守护进程/设置入口，
+# 卸载时自动恢复稳定版。稳定版文件、配置、日志都不删除。
 JB=/var/jb
+LOG=/tmp/callcaptionpro_install.log
 
-chown 0:0 "$JB/usr/local/bin/CallCaptionAudioService" 2>/dev/null || true
-chmod 0755 "$JB/usr/local/bin/CallCaptionAudioService" 2>/dev/null || true
-chown 0:0 "$JB/Library/LaunchDaemons/net.user.callcaption.audioservice.plist" 2>/dev/null || true
-chmod 0644 "$JB/Library/LaunchDaemons/net.user.callcaption.audioservice.plist" 2>/dev/null || true
+log() { echo "[$(date '+%F %T')] $*" >> "$LOG" 2>/dev/null || true; }
+KILLALL=/var/jb/usr/bin/killall
+[ -x "$KILLALL" ] || KILLALL=/usr/bin/killall
+[ -x "$KILLALL" ] || KILLALL=killall
 
-# 清掉旧版本遗留在错误路径的 Prefs bundle（Preferences 可能优先加载旧副本 → 一直闪退）
-rm -rf "$JB/CallCaptionPrefs.bundle" 2>/dev/null || true
+log "pro postinst start"
 
-# 清掉 bundle 里遗留的“类名 plist”（PSListController 会自动加载同名 plist → 已知闪退源）
-B="$JB/Library/PreferenceBundles/CallCaptionPrefs.bundle"
+# Pro daemon 所有权/权限
+chown 0:0 "$JB/usr/local/bin/CallCaptionProAudioService" 2>/dev/null || true
+chmod 0755 "$JB/usr/local/bin/CallCaptionProAudioService" 2>/dev/null || true
+chown 0:0 "$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist" 2>/dev/null || true
+chmod 0644 "$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist" 2>/dev/null || true
+
+# Pro prefs bundle：清掉遗留的“类名 plist”（已知闪退源）
+B="$JB/Library/PreferenceBundles/CallCaptionProPrefs.bundle"
 if [ -d "$B" ]; then
   find "$B" -maxdepth 1 -name "*.plist" ! -name "Root.plist" ! -name "Info.plist" -delete 2>/dev/null || true
 fi
 
-# 清掉重复的 PreferenceLoader 入口（只保留 callcaption.plist）
-PL="$JB/Library/PreferenceLoader/Preferences"
-if [ -d "$PL" ]; then
-  grep -l "net.user.callcaption" "$PL"/*.plist 2>/dev/null | while read f; do
-    case "$f" in */callcaption.plist) ;; *) rm -f "$f" ;; esac
-  done
+# 暂停稳定版：先停 daemon（bootout 失败时用 disable，防止 KeepAlive 再拉起）
+launchctl bootout system/net.user.callcaption.audioservice >/dev/null 2>&1 || true
+launchctl disable system/net.user.callcaption.audioservice >/dev/null 2>&1 || true
+"$KILLALL" -9 CallCaptionAudioService >/dev/null 2>&1 || true
+
+# 暂停稳定版注入/设置/daemon 自启（只改名，不删除）
+for f in CallCaption.plist CallCaptionAppProbe.plist CallCaptionAudioHook.plist; do
+  P="$JB/Library/MobileSubstrate/DynamicLibraries/$f"
+  if [ -f "$P" ]; then
+    mv -f "$P" "$P.disabled" 2>/dev/null && log "disabled $f"
+  fi
+done
+P="$JB/Library/LaunchDaemons/net.user.callcaption.audioservice.plist"
+if [ -f "$P" ]; then
+  mv -f "$P" "$P.disabled" 2>/dev/null && log "disabled stable daemon plist"
+fi
+P="$JB/Library/PreferenceLoader/Preferences/callcaption.plist"
+if [ -f "$P" ]; then
+  mv -f "$P" "$P.disabled" 2>/dev/null && log "disabled stable settings entry"
 fi
 
-# 升级时让新二进制立即生效（launchd KeepAlive 会自动拉起新版）
-killall -9 CallCaptionAudioService 2>/dev/null || true
-
-# 新版 assistantd 注入（Stage A）：重启 Siri 守护进程让 dylib 立刻加载
-killall -9 assistantd 2>/dev/null || true
-
-# 立即加载（部分环境不支持 bootstrap，则等用户空间重启自动加载）
-launchctl bootstrap system "$JB/Library/LaunchDaemons/net.user.callcaption.audioservice.plist" >/dev/null 2>&1 \
-  || launchctl load "$JB/Library/LaunchDaemons/net.user.callcaption.audioservice.plist" >/dev/null 2>&1 \
+# 启动 Pro daemon
+launchctl bootstrap system "$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist" >/dev/null 2>&1 \
+  || launchctl load "$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist" >/dev/null 2>&1 \
   || true
+"$KILLALL" -9 CallCaptionProAudioService >/dev/null 2>&1 || true
 
-
-# alpha3：不再在安装时强杀 mediaserverd/audiomxd。
-# alpha2 这么干之后，通话建立阶段 mediaserverd 被看门狗判定卡死（0x8BADF00D），
-# 拨号直接拨不出去。新钩子只在“重启用户空间”后自然加载，安装脚本不碰音频栈。
-KILLALL=/var/jb/usr/bin/killall
-[ -x "$KILLALL" ] || KILLALL=/usr/bin/killall
-[ -x "$KILLALL" ] || KILLALL=killall
-"$KILLALL" -9 CallCaptionAudioService 2>/dev/null || true
-
-# 0.17.0：清理 Siri 实验组件（系统拒绝独立进程使用 CoreEmbeddedSpeechRecognizer）
-"$KILLALL" -9 CallCaptionSiriHelper 2>/dev/null || true
-launchctl bootout system/net.user.callcaption.sirihelper 2>/dev/null || true
-rm -f "$JB/Library/LaunchDaemons/net.user.callcaption.sirihelper.plist" 2>/dev/null || true
-rm -f "$JB/usr/local/bin/CallCaptionSiriHelper" 2>/dev/null || true
-rm -f "$JB/Library/MobileSubstrate/DynamicLibraries/CallCaptionAssistant.dylib" 2>/dev/null || true
-rm -f "$JB/Library/MobileSubstrate/DynamicLibraries/CallCaptionAssistant.plist" 2>/dev/null || true
-
+# 让 Pro SpringBoard/AppProbe 立刻加载
+"$KILLALL" -9 WhatsApp >/dev/null 2>&1 || true
+"$KILLALL" -9 SpringBoard >/dev/null 2>&1 || true
+log "pro postinst done"
 exit 0

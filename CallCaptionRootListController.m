@@ -28,7 +28,11 @@ __attribute__((visibility("default")))
 - (void)viewDidLoad {
     // 不调用 [super viewDidLoad]：绕开 PSListController 的 plist/表格初始化（本环境闪退源）
     if (!self.view) self.view = [[UITableView alloc] initWithFrame:[UIScreen mainScreen].bounds style:UITableViewStyleGrouped];
+#ifdef CC_PRO
+    self.title = @"CallCaption Pro";
+#else
     self.title = @"CallCaption";
+#endif
     self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
 
     CCSettingsController *vc = [[CCSettingsController alloc] init];

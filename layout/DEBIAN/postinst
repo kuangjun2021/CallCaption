@@ -1,5 +1,5 @@
 #!/bin/sh
-# CallCaption Pro 1.0.0-pro2.1.5
+# CallCaption Pro 1.0.0-pro2.1.6
 set +e
 # 不启用 set -e：任何一步失败都要继续跑完并留下日志。
 # 独立包：安装时暂停稳定版（0.20.7.1）的注入/守护进程/设置入口，
@@ -9,8 +9,6 @@ JB=/var/jb
 LOG=/var/mobile/Library/CallCaptionPro/install.log
 mkdir -p /var/mobile/Library/CallCaptionPro 2>/dev/null || true
 chown mobile:mobile /var/mobile/Library/CallCaptionPro 2>/dev/null || true
-: > "$LOG" 2>/dev/null || true
-chmod 0666 "$LOG" 2>/dev/null || true
 
 log() { echo "[$(date '+%F %T')] $*" >> "$LOG" 2>/dev/null || true; }
 KILLALL=/var/jb/usr/bin/killall
@@ -22,7 +20,26 @@ KILLALL=/var/jb/usr/bin/killall
 PATH=/bin:/usr/bin:/usr/sbin:/sbin:$PATH
 export PATH
 
-log "pro postinst start"
+# Sileo 安装/注销会杀掉 postinst 子进程，导致脚本只写一行就消失。
+# 前台只做 detach：复制脚本到 Pro 目录，后台继续执行完整安装逻辑。
+if [ "$CC_SETUP_BG" != "1" ]; then
+  : > "$LOG" 2>/dev/null || true
+  chmod 0666 "$LOG" 2>/dev/null || true
+  log "pro postinst start"
+  RUN=/var/mobile/Library/CallCaptionPro/postinst.run
+  if cp "$0" "$RUN" 2>/dev/null && chmod 0755 "$RUN" 2>/dev/null; then
+    if command -v nohup >/dev/null 2>&1; then
+      CC_SETUP_BG=1 nohup /bin/sh "$RUN" >/dev/null 2>&1 &
+    else
+      (CC_SETUP_BG=1 /bin/sh "$RUN" >/dev/null 2>&1 &)
+    fi
+    log "background setup spawned"
+    exit 0
+  fi
+  log "background copy failed; continue in foreground"
+fi
+
+log "pro postinst background start"
 
 # Pro 运行目录：daemon/helper 以 mobile 运行，Settings 也在 mobile 沙盒。
 # 不要对 169MB 模型目录做递归 chown，Sileo 可能等不及把脚本杀掉；
@@ -81,7 +98,7 @@ log "step: stable disabled"
 LABEL=net.user.callcaptionpro.audioservice
 PLIST="$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist"
 HB=/var/mobile/Library/CallCaptionPro/daemon.heartbeat
-EXPECT_TAG=pro2.1.5
+EXPECT_TAG=pro2.1.6
 log "step: daemon restart begin"
 launchctl enable "system/$LABEL" >/dev/null 2>&1 || true
 

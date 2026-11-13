@@ -32,7 +32,10 @@ static void Log(NSString *fmt, ...) {
         NSString *p = [CC_DIR stringByAppendingPathComponent:@"asr.log"];
         FILE *fp = fopen(p.fileSystemRepresentation, "a");
         if (fp) {
-            fwrite(line.UTF8String, 1, line.length, fp);
+            // line.length 是 UTF-16 单元数，中文的 UTF-8 字节数更大；
+            // 用它当 fwrite 长度会把多字节字符截断，日志变成乱码。
+            NSData *d = [line dataUsingEncoding:NSUTF8StringEncoding];
+            if (d.length) fwrite(d.bytes, 1, d.length, fp);
             fflush(fp);
             fclose(fp);
         }

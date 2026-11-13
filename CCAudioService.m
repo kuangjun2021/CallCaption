@@ -2000,7 +2000,7 @@ int main(int argc, char *argv[]) {
         }
         CCPrefsReload();
 #ifdef CC_PRO
-        CCLogLine(@"audioservice started (pro1.2)");
+        CCLogLine(@"audioservice started (pro1.3)");
 #else
         CCLogLine(@"audioservice started (v0.17.0)");
 #endif

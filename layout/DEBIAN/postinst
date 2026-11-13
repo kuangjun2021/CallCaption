@@ -1,8 +1,8 @@
 #!/bin/sh
-# CallCaption Pro 1.0.0-pro2.1.7
-# Sileo 会在 postinst 退出后立刻注销，长任务/后台进程都会被带走。
-# 所以这里只做几秒钟内能完成的快速动作：禁稳定版 + 杀旧 daemon，
-# 新 daemon 由 launchd KeepAlive 拉起（二进制已在 postinst 之前落盘）。
+# CallCaption Pro 1.0.0-pro2.1.8
+# Sileo 可能在 postinst 开始后约 1 秒就自动注销，把脚本一起带走。
+# 所以第一件事就是杀旧 daemon（几毫秒），让 launchd KeepAlive 拉起
+# 已经落盘的新二进制；稳定版禁用放到后面，能做多少做多少。
 set +e
 
 JB=/var/jb
@@ -16,11 +16,23 @@ log() { echo "[$(date '+%F %T')] $*" >> "$LOG" 2>/dev/null || true; }
 KILLALL=/var/jb/usr/bin/killall
 [ -x "$KILLALL" ] || KILLALL=/usr/bin/killall
 [ -x "$KILLALL" ] || KILLALL=killall
-LABEL=net.user.callcaptionpro.audioservice
 
 log "pro postinst start"
 
-# 1. 暂停稳定版注入/设置/daemon 自启（只改名，不删除）
+# 1. 最先杀旧 Pro daemon。全名通常匹配不到（进程名 15 字符截断），
+#    再试截断名；最后才用 pgrep，避免 ps/launchctl 在安装环境里卡住。
+KILLED=0
+"$KILLALL" -9 CallCaptionProAudioService >/dev/null 2>&1 && KILLED=1
+"$KILLALL" -9 CallCaptionProA >/dev/null 2>&1 && KILLED=1
+if [ "$KILLED" = "0" ] && command -v pgrep >/dev/null 2>&1; then
+  for p in $(pgrep -f CallCaptionProAudioService 2>/dev/null); do
+    [ "$p" -gt 1 ] 2>/dev/null && kill -9 "$p" 2>/dev/null && KILLED=1
+  done
+fi
+log "step: old daemon killed=$KILLED"
+
+# 2. 暂停稳定版注入/设置/daemon 自启（只改名，不删除）。
+#    即使这一步被注销打断，旧 daemon 已经被杀，新 daemon 会由 launchd 拉起。
 for f in CallCaption.plist CallCaptionAppProbe.plist CallCaptionAudioHook.plist; do
   P="$JB/Library/MobileSubstrate/DynamicLibraries/$f"
   [ -f "$P" ] && mv -f "$P" "$P.disabled" 2>/dev/null && log "disabled $f"
@@ -32,27 +44,5 @@ P="$JB/Library/PreferenceLoader/Preferences/callcaption.plist"
 "$KILLALL" -9 Preferences >/dev/null 2>&1 || true
 log "step: stable disabled"
 
-# 2. 快速杀旧 Pro daemon；launchd KeepAlive 会 exec 同路径的新二进制。
-#    这里不调用 launchctl print，避免它在安装环境里卡住整个 postinst。
-PIDS=""
-# killall 对 >15 字符进程名不可靠，全名/截断名各试一次
-"$KILLALL" -9 CallCaptionProAudioService >/dev/null 2>&1 || true
-"$KILLALL" -9 CallCaptionProA >/dev/null 2>&1 || true
-if command -v pgrep >/dev/null 2>&1; then
-  PIDS=$(pgrep -f CallCaptionProAudioService 2>/dev/null | tr '\n' ' ')
-fi
-if [ -z "$PIDS" ] && command -v ps >/dev/null 2>&1; then
-  PIDS=$(ps -A -o pid=,comm= 2>/dev/null \
-         | awk '/CallCaptionProAudioService|CallCaptionProA/ {print $1}' | tr '\n' ' ')
-fi
-for p in $PIDS; do
-  if [ "$p" -gt 1 ] 2>/dev/null; then
-    kill -9 "$p" 2>/dev/null && log "killed old daemon pid=$p"
-  fi
-done
-log "step: old daemon killed"
-
-# 3. 不再 kill SpringBoard。Sileo 安装结束会给出注销/重启提示；
-#    若它自动注销，新 daemon 由 launchd 拉起；若没有，用户手动注销一次。
 log "pro postinst done (no forced respring)"
 exit 0

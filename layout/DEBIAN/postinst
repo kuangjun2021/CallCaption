@@ -1,5 +1,5 @@
 #!/bin/sh
-# CallCaption Pro 1.0.0-pro2.1.8
+# CallCaption Pro 1.0.0-pro2.1.9
 # Sileo 可能在 postinst 开始后约 1 秒就自动注销，把脚本一起带走。
 # 所以第一件事就是杀旧 daemon（几毫秒），让 launchd KeepAlive 拉起
 # 已经落盘的新二进制；稳定版禁用放到后面，能做多少做多少。
@@ -31,7 +31,27 @@ if [ "$KILLED" = "0" ] && command -v pgrep >/dev/null 2>&1; then
 fi
 log "step: old daemon killed=$KILLED"
 
-# 2. 暂停稳定版注入/设置/daemon 自启（只改名，不删除）。
+# 2. 立即拉起新 daemon。killed=0 说明 job 根本没在跑，必须 bootstrap；
+#    已注册但停止时 kickstart 会直接启动。全部赶在 Sileo 注销前完成。
+LABEL=net.user.callcaptionpro.audioservice
+PLIST="$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist"
+if [ "$KILLED" = "1" ]; then
+  launchctl kickstart -k "system/$LABEL" >>"$LOG" 2>&1
+  log "kickstart after kill rc=$?"
+else
+  launchctl bootstrap system "$PLIST" >>"$LOG" 2>&1
+  RC=$?
+  log "bootstrap rc=$RC"
+  if [ "$RC" -ne 0 ]; then
+    launchctl load "$PLIST" >>"$LOG" 2>&1
+    log "load rc=$?"
+    launchctl kickstart -k "system/$LABEL" >>"$LOG" 2>&1
+    log "kickstart rc=$?"
+  fi
+fi
+log "step: daemon start attempted"
+
+# 3. 暂停稳定版注入/设置/daemon 自启（只改名，不删除）。
 #    即使这一步被注销打断，旧 daemon 已经被杀，新 daemon 会由 launchd 拉起。
 for f in CallCaption.plist CallCaptionAppProbe.plist CallCaptionAudioHook.plist; do
   P="$JB/Library/MobileSubstrate/DynamicLibraries/$f"

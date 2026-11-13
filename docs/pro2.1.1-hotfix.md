@@ -1,4 +1,4 @@
-# Pro2.1 崩溃根因与 2.1.1 修复
+# Pro2.1 崩溃根因与 2.1.2 修复
 
 ## 现象
 
@@ -16,7 +16,7 @@ Pro2.1 的响铃预加载 helper 在 `prepared=1, armed=0` 时启动，紧接着
 
 Pro2.0 没有预加载路径，所以没有这个问题。
 
-## 2.1.1 修复
+## 2.1.2 修复
 
 - 停止 helper 只在真正挂断（`wasArmed`）或响铃取消（`!prepared`）时执行，
   响铃期间保留预加载 helper。
@@ -28,8 +28,8 @@ Pro2.0 没有预加载路径，所以没有这个问题。
 
 ## 产物
 
-- `net.user.callcaptionpro_1.0.0-pro2.1.1_arm64e.deb`
-  - 6,514,136 B
-  - SHA256 `b5b517729e071b85f3c1e5363eec4c60e48ab48f5dca0a319ace66e76bb0f145`
+- `net.user.callcaptionpro_1.0.0-pro2.1.2_arm64e.deb`
+  - 6,513,688 B
+  - SHA256 `3dc0ded07bffd33f52d7865f5c69c0838aa065fc3f23d90379b9f6daee4f97de`
 - 回退基线 `net.user.callcaptionpro_1.0.0-pro2.0_arm64e.deb`
   - SHA256 `37fdfa185d816da6e70a3575dfc87ee223b33648c746bd85a9e2b347f7156f13`

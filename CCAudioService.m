@@ -1631,7 +1631,7 @@ static void CheckArm(void) {
         static CFAbsoluteTime lastHb;
         if (now - lastHb > 15.0) {
             lastHb = now;
-            NSString *hb = [NSString stringWithFormat:@"%.0f pro1.2\n",
+            NSString *hb = [NSString stringWithFormat:@"%.0f pro1.4\n",
                             [[NSDate date] timeIntervalSince1970]];
             NSString *hp = [CC_DIR stringByAppendingPathComponent:@"daemon.heartbeat"];
             [hb writeToFile:hp atomically:YES encoding:NSUTF8StringEncoding error:nil];
@@ -2000,7 +2000,7 @@ int main(int argc, char *argv[]) {
         }
         CCPrefsReload();
 #ifdef CC_PRO
-        CCLogLine(@"audioservice started (pro1.3)");
+        CCLogLine(@"audioservice started (pro1.4)");
 #else
         CCLogLine(@"audioservice started (v0.17.0)");
 #endif

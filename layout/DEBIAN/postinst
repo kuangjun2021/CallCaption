@@ -1,5 +1,5 @@
 #!/bin/sh
-# CallCaption Pro 1.0.0-pro1.3
+# CallCaption Pro 1.0.0-pro1.4
 # 独立包：安装时暂停稳定版（0.20.7.1）的注入/守护进程/设置入口，
 # 卸载时自动恢复稳定版。稳定版文件、配置、日志都不删除。
 JB=/var/jb
@@ -9,6 +9,11 @@ log() { echo "[$(date '+%F %T')] $*" >> "$LOG" 2>/dev/null || true; }
 KILLALL=/var/jb/usr/bin/killall
 [ -x "$KILLALL" ] || KILLALL=/usr/bin/killall
 [ -x "$KILLALL" ] || KILLALL=killall
+
+# 优先用系统 launchctl。/var/jb 里可能还有 procursus launchctl，
+# 它管理 system domain 的行为不一致，pro1.3 的 bootstrap 就是在这里失败的。
+PATH=/bin:/usr/bin:/usr/sbin:/sbin:$PATH
+export PATH
 
 log "pro postinst start"
 
@@ -58,17 +63,44 @@ fi
 "$KILLALL" -9 Preferences >/dev/null 2>&1 || true
 
 # 启动 Pro daemon
-# 覆盖安装时同名 label 可能还在跑 pro0.1；bootstrap 会失败，旧进程继续运行。
-# killall 对超过 15 字符的进程名不可靠，必须先按 label bootout 再 bootstrap。
-launchctl bootout system/net.user.callcaptionpro.audioservice >/dev/null 2>&1 || true
+# 覆盖安装时直接用 kickstart -k 原地重启最稳：旧的已注册 job 会 exec 新二进制，
+# 不会出现 pro1.3 那种“bootout 杀了旧的、bootstrap 还没成功”的空窗。
+LABEL=net.user.callcaptionpro.audioservice
+PLIST="$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist"
+launchctl enable "system/$LABEL" >/dev/null 2>&1 || true
+daemon_running() {
+  launchctl print "system/$LABEL" 2>/dev/null | grep -q "pid ="
+}
+if launchctl print "system/$LABEL" >/dev/null 2>&1; then
+  log "pro daemon registered; kickstart"
+  launchctl kickstart -k "system/$LABEL" >/dev/null 2>&1 || true
+fi
+if ! daemon_running; then
+  log "pro daemon not running; bootout + retry bootstrap"
+  launchctl bootout "system/$LABEL" >/dev/null 2>&1 \
+    || launchctl bootout system "$PLIST" >/dev/null 2>&1 || true
+  i=0
+  while [ "$i" -lt 8 ]; do
+    launchctl print "system/$LABEL" >/dev/null 2>&1 || break
+    sleep 1
+    i=$((i+1))
+  done
+  n=0
+  while [ "$n" -lt 3 ]; do
+    launchctl bootstrap system "$PLIST" >/dev/null 2>&1 && break
+    launchctl load "$PLIST" >/dev/null 2>&1 && break
+    launchctl kickstart -k "system/$LABEL" >/dev/null 2>&1 && break
+    launchctl start "$LABEL" >/dev/null 2>&1 && break
+    sleep 1
+    n=$((n+1))
+  done
+fi
 sleep 1
-launchctl enable system/net.user.callcaptionpro.audioservice >/dev/null 2>&1 || true
-launchctl bootstrap system "$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist" >/dev/null 2>&1 \
-  || launchctl load "$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist" >/dev/null 2>&1 \
-  || true
-sleep 1
-launchctl print system/net.user.callcaptionpro.audioservice 2>/dev/null \
+launchctl print "system/$LABEL" 2>/dev/null \
   | grep -E "state =|pid =" >> "$LOG" 2>/dev/null || true
+if ! daemon_running; then
+  log "pro daemon STILL NOT RUNNING after restart attempts"
+fi
 
 # 让 Pro SpringBoard/AppProbe 立刻加载
 "$KILLALL" -9 WhatsApp >/dev/null 2>&1 || true

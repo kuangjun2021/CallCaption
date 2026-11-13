@@ -1556,6 +1556,21 @@ static BOOL CCASRHelperAvailable(void) {
     }
     return YES;
 }
+static BOOL CCPrepareValid(void) {
+    NSString *p = CC_PREPARE_PATH;
+    NSDictionary *a = [[NSFileManager defaultManager]
+                       attributesOfItemAtPath:p error:nil];
+    if (!a) return NO;
+    NSDate *m = a[NSFileModificationDate];
+    NSTimeInterval age = m ? -[m timeIntervalSinceNow] : 1e9;
+    // 崩溃/重启后残留的 prepare 不能让 daemon 误判“正在响铃”。
+    if (age > 180.0 || age < -10.0) {
+        CCLogf(@"stale prepare age=%.0fs, removing", age);
+        [[NSFileManager defaultManager] removeItemAtPath:p error:nil];
+        return NO;
+    }
+    return YES;
+}
 static NSString *CCPreloadMode(void) {
     NSString *m = [CCPrefStr(CC_K_ASR_PRELOAD, @"off") lowercaseString];
     if (![m isEqualToString:@"resident"] && ![m isEqualToString:@"ring"] && ![m isEqualToString:@"off"])
@@ -1712,7 +1727,7 @@ static void CheckArm(void) {
         static CFAbsoluteTime lastHb;
         if (now - lastHb > 15.0) {
             lastHb = now;
-            NSString *hb = [NSString stringWithFormat:@"%.0f pro2.1.1\n",
+            NSString *hb = [NSString stringWithFormat:@"%.0f pro2.1.2\n",
                             [[NSDate date] timeIntervalSince1970]];
             NSString *hp = [CC_DIR stringByAppendingPathComponent:@"daemon.heartbeat"];
             [hb writeToFile:hp atomically:YES encoding:NSUTF8StringEncoding error:nil];
@@ -1747,7 +1762,7 @@ static void CheckArm(void) {
         BOOL armed = [[NSFileManager defaultManager] fileExistsAtPath:CC_ARM_PATH];
         // v0.20.5：ringing 阶段先激活会话（不启动 ASR）。这样接通 arm 时
         // 不需要再 setActive，避免打断 WhatsApp 已建立的音频路由。
-        BOOL prepared = [[NSFileManager defaultManager] fileExistsAtPath:CC_PREPARE_PATH];
+        BOOL prepared = CCPrepareValid();
         if (prepared && !g_daemonAudioActive) CCAudioSessionSetActive(YES);
         // Pro2.1：预加载。ring 在响铃时拉起 helper，模型加载完等 arm；
         // resident 空闲就常驻，模型一直热着；off 仍然等接通再启动。
@@ -2151,7 +2166,7 @@ int main(int argc, char *argv[]) {
         }
         CCPrefsReload();
 #ifdef CC_PRO
-        CCLogLine(@"audioservice started (pro2.1.1)");
+        CCLogLine(@"audioservice started (pro2.1.2)");
 #else
         CCLogLine(@"audioservice started (v0.17.0)");
 #endif

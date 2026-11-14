@@ -859,7 +859,12 @@ static void VoiceLists(NSString *prefix,
     vc.sampleText = zh ? @"你好，这是通话翻译的语音试听，很高兴为你服务。"
                        : @"Hello, this is a preview of the call translation voice.";
     vc.fallbackLang = zh ? @"zh-CN" : @"en-US";
-    double pct = CCPrefStr(zh ? CC_K_REMOTE_TTS_RATE : CC_K_LOCAL_TTS_RATE, @"100").doubleValue;
+    // 设置面板是独立进程，不能调用 SpringBoard 侧的 CCPrefStr；
+    // 这里直接读本页已从 CFPreferences 载入的 values。
+    NSString *rateKey = zh ? @"RemoteTTSRate" : @"LocalTTSRate";
+    id rateVal = self.values[rateKey];
+    double pct = [rateVal respondsToSelector:@selector(doubleValue)]
+                     ? [rateVal doubleValue] : 100.0;
     vc.rateMultiplier = pct > 0 ? pct / 100.0 : 1.0;
     __weak CCSettingsController *ws = self;
     vc.onPick = ^(NSString *val) {

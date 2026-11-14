@@ -43,6 +43,8 @@
 #define CC_K_SHOW_TRANSLATED @"ShowTranslated"    // 显示译文
 #define CC_K_TTS_VOICE       @"TTSVoice"          // 中文播报音色 identifier
 #define CC_K_LOCAL_VOICE     @"LocalVoice"        // 英文播报音色 identifier
+#define CC_K_REMOTE_TTS_RATE @"RemoteTTSRate"     // 中文 TTS 语速百分比 80..150，默认 100
+#define CC_K_LOCAL_TTS_RATE  @"LocalTTSRate"      // 英文 TTS 语速百分比 80..150，默认 100
 #define CC_K_ALWAYS_PANEL    @"AlwaysShowPanel"   // 面板常驻（默认关：仅通话时显示）
 #define CC_K_ENGINE           @"Engine"           // auto / deepl / ai
 #define CC_K_DEEPL_KEY        @"DeepLKey"

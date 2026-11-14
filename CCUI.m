@@ -1158,6 +1158,26 @@ static void CCUIIdleNow(void) {
 
 static AVSpeechSynthesizer *g_tts;
 
+// Pro2.1.21：播报语速。设置页存 80..150 的百分比，100 = 系统默认。
+// 中文和英文分开，中文慢一点更清楚，英文快一点少占上行时间。
+static double CCTTSRateMultiplier(NSString *lang) {
+    NSString *key = [lang hasPrefix:@"zh"] ? CC_K_REMOTE_TTS_RATE : CC_K_LOCAL_TTS_RATE;
+    double pct = CCPrefStr(key, @"100").doubleValue;
+    if (pct <= 0) pct = 100.0;
+    double r = pct / 100.0;
+    if (r < 0.5) r = 0.5;
+    if (r > 1.5) r = 1.5;
+    return r;
+}
+
+static void CCApplyTTSRate(AVSpeechUtterance *u, NSString *lang) {
+    if (!u) return;
+    double rate = AVSpeechUtteranceDefaultSpeechRate * CCTTSRateMultiplier(lang);
+    if (rate < AVSpeechUtteranceMinimumSpeechRate) rate = AVSpeechUtteranceMinimumSpeechRate;
+    if (rate > AVSpeechUtteranceMaximumSpeechRate) rate = AVSpeechUtteranceMaximumSpeechRate;
+    u.rate = (float)rate;
+}
+
 // v0.19.1：腾讯远程译文走 0.19.0 的序列 TTS 队列，混入下行；
 // 不再用 CCUISpeakText 的扬声器外放。
 void CCUIEnqueueRemoteTTS(NSString *text) {
@@ -1296,6 +1316,7 @@ void CCUISpeakText(NSString *text) {
             NSString *vid = CCPrefStr(CC_K_TTS_VOICE, @"");
             AVSpeechSynthesisVoice *v = vid.length ? [AVSpeechSynthesisVoice voiceWithIdentifier:vid] : nil;
             u.voice = v ?: [AVSpeechSynthesisVoice voiceWithLanguage:@"zh-CN"];
+            CCApplyTTSRate(u, @"zh-CN");
             [g_tts speakUtterance:u];
         } @catch (NSException *e) { }
     });
@@ -1598,7 +1619,8 @@ static void CCZhTTSStartNext(void);
 
 static double CCZhTTSEst(NSString *s) {
     // 中文 TTS 实测约 0.2–0.25s/字；用 0.22 估算，6 秒闸门才不会低估。
-    double d = 0.5 + 0.22 * (double)s.length;
+    // 语速调快后实际时长变短，队列闸门按同一倍率折算，避免误合并/误丢。
+    double d = (0.5 + 0.22 * (double)s.length) / CCTTSRateMultiplier(@"zh-CN");
     return d > 20.0 ? 20.0 : d;
 }
 
@@ -1715,6 +1737,9 @@ static void CCTTSBufferNow(NSString *text, NSString *lang, NSString *fileName,
                                            : CCPrefStr(CC_K_LOCAL_VOICE, @"");
     AVSpeechSynthesisVoice *v = vid.length ? [AVSpeechSynthesisVoice voiceWithIdentifier:vid] : nil;
     u.voice = v ?: [AVSpeechSynthesisVoice voiceWithLanguage:lang];
+    CCApplyTTSRate(u, lang);
+    CCLogf(@"tts rate %@ %.0f%% (%.3f)", lang,
+           CCTTSRateMultiplier(lang) * 100.0, u.rate);
     NSMutableData *out = [NSMutableData data];
     __block double phase = 0;
     __block BOOL done = NO;

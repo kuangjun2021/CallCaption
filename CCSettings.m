@@ -138,6 +138,7 @@ typedef NS_ENUM(NSInteger, CCPrefsItemKind) {
 @property (nonatomic, copy) NSString *current;
 @property (nonatomic, copy) NSString *sampleText;
 @property (nonatomic, copy) NSString *fallbackLang;
+@property (nonatomic, assign) double rateMultiplier;
 @property (nonatomic, copy) void (^onPick)(NSString *value);
 @property (nonatomic, strong) UITableView *table;
 @property (nonatomic, strong) AVSpeechSynthesizer *synth;
@@ -228,7 +229,11 @@ typedef NS_ENUM(NSInteger, CCPrefsItemKind) {
     if (v) u.voice = v;
     else if (self.fallbackLang.length)
         u.voice = [AVSpeechSynthesisVoice voiceWithLanguage:self.fallbackLang];
-    u.rate = 0.48;
+    double mult = self.rateMultiplier > 0 ? self.rateMultiplier : 1.0;
+    double rate = AVSpeechUtteranceDefaultSpeechRate * mult;
+    if (rate < AVSpeechUtteranceMinimumSpeechRate) rate = AVSpeechUtteranceMinimumSpeechRate;
+    if (rate > AVSpeechUtteranceMaximumSpeechRate) rate = AVSpeechUtteranceMaximumSpeechRate;
+    u.rate = (float)rate;
     u.volume = 1.0;
     [self.synth speakUtterance:u];
 }
@@ -592,6 +597,8 @@ static void VoiceLists(NSString *prefix,
         MkAction(@"testApi", @"测试翻译接口"),
     ];
     NSArray *voices = @[
+        MkSlider(@"RemoteTTSRate", @"中文播报语速", @"100", 80, 150),
+        MkSlider(@"LocalTTSRate", @"英文播报语速", @"100", 80, 150),
         MkChoice(@"TTSVoice", @"中文播报音色", @"", zhV, zhT),
         MkChoice(@"LocalVoice", @"英文播报音色", @"", enV, enT),
     ];
@@ -607,7 +614,7 @@ static void VoiceLists(NSString *prefix,
     self.sections = @[func, tencent, lang, volumes, engine, ai, apiTest, voices, diag];
     self.sectionTitles = @[@"功能开关", @"腾讯实时翻译（D+）", @"语言", @"原音音量", @"翻译引擎",
                            @"AI 自定义接口（OpenAI 兼容）", @"接口测试",
-                           @"播报音色", @"诊断"];
+                           @"播报语速与音色", @"诊断"];
     NSString *logFooter = [NSString stringWithFormat:
         @"日志：%@。Tap 断流重启阈值：音频帧停止增长超过该秒数就重挂 Tap，4 秒兼顾首通恢复和误判。",
         CC_LOG_PATH];
@@ -619,7 +626,7 @@ static void VoiceLists(NSString *prefix,
         @"自动 = 已填 Key 优先，失败自动切换。MyMemory 免费接口国内可用；Google 不填 Key 用免费接口，填了走 Cloud Translation。",
         @"填写 chat/completions 完整地址、Key 与模型名，例如 DeepSeek。",
         @"分别请求 DeepL / Google / AI / MyMemory 一次（Hello 英译中），检查 Key 和网络是否可用。",
-        @"列表来自系统已安装语音。中文用于对方字幕播报，英文用于我方双向播报。",
+        @"语速 80%–150%，100% 为系统默认。调快可缩短播报时间、减少 TTS 排队；音色列表来自系统已安装语音。中文用于对方字幕播报，英文用于我方双向播报。",
         logFooter,
     ];
 
@@ -852,6 +859,8 @@ static void VoiceLists(NSString *prefix,
     vc.sampleText = zh ? @"你好，这是通话翻译的语音试听，很高兴为你服务。"
                        : @"Hello, this is a preview of the call translation voice.";
     vc.fallbackLang = zh ? @"zh-CN" : @"en-US";
+    double pct = CCPrefStr(zh ? CC_K_REMOTE_TTS_RATE : CC_K_LOCAL_TTS_RATE, @"100").doubleValue;
+    vc.rateMultiplier = pct > 0 ? pct / 100.0 : 1.0;
     __weak CCSettingsController *ws = self;
     vc.onPick = ^(NSString *val) {
         [ws setPrefValue:val forKey:row.key];
@@ -1141,7 +1150,7 @@ static NSString *CCApiTextFromJSON(NSString *engine, id json) {
     BOOL daemonOK = hbAt && [[NSDate date] timeIntervalSinceDate:hbAt] < 60.0;
     if (!daemonOK) {
         msg = @"Pro 音频守护进程未运行，或仍是旧版本。\n"
-               "请重启手机后再试；若仍不行，重新安装 pro2.1.20。";
+               "请重启手机后再试；若仍不行，重新安装 pro2.1.21。";
     } else if (![fm fileExistsAtPath:model]) {
         msg = @"模型未安装。请先安装 CallCaptionPro Models（x-asr-480ms）。";
     } else if (![fm fileExistsAtPath:wav] &&

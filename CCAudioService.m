@@ -98,10 +98,27 @@ static NSArray<NSString *> *CCAllCallAppDocs(void);
 // 之后每个文件从快照位置开始读：跳过上一通，保留本通全部音频（哪怕选文件晚了）。
 static NSMutableDictionary<NSString *, NSNumber *> *g_armFileSizes;
 
+static double CCLocalTTSRateMultiplier(void) {
+    double pct = CCPrefStr(CC_K_LOCAL_TTS_RATE, @"100").doubleValue;
+    if (pct <= 0) pct = 100.0;
+    double r = pct / 100.0;
+    if (r < 0.5) r = 0.5;
+    if (r > 1.5) r = 1.5;
+    return r;
+}
+
+static void CCApplyLocalTTSRate(AVSpeechUtterance *u) {
+    if (!u) return;
+    double rate = AVSpeechUtteranceDefaultSpeechRate * CCLocalTTSRateMultiplier();
+    if (rate < AVSpeechUtteranceMinimumSpeechRate) rate = AVSpeechUtteranceMinimumSpeechRate;
+    if (rate > AVSpeechUtteranceMaximumSpeechRate) rate = AVSpeechUtteranceMaximumSpeechRate;
+    u.rate = (float)rate;
+}
+
 // 英文 TTS（我方通道）：同时设置静音窗口，避免喇叭外放的英文被两路 Tap 又听回去
 static void CCSpeakEnglish(NSString *text) {
     if (text.length == 0) return;
-    double dur = 1.0 + 0.075 * (double)text.length;
+    double dur = (1.0 + 0.075 * (double)text.length) / CCLocalTTSRateMultiplier();
     if (dur > 15.0) dur = 15.0;
     g_muteUntil = CFAbsoluteTimeGetCurrent() + dur;
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -111,6 +128,7 @@ static void CCSpeakEnglish(NSString *text) {
             NSString *vid = CCPrefStr(CC_K_LOCAL_VOICE, @"");
             AVSpeechSynthesisVoice *v = vid.length ? [AVSpeechSynthesisVoice voiceWithIdentifier:vid] : nil;
             u.voice = v ?: [AVSpeechSynthesisVoice voiceWithLanguage:@"en-US"];
+            CCApplyLocalTTSRate(u);
             [g_enTTS speakUtterance:u];
             CCLogf(@"local tts en: %@", text);
         } @catch (NSException *e) { CCLogf(@"local tts exc: %@", e.reason); }
@@ -238,6 +256,7 @@ static BOOL CCGenerateUplinkTTS(NSString *text) {
     NSString *vid = CCPrefStr(CC_K_LOCAL_VOICE, @"");
     AVSpeechSynthesisVoice *v = vid.length ? [AVSpeechSynthesisVoice voiceWithIdentifier:vid] : nil;
     u.voice = v ?: [AVSpeechSynthesisVoice voiceWithLanguage:@"en-US"];
+    CCApplyLocalTTSRate(u);
     NSMutableData *out = [NSMutableData data];
     __block double phase = 0.0;
     __block BOOL finished = NO;
@@ -1894,7 +1913,7 @@ static void CheckArm(void) {
         static CFAbsoluteTime lastHb;
         if (now - lastHb > 15.0) {
             lastHb = now;
-            NSString *hb = [NSString stringWithFormat:@"%.0f pro2.1.20\n",
+            NSString *hb = [NSString stringWithFormat:@"%.0f pro2.1.21\n",
                             [[NSDate date] timeIntervalSince1970]];
             NSString *hp = [CC_DIR stringByAppendingPathComponent:@"daemon.heartbeat"];
             [hb writeToFile:hp atomically:YES encoding:NSUTF8StringEncoding error:nil];
@@ -2374,7 +2393,7 @@ int main(int argc, char *argv[]) {
         }
         CCPrefsReload();
 #ifdef CC_PRO
-        CCLogLine(@"audioservice started (pro2.1.20)");
+        CCLogLine(@"audioservice started (pro2.1.21)");
         struct stat selfSt;
         if (stat("/var/jb/usr/local/bin/CallCaptionProAudioService", &selfSt) == 0)
             g_daemonBinMtime = selfSt.st_mtime;

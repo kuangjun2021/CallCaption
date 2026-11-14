@@ -535,6 +535,7 @@ int main(int argc, char **argv) {
         NSString *remoteWav = [CC_DIR stringByAppendingPathComponent:@"remote16k.wav"];
         NSString *modelDir = [CC_DIR stringByAppendingPathComponent:@"models/x-asr-480ms"];
         NSString *localModelDir = [CC_DIR stringByAppendingPathComponent:@"models/zh-14m"];
+        NSFileManager *fm = [NSFileManager defaultManager];
         double maxSec = 0;
         BOOL fast = NO;
         BOOL localOn = YES;

@@ -887,7 +887,7 @@ static void CCAppProbeBoot(void) {
         NSString *proc = CCProcName();
         CCAppLog(@"dylib loaded proc=%@ bundle=%@ pid=%d",
                  proc, [[NSBundle mainBundle] bundleIdentifier] ?: @"?", getpid());
-        if (![proc isEqualToString:@"WhatsApp"]) return;
+        if (![proc isEqualToString:@"WhatsApp"] && ![proc isEqualToString:@"WeChat"]) return;
 
         g_reportQ = dispatch_queue_create("cc.appprobe.report", DISPATCH_QUEUE_SERIAL);
         g_reportTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, g_reportQ);

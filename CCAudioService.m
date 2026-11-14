@@ -89,7 +89,11 @@ static void CCASendState(NSString *s) {
     CCTransportSendLine([@"S|" stringByAppendingString:s]);
 }
 
-static NSString *g_waDocsDir;   // WhatsApp 的 Documents（App 探针 WAV / 上行 TTS 都在这里）
+static NSString *g_waDocsDir;   // WhatsApp 的 Documents
+static NSString *g_wxDocsDir;   // WeChat 的 Documents
+static NSString *g_remoteDocsDir; // 当前选中的 cc_remote WAV 所在目录（诊断用）
+static NSString *CCFindWeChatDocs(void);
+static NSArray<NSString *> *CCAllCallAppDocs(void);
 // 通话开始瞬间给所有探针 WAV 拍快照（路径→字节数）。
 // 之后每个文件从快照位置开始读：跳过上一通，保留本通全部音频（哪怕选文件晚了）。
 static NSMutableDictionary<NSString *, NSNumber *> *g_armFileSizes;
@@ -135,13 +139,20 @@ static BOOL CCWriteWav48kAtPath(NSString *path, NSData *pcm) {
 }
 
 static void CCWriteUplinkWav(NSData *pcm) {
-    if (!pcm.length || !g_waDocsDir) return;
-    NSString *path = [g_waDocsDir stringByAppendingPathComponent:@"cc_tts.wav"];
-    if (!CCWriteWav48kAtPath(path, pcm)) {
+    if (!pcm.length) return;
+    NSArray<NSString *> *docsList = CCAllCallAppDocs();
+    if (!docsList.count) return;
+    BOOL any = NO;
+    for (NSString *docs in docsList) {
+        NSString *path = [docs stringByAppendingPathComponent:@"cc_tts.wav"];
+        if (CCWriteWav48kAtPath(path, pcm)) any = YES;
+    }
+    if (!any) {
         CCLogf(@"uplink tts open failed");
         return;
     }
-    CCLogf(@"uplink tts written %lu bytes", (unsigned long)pcm.length);
+    CCLogf(@"uplink tts written %lu bytes to %lu app(s)",
+           (unsigned long)pcm.length, (unsigned long)docsList.count);
 }
 
 NSString *CCFindWhatsAppDocs(void) {
@@ -161,13 +172,38 @@ NSString *CCFindWhatsAppDocs(void) {
     return nil;
 }
 
+static NSString *CCFindWeChatDocs(void) {
+    if (g_wxDocsDir) return g_wxDocsDir;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *base = @"/var/mobile/Containers/Data/Application";
+    for (NSString *a in [fm contentsOfDirectoryAtPath:base error:nil]) {
+        NSString *dir = [base stringByAppendingPathComponent:a];
+        NSString *meta = [dir stringByAppendingPathComponent:
+                          @".com.apple.mobile_container_manager.metadata.plist"];
+        NSDictionary *md = [NSDictionary dictionaryWithContentsOfFile:meta];
+        if ([md[@"MCMMetadataIdentifier"] isEqualToString:@"com.tencent.xin"]) {
+            NSString *docs = [dir stringByAppendingPathComponent:@"Documents"];
+            if ([fm fileExistsAtPath:docs]) { g_wxDocsDir = docs; return docs; }
+        }
+    }
+    return nil;
+}
+
+static NSArray<NSString *> *CCAllCallAppDocs(void) {
+    NSMutableArray<NSString *> *a = [NSMutableArray array];
+    NSString *wa = CCFindWhatsAppDocs();
+    NSString *wx = CCFindWeChatDocs();
+    if (wa) [a addObject:wa];
+    if (wx && ![wx isEqualToString:wa]) [a addObject:wx];
+    return a;
+}
+
 // LCT 的上行注入：用 writeUtterance:toBufferCallback: 把英文 TTS 合成成 PCM，
 // 转成 48k mono s16 写到 WhatsApp Documents/cc_tts.wav，
 // App 探针会把它混进麦克风上行 buffer（对方能听到英文）。
 static BOOL CCGenerateUplinkTTS(NSString *text) {
     if (text.length == 0) return NO;
-    NSString *docs = CCFindWhatsAppDocs();
-    if (!docs) return NO;                 // 没有 App 探针文件目录，退回外放
+    if (CCAllCallAppDocs().count == 0) return NO; // 没有 App 探针文件目录，退回外放
     AVSpeechSynthesizer *synth = [[AVSpeechSynthesizer alloc] init];
     AVSpeechUtterance *u = [[AVSpeechUtterance alloc] initWithString:text];
     NSString *vid = CCPrefStr(CC_K_LOCAL_VOICE, @"");
@@ -612,15 +648,14 @@ static double CCFileTailEnergy(NSString *path, double *mtimeOut) {
 static NSString *CCFindRemoteWav(NSString *preferred, double *mtimeOut) {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSMutableArray<NSString *> *dirs = [NSMutableArray array];
-    if (g_waDocsDir) [dirs addObject:g_waDocsDir];
-    if (dirs.count == 0) {
-        NSString *base = @"/var/mobile/Containers/Data/Application";
-        for (NSString *a in [fm contentsOfDirectoryAtPath:base error:nil]) {
-            NSString *docs = [[base stringByAppendingPathComponent:a]
-                              stringByAppendingPathComponent:@"Documents"];
-            if (docs) [dirs addObject:docs];
-        }
+    NSString *base = @"/var/mobile/Containers/Data/Application";
+    for (NSString *a in [fm contentsOfDirectoryAtPath:base error:nil]) {
+        NSString *docs = [[base stringByAppendingPathComponent:a]
+                          stringByAppendingPathComponent:@"Documents"];
+        if (docs) [dirs addObject:docs];
     }
+    if (g_waDocsDir && ![dirs containsObject:g_waDocsDir]) [dirs addObject:g_waDocsDir];
+    if (g_wxDocsDir && ![dirs containsObject:g_wxDocsDir]) [dirs addObject:g_wxDocsDir];
     NSString *largest = nil, *newest = nil;
     unsigned long long largestSize = 0, preferredSize = 0;
     double largestT = 0, newestT = 0, preferredT = 0;
@@ -651,7 +686,7 @@ static NSString *CCFindRemoteWav(NSString *preferred, double *mtimeOut) {
         pick = preferred;
     else
         pick = largest ?: newest;
-    if (pick) g_waDocsDir = [pick stringByDeletingLastPathComponent];
+    if (pick) g_remoteDocsDir = [pick stringByDeletingLastPathComponent];
     if (mtimeOut) *mtimeOut = largestT;
     return pick;
 }
@@ -659,15 +694,14 @@ static NSString *CCFindRemoteWav(NSString *preferred, double *mtimeOut) {
 static NSString *CCLargestRemoteWav(void) {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSMutableArray<NSString *> *dirs = [NSMutableArray array];
-    if (g_waDocsDir) [dirs addObject:g_waDocsDir];
-    if (dirs.count == 0) {
-        NSString *base = @"/var/mobile/Containers/Data/Application";
-        for (NSString *a in [fm contentsOfDirectoryAtPath:base error:nil]) {
-            NSString *docs = [[base stringByAppendingPathComponent:a]
-                              stringByAppendingPathComponent:@"Documents"];
-            if (docs) [dirs addObject:docs];
-        }
+    NSString *base = @"/var/mobile/Containers/Data/Application";
+    for (NSString *a in [fm contentsOfDirectoryAtPath:base error:nil]) {
+        NSString *docs = [[base stringByAppendingPathComponent:a]
+                          stringByAppendingPathComponent:@"Documents"];
+        if (docs) [dirs addObject:docs];
     }
+    if (g_waDocsDir && ![dirs containsObject:g_waDocsDir]) [dirs addObject:g_waDocsDir];
+    if (g_wxDocsDir && ![dirs containsObject:g_wxDocsDir]) [dirs addObject:g_wxDocsDir];
     NSString *best = nil;
     unsigned long long bestSize = 0;
     for (NSString *d in dirs) {
@@ -678,7 +712,7 @@ static NSString *CCLargestRemoteWav(void) {
             if (sz > bestSize) { bestSize = sz; best = p; }
         }
     }
-    if (best) g_waDocsDir = [best stringByDeletingLastPathComponent];
+    if (best) g_remoteDocsDir = [best stringByDeletingLastPathComponent];
     return best;
 }
 
@@ -1500,8 +1534,8 @@ static void CCAudioSessionSetActive(BOOL active) {
 // call=0 由 !armed 分支写，AppProbe 挂断后立即停止录音/混音。
 static void CCWriteAppCfg(BOOL armed) {
     static NSString *lastCfg = nil;
-    NSString *docs = CCFindWhatsAppDocs();
-    if (!docs) return;
+    NSArray<NSString *> *docsList = CCAllCallAppDocs();
+    if (!docsList.count) return;
     int rv = [CCPrefStr(@"RemoteOriginalVolume", @"30") intValue];
     int lv = [CCPrefStr(@"LocalOriginalVolume", @"30") intValue];
     if (rv < 0) rv = 0; if (rv > 100) rv = 100;
@@ -1512,13 +1546,26 @@ static void CCWriteAppCfg(BOOL armed) {
                      @"remote=%.2f\nlocal=%.2f\nremoteon=%d\nlocalon=%d\ncall=%d\n",
                      rv / 100.0, lv / 100.0, rOn ? 1 : 0, lOn ? 1 : 0,
                      armed ? 1 : 0];
-    if (![cfg isEqualToString:lastCfg]) {
-        NSString *p = [docs stringByAppendingPathComponent:@"cc_cfg.txt"];
-        [cfg writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:nil];
-        chmod(p.fileSystemRepresentation, 0666);
+    NSFileManager *fm = [NSFileManager defaultManager];
+    BOOL need = ![cfg isEqualToString:lastCfg];
+    if (!need) {
+        for (NSString *docs in docsList) {
+            if (![fm fileExistsAtPath:[docs stringByAppendingPathComponent:@"cc_cfg.txt"]]) {
+                need = YES;
+                break;
+            }
+        }
+    }
+    if (need) {
+        for (NSString *docs in docsList) {
+            NSString *p = [docs stringByAppendingPathComponent:@"cc_cfg.txt"];
+            [cfg writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            chmod(p.fileSystemRepresentation, 0666);
+        }
         lastCfg = cfg;
-        CCLogf(@"app cfg remote=%d local=%d on=%d/%d call=%d", rv, lv,
-               rOn ? 1 : 0, lOn ? 1 : 0, armed ? 1 : 0);
+        CCLogf(@"app cfg remote=%d local=%d on=%d/%d call=%d apps=%lu", rv, lv,
+               rOn ? 1 : 0, lOn ? 1 : 0, armed ? 1 : 0,
+               (unsigned long)docsList.count);
     }
 }
 
@@ -1769,7 +1816,7 @@ static void CheckArm(void) {
         static CFAbsoluteTime lastHb;
         if (now - lastHb > 15.0) {
             lastHb = now;
-            NSString *hb = [NSString stringWithFormat:@"%.0f pro2.1.16\n",
+            NSString *hb = [NSString stringWithFormat:@"%.0f pro2.1.17\n",
                             [[NSDate date] timeIntervalSince1970]];
             NSString *hp = [CC_DIR stringByAppendingPathComponent:@"daemon.heartbeat"];
             [hb writeToFile:hp atomically:YES encoding:NSUTF8StringEncoding error:nil];
@@ -1890,35 +1937,35 @@ static void CheckArm(void) {
                 atomic_store(&g_localConvFail, 0);
             }
             // 0.19.0：清上一通残留的中文 TTS 序列，并通知 AppProbe 清 zh ring
-            NSString *waDocs = CCFindWhatsAppDocs();
+            NSArray<NSString *> *docsList = CCAllCallAppDocs();
             NSArray *ccNames = [fm2 contentsOfDirectoryAtPath:CC_DIR error:nil];
             for (NSString *f in ccNames) {
                 if ([f hasPrefix:@"cc_tts_zh_"] && [f hasSuffix:@".wav"])
                     [fm2 removeItemAtPath:[CC_DIR stringByAppendingPathComponent:f]
                                     error:nil];
             }
-            if (waDocs) {
-                NSArray *docNames = [fm2 contentsOfDirectoryAtPath:waDocs error:nil];
+            for (NSString *docs in docsList) {
+                NSArray *docNames = [fm2 contentsOfDirectoryAtPath:docs error:nil];
                 for (NSString *f in docNames) {
                     if ([f hasPrefix:@"cc_tts_zh_"] && [f hasSuffix:@".wav"])
-                        [fm2 removeItemAtPath:[waDocs stringByAppendingPathComponent:f]
+                        [fm2 removeItemAtPath:[docs stringByAppendingPathComponent:f]
                                         error:nil];
                 }
-                [fm2 removeItemAtPath:[waDocs stringByAppendingPathComponent:@"cc_tts_zh.wav"]
+                [fm2 removeItemAtPath:[docs stringByAppendingPathComponent:@"cc_tts_zh.wav"]
                                 error:nil];
-                [fm2 removeItemAtPath:[waDocs stringByAppendingPathComponent:@"cc_tts.wav"]
+                [fm2 removeItemAtPath:[docs stringByAppendingPathComponent:@"cc_tts.wav"]
                                 error:nil];
-                [fm2 removeItemAtPath:[CC_DIR stringByAppendingPathComponent:@"cc_tts.wav"]
-                                error:nil];
-                NSString *reset = [waDocs stringByAppendingPathComponent:@"cc_tts_reset"];
+                NSString *reset = [docs stringByAppendingPathComponent:@"cc_tts_reset"];
                 [@"" writeToFile:reset atomically:YES encoding:NSUTF8StringEncoding error:nil];
                 chmod(reset.fileSystemRepresentation, 0666);
-                [fm2 removeItemAtPath:[waDocs stringByAppendingPathComponent:@"uplink_stream.pcm"]
+                [fm2 removeItemAtPath:[docs stringByAppendingPathComponent:@"uplink_stream.pcm"]
                                 error:nil];
-                NSString *ureset = [waDocs stringByAppendingPathComponent:@"uplink_reset"];
+                NSString *ureset = [docs stringByAppendingPathComponent:@"uplink_reset"];
                 [@"" writeToFile:ureset atomically:YES encoding:NSUTF8StringEncoding error:nil];
                 chmod(ureset.fileSystemRepresentation, 0666);
             }
+            [fm2 removeItemAtPath:[CC_DIR stringByAppendingPathComponent:@"cc_tts.wav"]
+                            error:nil];
             g_localStartAfter = CFAbsoluteTimeGetCurrent() + 1.0;
             // Pro2.1：WAV 已经清空后写 asr_go。预加载/常驻 helper 看到 arm 后
             // 必须等这个标记变化才开文件，避免把上一通的旧 WAV 再识别一遍。
@@ -1955,12 +2002,12 @@ static void CheckArm(void) {
             if (wasArmed) {
                 g_remoteTTSPlaybackUntil = 0;
                 CCSetRemoteTTSUntil(0);
-                NSString *waDocs = CCFindWhatsAppDocs();
-                if (waDocs) {
-                    NSString *reset = [waDocs stringByAppendingPathComponent:@"cc_tts_reset"];
+                NSArray<NSString *> *docsList = CCAllCallAppDocs();
+                for (NSString *docs in docsList) {
+                    NSString *reset = [docs stringByAppendingPathComponent:@"cc_tts_reset"];
                     [@"" writeToFile:reset atomically:YES encoding:NSUTF8StringEncoding error:nil];
                     chmod(reset.fileSystemRepresentation, 0666);
-                    NSString *ureset = [waDocs stringByAppendingPathComponent:@"uplink_reset"];
+                    NSString *ureset = [docs stringByAppendingPathComponent:@"uplink_reset"];
                     [@"" writeToFile:ureset atomically:YES encoding:NSUTF8StringEncoding error:nil];
                     chmod(ureset.fileSystemRepresentation, 0666);
                 }
@@ -2113,7 +2160,7 @@ static void CheckArm(void) {
             static NSTimeInterval lastEn = 0;
             static BOOL primed = NO;
             NSFileManager *fm = [NSFileManager defaultManager];
-            NSString *docs = CCFindWhatsAppDocs();
+            NSArray<NSString *> *docsList = CCAllCallAppDocs();
             NSString *pEn = [CC_DIR stringByAppendingPathComponent:@"cc_tts.wav"];
             NSDictionary *atEn = [fm attributesOfItemAtPath:pEn error:nil];
             NSTimeInterval mtEn = atEn ? [atEn[NSFileModificationDate] timeIntervalSince1970] : 0;
@@ -2121,15 +2168,22 @@ static void CheckArm(void) {
                 // 守护进程刚起：旧 en 文件只记时间，不再复制，避免上一通被重播
                 primed = YES;
                 lastEn = mtEn;
-            } else if (mtEn > lastEn && docs) {
+            } else if (mtEn > lastEn && docsList.count) {
                 lastEn = mtEn;
-                NSString *dst = [docs stringByAppendingPathComponent:@"cc_tts.wav"];
-                [fm removeItemAtPath:dst error:nil];
-                BOOL ok = [fm copyItemAtPath:pEn toPath:dst error:nil];
-                if (ok) chmod(dst.fileSystemRepresentation, 0666);
-                CCLogf(@"tts copied cc_tts.wav ok=%d", ok);
+                BOOL any = NO;
+                for (NSString *docs in docsList) {
+                    NSString *dst = [docs stringByAppendingPathComponent:@"cc_tts.wav"];
+                    [fm removeItemAtPath:dst error:nil];
+                    BOOL ok = [fm copyItemAtPath:pEn toPath:dst error:nil];
+                    if (ok) {
+                        chmod(dst.fileSystemRepresentation, 0666);
+                        any = YES;
+                    }
+                }
+                CCLogf(@"tts copied cc_tts.wav apps=%lu ok=%d",
+                       (unsigned long)docsList.count, any);
             }
-            if (docs) {
+            if (docsList.count) {
                 NSArray *names = [fm contentsOfDirectoryAtPath:CC_DIR error:nil];
                 NSMutableArray *zh = [NSMutableArray array];
                 for (NSString *f in names) {
@@ -2139,11 +2193,17 @@ static void CheckArm(void) {
                 [zh sortUsingSelector:@selector(compare:)];
                 for (NSString *f in zh) {
                     NSString *src = [CC_DIR stringByAppendingPathComponent:f];
-                    NSString *dst = [docs stringByAppendingPathComponent:f];
-                    [fm removeItemAtPath:dst error:nil];
-                    BOOL ok = [fm copyItemAtPath:src toPath:dst error:nil];
-                    if (ok) {
-                        chmod(dst.fileSystemRepresentation, 0666);
+                    BOOL any = NO;
+                    for (NSString *docs in docsList) {
+                        NSString *dst = [docs stringByAppendingPathComponent:f];
+                        [fm removeItemAtPath:dst error:nil];
+                        BOOL ok = [fm copyItemAtPath:src toPath:dst error:nil];
+                        if (ok) {
+                            chmod(dst.fileSystemRepresentation, 0666);
+                            any = YES;
+                        }
+                    }
+                    if (any) {
                         double dur = CCWavDurationSec(src);
                         if (dur > 0.05) {
                             double nowE = [[NSDate date] timeIntervalSince1970];
@@ -2155,7 +2215,8 @@ static void CheckArm(void) {
                         }
                         [fm removeItemAtPath:src error:nil];
                     }
-                    CCLogf(@"tts zh copied %@ ok=%d", f, ok);
+                    CCLogf(@"tts zh copied %@ apps=%lu ok=%d",
+                           f, (unsigned long)docsList.count, any);
                 }
             }
         }
@@ -2235,7 +2296,7 @@ int main(int argc, char *argv[]) {
         }
         CCPrefsReload();
 #ifdef CC_PRO
-        CCLogLine(@"audioservice started (pro2.1.16)");
+        CCLogLine(@"audioservice started (pro2.1.17)");
         struct stat selfSt;
         if (stat("/var/jb/usr/local/bin/CallCaptionProAudioService", &selfSt) == 0)
             g_daemonBinMtime = selfSt.st_mtime;

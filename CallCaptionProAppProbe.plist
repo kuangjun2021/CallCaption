@@ -7,10 +7,12 @@
 		<key>Executables</key>
 		<array>
 			<string>WhatsApp</string>
+			<string>WeChat</string>
 		</array>
 		<key>Bundles</key>
 		<array>
 			<string>net.whatsapp.WhatsApp</string>
+			<string>com.tencent.xin</string>
 		</array>
 	</dict>
 </dict>

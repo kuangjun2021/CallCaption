@@ -1,5 +1,5 @@
 #!/bin/sh
-# CallCaption Pro 1.0.0-pro2.1.15 postinst
+# CallCaption Pro 1.0.0-pro2.1.16 postinst
 #
 # 安装脚本必须快速、完整地结束。这里只做两件事：
 #   1. 确保 Pro 运行目录可写；
@@ -23,7 +23,7 @@ log() { echo "[$(date '+%F %T')] $*" >> "$LOG" 2>/dev/null || true; }
 LABEL=net.user.callcaptionpro.audioservice
 PLIST="$JB/Library/LaunchDaemons/net.user.callcaptionpro.audioservice.plist"
 
-log "pro postinst start (2.1.15)"
+log "pro postinst start (2.1.16)"
 
 launchctl enable "system/$LABEL" >/dev/null 2>&1 || true
 if launchctl print "system/$LABEL" >/dev/null 2>&1; then

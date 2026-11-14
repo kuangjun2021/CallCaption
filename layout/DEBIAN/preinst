@@ -1,5 +1,5 @@
 #!/bin/sh
-# CallCaption Pro 1.0.0-pro2.1.15 preinst
+# CallCaption Pro 1.0.0-pro2.1.16 preinst
 #
 # 一次性兼容旧版 Pro：dpkg 覆盖升级时，会用 `postrm upgrade <new-version>`
 # 调用“已安装旧包”的 postrm。旧版 postrm 不判断 $1，无条件 killall SpringBoard，
@@ -32,7 +32,7 @@ for INFO in "$JB/var/lib/dpkg/info" "/var/lib/dpkg/info"; do
   cp -f "$P" "$BAK" 2>/dev/null || continue
   cat > "$P" <<EOF
 #!/bin/sh
-# one-shot wrapper installed by pro2.1.15 preinst.
+# one-shot wrapper installed by pro2.1.16 preinst.
 # dpkg 升级时会调用旧包的 postrm；除真正卸载外一律直接退出，
 # 绝不能让旧脚本在安装流程中杀 SpringBoard。
 case "\$1" in

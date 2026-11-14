@@ -769,6 +769,18 @@ void CCUIRefreshPanel(void) { [[CCUIHelper class] refreshPanel]; }
 + (void)toggleSession {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!g_sessionActive && !g_callActive) {
+            // v2.1.16：微信 CallKit 有时只上报 ringing，hasConnected 一直为 NO，
+            // 面板会出来但点“译”被这里拦住。响铃/来电界面已经出现时允许手动激活，
+            // 直接走正常接通路径；WhatsApp 已接通逻辑不变。
+            if (g_ringing) {
+                if (!CCPrefBool(CC_K_ENABLED, YES)) {
+                    CCLogf(@"session: master disabled, ignore arm");
+                    return;
+                }
+                CCLogf(@"session: activate from ringing (manual compat)");
+                CCUIHandleCallActive(YES);
+                return;
+            }
             CCLogf(@"session: no active call, ignore arm");
             return;
         }

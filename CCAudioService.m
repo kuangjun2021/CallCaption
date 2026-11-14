@@ -189,12 +189,41 @@ static NSString *CCFindWeChatDocs(void) {
     return nil;
 }
 
+static BOOL CCIsWeChatContainerID(NSString *mid) {
+    if (![mid isKindOfClass:[NSString class]]) return NO;
+    if (![mid hasPrefix:@"com.tencent.xin"]) return NO;
+    NSString *suffix = [mid substringFromIndex:[@"com.tencent.xin" length]];
+    if (suffix.length == 0) return YES;   // com.tencent.xin
+    for (NSUInteger i = 0; i < suffix.length; i++) {
+        unichar c = [suffix characterAtIndex:i];
+        if (c < '0' || c > '9') return NO; // 多开：com.tencent.xin1 / xin2 ...
+    }
+    return YES;
+}
+
+static NSArray<NSString *> *CCAllWeChatDocs(void) {
+    NSMutableArray<NSString *> *a = [NSMutableArray array];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *base = @"/var/mobile/Containers/Data/Application";
+    for (NSString *uuid in [fm contentsOfDirectoryAtPath:base error:nil]) {
+        NSString *dir = [base stringByAppendingPathComponent:uuid];
+        NSString *meta = [dir stringByAppendingPathComponent:
+                          @".com.apple.mobile_container_manager.metadata.plist"];
+        NSDictionary *md = [NSDictionary dictionaryWithContentsOfFile:meta];
+        if (!CCIsWeChatContainerID(md[@"MCMMetadataIdentifier"])) continue;
+        NSString *docs = [dir stringByAppendingPathComponent:@"Documents"];
+        if ([fm fileExistsAtPath:docs]) [a addObject:docs];
+    }
+    return a;
+}
+
 static NSArray<NSString *> *CCAllCallAppDocs(void) {
     NSMutableArray<NSString *> *a = [NSMutableArray array];
     NSString *wa = CCFindWhatsAppDocs();
-    NSString *wx = CCFindWeChatDocs();
     if (wa) [a addObject:wa];
-    if (wx && ![wx isEqualToString:wa]) [a addObject:wx];
+    for (NSString *wx in CCAllWeChatDocs()) {
+        if (![a containsObject:wx]) [a addObject:wx];
+    }
     return a;
 }
 
@@ -1816,7 +1845,7 @@ static void CheckArm(void) {
         static CFAbsoluteTime lastHb;
         if (now - lastHb > 15.0) {
             lastHb = now;
-            NSString *hb = [NSString stringWithFormat:@"%.0f pro2.1.17\n",
+            NSString *hb = [NSString stringWithFormat:@"%.0f pro2.1.18\n",
                             [[NSDate date] timeIntervalSince1970]];
             NSString *hp = [CC_DIR stringByAppendingPathComponent:@"daemon.heartbeat"];
             [hb writeToFile:hp atomically:YES encoding:NSUTF8StringEncoding error:nil];
@@ -2296,7 +2325,7 @@ int main(int argc, char *argv[]) {
         }
         CCPrefsReload();
 #ifdef CC_PRO
-        CCLogLine(@"audioservice started (pro2.1.17)");
+        CCLogLine(@"audioservice started (pro2.1.18)");
         struct stat selfSt;
         if (stat("/var/jb/usr/local/bin/CallCaptionProAudioService", &selfSt) == 0)
             g_daemonBinMtime = selfSt.st_mtime;

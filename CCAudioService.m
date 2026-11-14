@@ -1563,6 +1563,7 @@ static void CCAudioSessionSetActive(BOOL active) {
 // call=0 由 !armed 分支写，AppProbe 挂断后立即停止录音/混音。
 static void CCWriteAppCfg(BOOL armed) {
     static NSString *lastCfg = nil;
+    static NSString *lastDocsSig = nil;
     NSArray<NSString *> *docsList = CCAllCallAppDocs();
     if (!docsList.count) return;
     int rv = [CCPrefStr(@"RemoteOriginalVolume", @"30") intValue];
@@ -1575,26 +1576,26 @@ static void CCWriteAppCfg(BOOL armed) {
                      @"remote=%.2f\nlocal=%.2f\nremoteon=%d\nlocalon=%d\ncall=%d\n",
                      rv / 100.0, lv / 100.0, rOn ? 1 : 0, lOn ? 1 : 0,
                      armed ? 1 : 0];
-    NSFileManager *fm = [NSFileManager defaultManager];
-    BOOL need = ![cfg isEqualToString:lastCfg];
-    if (!need) {
-        for (NSString *docs in docsList) {
-            if (![fm fileExistsAtPath:[docs stringByAppendingPathComponent:@"cc_cfg.txt"]]) {
-                need = YES;
-                break;
-            }
-        }
-    }
+    NSString *docsSig = [docsList componentsJoinedByString:@"|"];
+    BOOL need = ![cfg isEqualToString:lastCfg] ||
+                ![docsSig isEqualToString:lastDocsSig];
     if (need) {
+        BOOL anyFail = NO;
         for (NSString *docs in docsList) {
             NSString *p = [docs stringByAppendingPathComponent:@"cc_cfg.txt"];
-            [cfg writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:nil];
-            chmod(p.fileSystemRepresentation, 0666);
+            BOOL ok = [cfg writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            if (ok) {
+                chmod(p.fileSystemRepresentation, 0666);
+            } else {
+                anyFail = YES;
+                CCLogf(@"app cfg write failed: %@", docs);
+            }
         }
         lastCfg = cfg;
-        CCLogf(@"app cfg remote=%d local=%d on=%d/%d call=%d apps=%lu", rv, lv,
-               rOn ? 1 : 0, lOn ? 1 : 0, armed ? 1 : 0,
-               (unsigned long)docsList.count);
+        lastDocsSig = docsSig;
+        CCLogf(@"app cfg remote=%d local=%d on=%d/%d call=%d apps=%lu fail=%d",
+               rv, lv, rOn ? 1 : 0, lOn ? 1 : 0, armed ? 1 : 0,
+               (unsigned long)docsList.count, anyFail ? 1 : 0);
     }
 }
 
@@ -1845,7 +1846,7 @@ static void CheckArm(void) {
         static CFAbsoluteTime lastHb;
         if (now - lastHb > 15.0) {
             lastHb = now;
-            NSString *hb = [NSString stringWithFormat:@"%.0f pro2.1.18\n",
+            NSString *hb = [NSString stringWithFormat:@"%.0f pro2.1.19\n",
                             [[NSDate date] timeIntervalSince1970]];
             NSString *hp = [CC_DIR stringByAppendingPathComponent:@"daemon.heartbeat"];
             [hb writeToFile:hp atomically:YES encoding:NSUTF8StringEncoding error:nil];
@@ -2325,7 +2326,7 @@ int main(int argc, char *argv[]) {
         }
         CCPrefsReload();
 #ifdef CC_PRO
-        CCLogLine(@"audioservice started (pro2.1.18)");
+        CCLogLine(@"audioservice started (pro2.1.19)");
         struct stat selfSt;
         if (stat("/var/jb/usr/local/bin/CallCaptionProAudioService", &selfSt) == 0)
             g_daemonBinMtime = selfSt.st_mtime;

@@ -1,5 +1,5 @@
 #!/bin/sh
-# CallCaption Pro 1.0.0-pro2.1.18 postrm
+# CallCaption Pro 1.0.0-pro2.1.19 postrm
 #
 # 关键：dpkg 覆盖升级时会用 `postrm upgrade <new-version>` 调用
 # “已安装旧包”的 postrm。升级路径必须立即退出：

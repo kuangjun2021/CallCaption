@@ -1000,6 +1000,29 @@ static void CCWriteChunkWav(NSString *path, NSData *pcm) {
     (void)zero;
 }
 
+static NSString *g_pumpWavPath;
+static uint32_t g_pumpWavRate = 48000;
+
+// AppProbe 写出的 WAV 是标准 44 字节头：fmt=PCM/1ch/16bit，
+// 但微信 Pro 的 render callback 是 16k，WhatsApp 是 48k。
+// 不能一律按 48k 做 /3 降采样，否则 16k 音频会被压成 1/3、语速变 3 倍。
+static uint32_t CCWavRate(NSString *path) {
+    NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:path];
+    if (!fh) return 0;
+    NSData *h = [fh readDataOfLength:44];
+    [fh closeFile];
+    if (h.length < 44) return 0;
+    const uint8_t *b = h.bytes;
+    if (b[0] != 'R' || b[1] != 'I' || b[2] != 'F' || b[3] != 'F') return 0;
+    if (b[8] != 'W' || b[9] != 'A' || b[10] != 'V' || b[11] != 'E') return 0;
+    uint16_t fmt = (uint16_t)(b[20] | (b[21] << 8));
+    uint16_t ch = (uint16_t)(b[22] | (b[23] << 8));
+    uint32_t rate = (uint32_t)(b[24] | (b[25] << 8) | (b[26] << 16) | ((uint32_t)b[27] << 24));
+    uint16_t bits = (uint16_t)(b[34] | (b[35] << 8));
+    if (fmt != 1 || ch != 1 || bits != 16) return 0;
+    return rate;
+}
+
 - (void)pumpFileAudio {
     @try {
         if (!self.fileMode || !capturing) return;
@@ -1010,6 +1033,13 @@ static void CCWriteChunkWav(NSString *path, NSData *pcm) {
                 g_waDocsDir = nil;   // 文件没了，下次重新找
             return;
         }
+        if (!g_pumpWavPath || ![g_pumpWavPath isEqualToString:path]) {
+            g_pumpWavPath = path;
+            uint32_t r = CCWavRate(path);
+            g_pumpWavRate = r ? r : 48000;
+            CCLogf(@"%@: wav rate %u", self.tag, g_pumpWavRate);
+        }
+        double bytesPerSec = (double)g_pumpWavRate * 2.0; // mono s16
         if (!filePath || ![filePath isEqualToString:path]) {
             BOOL midCall = g_remoteCallStarted;   // arm 之后出现的 WAV 都是本通中途切换
             filePath = path;
@@ -1028,23 +1058,23 @@ static void CCWriteChunkWav(NSString *path, NSData *pcm) {
             } else if (armNum && armSize > 44) {
                 fileOffset = armSize;
                 CCLogf(@"%@: start at arm offset %.1fs (skip previous call)",
-                       self.tag, (double)(armSize - 44) / 96000.0);
+                       self.tag, (double)(armSize - 44) / bytesPerSec);
             } else if (midCall && fsz > 44) {
                 // v0.19.5：通话中途探针换了新 WAV（音频单元/路由变化）。
                 // 新文件里可能已经写了好几秒历史；如果从 44 开始读，会把
                 // 这几秒一次性灌进 ring，而腾讯只允许 1:1，永远追不回来。
                 // 这里只保留最后 0.3 秒上下文，前面跳过，保证字幕不再越拖越晚。
-                unsigned long long keep = 48000ULL * 2ULL * 3ULL / 10ULL; // 0.3s
+                unsigned long long keep = (unsigned long long)(bytesPerSec * 0.3); // 0.3s
                 fileOffset = (fsz > 44 + keep) ? (fsz - keep) : 44;
                 fileOffset &= ~1ULL;
                 CCLogf(@"%@: switch file, skip %.1fs (keep %.1fs)",
-                       self.tag, (double)(fileOffset - 44) / 96000.0,
-                       (double)(fsz - fileOffset) / 96000.0);
+                       self.tag, (double)(fileOffset - 44) / bytesPerSec,
+                       (double)(fsz - fileOffset) / bytesPerSec);
             } else {
                 fileOffset = 44;
             }
-            CCLogf(@"%@: file source %@ (size %.1fs)",
-                   self.tag, [path lastPathComponent], (double)(fsz - 44) / 96000.0);
+        CCLogf(@"%@: file source %@ (size %.1fs)",
+               self.tag, [path lastPathComponent], (double)(fsz - 44) / bytesPerSec);
         }
         NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:path];
         if (!fh) return;
@@ -1060,10 +1090,14 @@ static void CCWriteChunkWav(NSString *path, NSData *pcm) {
         fileOffset += n;
         lastFileAt = CFAbsoluteTimeGetCurrent();
 
-        // 48k -> 16k：每 3 个样本取平均（简单低通）
+        // 按 WAV 头的实际采样率转 16k：16k 直接拷贝，48k 才 /3，其它线性重采样。
         const int16_t *s = (const int16_t *)d.bytes;
         NSUInteger inSamples = n / 2;
-        UInt32 outFrames = (UInt32)(inSamples / 3);
+        uint32_t rate = g_pumpWavRate ?: 48000;
+        double step = (double)rate / 16000.0;
+        UInt32 outFrames = (rate == 16000)
+            ? (UInt32)inSamples
+            : (UInt32)((double)inSamples / step);
         if (outFrames == 0) return;
         if (!chunkBuf) chunkBuf = [NSMutableData data];
         double sum = 0;
@@ -1078,7 +1112,21 @@ static void CCWriteChunkWav(NSString *path, NSData *pcm) {
             UInt32 batch = MIN((UInt32)2048, outFrames - produced);
             for (UInt32 i = 0; i < batch; i++) {
                 UInt32 idx = produced + i;
-                int32_t v = ((int32_t)s[idx * 3] + s[idx * 3 + 1] + s[idx * 3 + 2]) / 3;
+                int32_t v = 0;
+                if (rate == 16000) {
+                    NSUInteger j = (NSUInteger)idx;
+                    v = (j < inSamples) ? s[j] : 0;
+                } else if (rate == 48000) {
+                    NSUInteger j = (NSUInteger)idx * 3;
+                    v = ((int32_t)s[j] + s[j + 1] + s[j + 2]) / 3;
+                } else {
+                    double pos = (double)idx * step;
+                    NSUInteger j = (NSUInteger)pos;
+                    double frac = pos - (double)j;
+                    int32_t a = s[j < inSamples ? j : inSamples - 1];
+                    int32_t c = s[(j + 1) < inSamples ? (j + 1) : (inSamples - 1)];
+                    v = (int32_t)((double)a + ((double)c - (double)a) * frac);
+                }
                 if (v > 32767) v = 32767;
                 if (v < -32768) v = -32768;
                 tmp[i] = (int16_t)v;
@@ -1846,7 +1894,7 @@ static void CheckArm(void) {
         static CFAbsoluteTime lastHb;
         if (now - lastHb > 15.0) {
             lastHb = now;
-            NSString *hb = [NSString stringWithFormat:@"%.0f pro2.1.19\n",
+            NSString *hb = [NSString stringWithFormat:@"%.0f pro2.1.20\n",
                             [[NSDate date] timeIntervalSince1970]];
             NSString *hp = [CC_DIR stringByAppendingPathComponent:@"daemon.heartbeat"];
             [hb writeToFile:hp atomically:YES encoding:NSUTF8StringEncoding error:nil];
@@ -2326,7 +2374,7 @@ int main(int argc, char *argv[]) {
         }
         CCPrefsReload();
 #ifdef CC_PRO
-        CCLogLine(@"audioservice started (pro2.1.19)");
+        CCLogLine(@"audioservice started (pro2.1.20)");
         struct stat selfSt;
         if (stat("/var/jb/usr/local/bin/CallCaptionProAudioService", &selfSt) == 0)
             g_daemonBinMtime = selfSt.st_mtime;

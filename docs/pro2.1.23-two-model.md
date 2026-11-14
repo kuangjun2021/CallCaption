@@ -1,8 +1,13 @@
 # Pro 2.1.23：两模型各司其职（远端 x-asr greedy + 本机 zh-14M）
 
 - 日期：2026-11-14
-- 包：待构建 `net.user.callcaptionpro_1.0.0-pro2.1.23_arm64e.deb`
-- 模型包：待构建 `net.user.callcaptionpro.models_1.0.1_iphoneos-arm64.deb`
+- 包：`net.user.callcaptionpro_1.0.0-pro2.1.23_arm64e.deb`
+- 大小：6,520,028 字节
+- SHA-256：`21b50e366cf5b79e558c384acc8eec396fac14503dd6079d30c2f7c29496ebbe`
+- 模型包：`net.user.callcaptionpro.models_1.0.1_iphoneos-arm64.deb`
+- 模型包大小：144,582,856 字节
+- 模型包 SHA-256：`441a4ec75714cefad482deb4f82ccf66828a69fd163d65376f91642b97193717`
+- 构建：GitHub Actions run `43578072170`，commit `5a5f318`
 - 基础：2.1.22（`84b6656`）
 
 ## 1. 验证结论（PC 实测）

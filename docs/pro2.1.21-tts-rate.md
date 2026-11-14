@@ -1,7 +1,10 @@
 # Pro 2.1.21：播报语速设置（中文/英文分开）
 
 - 日期：2026-11-14
-- 包：待构建 `net.user.callcaptionpro_1.0.0-pro2.1.21_arm64e.deb`
+- 包：`net.user.callcaptionpro_1.0.0-pro2.1.21_arm64e.deb`
+- 大小：6,518,508 字节
+- SHA-256：`1e8dffbca9c84edf7adfe5d3006dafb7fad89abcb1c408a6ff0a6af30e3c0758`
+- 构建：GitHub Actions run `43576633603`，commit `2c01cb2`
 - 基础：2.1.20（`673812c` + 文档 `34b4695`）
 
 ## 1. 为什么做

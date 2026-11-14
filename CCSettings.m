@@ -525,6 +525,7 @@ static void VoiceLists(NSString *prefix,
         MkSwitch(@"ShowRecognized", @"显示识别原文", YES),
         MkSwitch(@"ShowTranslated", @"显示译文", YES),
         MkSwitch(@"TTSEnabled", @"中文字幕语音播报", YES),
+        MkSwitch(@"PartialTranslate", @"远端即时翻译（仅字幕，不播报）", YES),
         MkSwitch(@"CloudASR", @"云端语音识别（更准，需联网）", YES),
         MkSwitch(@"LargeCaptions", @"大字幕", NO),
         MkSwitch(@"AlwaysShowPanel", @"面板常驻显示（非通话也显示）", NO),
@@ -619,7 +620,7 @@ static void VoiceLists(NSString *prefix,
         @"日志：%@。Tap 断流重启阈值：音频帧停止增长超过该秒数就重挂 Tap，4 秒兼顾首通恢复和误判。",
         CC_LOG_PATH];
     self.sectionFooters = @[
-        @"通话接通后自动激活，屏幕出现小地球；点地球展开面板，再点面板里的地球可关闭/开启翻译。面板外任意位置点击自动收起。",
+        @"通话接通后自动激活，屏幕出现小地球；点地球展开面板，再点面板里的地球可关闭/开启翻译。面板外任意位置点击自动收起。远端即时翻译会在对方说话过程中约每 1.5 秒更新中文字幕，不触发 TTS；final 才播报。",
         @"B1 模式：腾讯只做实时 ASR（来电 16k_en / 去电 16k_zh）；来电用“来电翻译引擎”（默认 Google），去电用“去电翻译引擎”（默认 DeepL）。语音翻译、腾讯 TTS、SFSpeech 都不再使用，字幕和 TTS 全部在本机。AppID/SecretId/SecretKey 从腾讯云 CAM 获取；SecretKey 只存本机。翻译引擎需要对应 Key（Google/DeepL/AI）在下面“翻译引擎”里配置。断句静音越短字幕越快但更碎。",
         @"识别语言代码（BCP-47）：对方英文 en-US、日文 ja-JP、韩文 ko-KR；我的语言通常 zh-CN。",
         @"0 = 全程静音（只播译文，TTS 前的原声也不放）；1-100 = 只在 TTS 播报时保留原音，100 = 不压低。对方原音 = 你听到的英文；我方原音 = 对方听到的你的声音。想让对方只听到英文，把我方原音设为 0。",
@@ -1155,7 +1156,7 @@ static NSString *CCApiTextFromJSON(NSString *engine, id json) {
     BOOL daemonOK = hbAt && [[NSDate date] timeIntervalSinceDate:hbAt] < 60.0;
     if (!daemonOK) {
         msg = @"Pro 音频守护进程未运行，或仍是旧版本。\n"
-               "请重启手机后再试；若仍不行，重新安装 pro2.1.21。";
+               "请重启手机后再试；若仍不行，重新安装 pro2.1.22。";
     } else if (![fm fileExistsAtPath:model]) {
         msg = @"模型未安装。请先安装 CallCaptionPro Models（x-asr-480ms）。";
     } else if (![fm fileExistsAtPath:wav] &&

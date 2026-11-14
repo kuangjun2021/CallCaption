@@ -84,6 +84,12 @@ static BOOL g_graceActive;
 static NSUInteger g_graceSeq;
 static NSTimer *g_graceTimer;
 
+// Pro2.1.22：远端 partial 翻译节流/失效控制。
+// gen 在 final 或新一通时递增，晚到的 partial 译文不能覆盖 final。
+static NSUInteger g_remotePartialGen;
+static CFAbsoluteTime g_remotePartialAt;
+static NSString *g_remotePartialLast;
+
 static NSString *g_texts[4];            // 0 对方原文 / 1 对方译文 / 2 我方原文 / 3 我方译文
 static NSString *g_engines[2];          // 0 对方引擎 / 1 我方引擎
 static CFAbsoluteTime g_textAt[4];
@@ -1045,6 +1051,9 @@ static void CCUIHandleCallActive(BOOL active) {
         // 会话已经在 ringing 阶段由 prepare 激活；这里只 arm，不再 setActive。
         CCSetPrepared(NO);
         g_callSeq++;
+        g_remotePartialGen++;
+        g_remotePartialLast = nil;
+        g_remotePartialAt = 0;
         g_graceActive = NO;
         [g_graceTimer invalidate];
         g_graceTimer = nil;
@@ -1197,11 +1206,54 @@ static BOOL CCRemoteTextIsMostlyChinese(NSString *text) {
     return cjk > 0 && cjk >= latin;
 }
 
+// Pro2.1.22：远端 ASR partial -> 翻译引擎 -> 临时中文字幕。
+// 只更新字幕，不触发 TTS；final 到达后 gen++，晚到的 partial 不会覆盖 final。
+void CCUIRemotePartialText(NSString *text) {
+    if (!text.length) return;
+    if (!CCPrefBool(CC_K_PARTIAL_TRANSLATE, YES)) return;
+    if (!CCPrefBool(CC_K_REMOTE_ENABLED, YES)) return;
+    NSUInteger seq = g_callSeq;
+    if (!g_callActive && !(g_graceActive && g_graceSeq == seq)) return;
+    NSString *trim = [text stringByTrimmingCharactersInSet:
+                      [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (trim.length < 4) return;
+    if (CCRemoteTextIsMostlyChinese(trim)) {
+        // 对方说中文：partial 直接上中文字幕，不翻译。
+        CCUIDeliverRemoteTranslated(trim);
+        return;
+    }
+    if ([trim isEqualToString:g_remotePartialLast]) return;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (g_remotePartialAt > 0 && now - g_remotePartialAt < 1.5) return;
+    g_remotePartialAt = now;
+    g_remotePartialLast = trim;
+    NSUInteger gen = ++g_remotePartialGen;
+    NSString *eng = CCPrefStr(CC_K_REMOTE_TRANSLATE_ENGINE, @"google");
+    CCLogf(@"R partial translate: %@", trim);
+    CCTranslateWithEngine(trim, @"en", @"zh", eng,
+                          ^(NSString *out, NSString *used) {
+        if (!out.length) return;
+        if (seq != g_callSeq) return;
+        if (gen != g_remotePartialGen) return;
+        BOOL live = g_callActive;
+        BOOL grace = (!live && g_graceActive && g_graceSeq == seq);
+        if (!live && !grace) return;
+        CCLogf(@"R partial trans[%@]: %@", used ?: @"?", out);
+        CCUIDeliverRemoteTranslated(out);
+        if (used.length) CCUIDeliverRemoteEngine(used);
+        // 不 TTS：partial 只做字幕，final 才播报。
+    });
+}
+
 // v0.20.0 B1：来电 ASR 最终文本 -> 独立翻译引擎（默认 Google）-> 中文字幕/TTS。
 void CCUIRemoteFinalText(NSString *text) {
     if (!text.length) return;
     NSUInteger seq = g_callSeq;
     if (!g_callActive && !(g_graceActive && g_graceSeq == seq)) return;
+    // final 优先：让所有在途 partial 译文失效，避免它晚到覆盖 final。
+    g_remotePartialGen++;
+    g_remotePartialLast = nil;
+    g_remotePartialAt = 0;
     if (CCRemoteTextIsMostlyChinese(text)) {
         // 对方本来就说中文：直接显示，不翻译、不做中文 TTS（避免回声）
         CCUIDeliverRemoteTranslated(text);

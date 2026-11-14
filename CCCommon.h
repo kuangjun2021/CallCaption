@@ -82,6 +82,7 @@
 #define CC_K_ASR_TTS_MUTE     @"AsrTTSMute"           // 1=对方 TTS 时暂停识别（防回声），默认 0
 #define CC_K_REMOTE_TRANSLATE_ENGINE @"RemoteTranslateEngine"  // google / deepl / bing / ai
 #define CC_K_LOCAL_TRANSLATE_ENGINE  @"LocalTranslateEngine"   // deepl / google / bing / ai
+#define CC_K_PARTIAL_TRANSLATE @"PartialTranslate"    // 远端 partial 即时翻译（仅字幕，不 TTS）
 
 // ---------- 进程判断 ----------
 void CCProcessInit(void);
@@ -104,6 +105,7 @@ void CCUIClearCaptions(void);                      // 通话开始/结束清空�
 void CCUIEnqueueRemoteTTS(NSString *text);          // v0.19.1：把腾讯译文送进下行 TTS 队列
 void CCUIEnqueueLocalEnglishTTS(NSString *text);    // v0.19.2：本机英文 TTS，写入 cc_tts.wav 供上行混音
 void CCUIRemoteFinalText(NSString *text);           // v0.20.0 B1：来电 ASR 最终文本 -> Google/DeepL -> 中文字幕/TTS
+void CCUIRemotePartialText(NSString *text);         // Pro2.1.22：来电 ASR partial -> 即时中文字幕（不 TTS）
 void CCUILocalFinalText(NSString *text);            // v0.20.0 B1：去电 ASR 最终文本 -> DeepL/Google -> 英文字幕/TTS
 NSString *CCFindWhatsAppDocs(void);                 // v0.19.1：守护进程/腾讯模块共用
 // 兼容旧接口

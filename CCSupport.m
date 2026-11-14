@@ -425,7 +425,10 @@ static void SBDeliverLine(NSString *line) {
         CCUIDeliverRemoteTranslated(t);
         if (CCPrefBool(CC_K_TTS_ENABLED, YES)) CCUIEnqueueRemoteTTS(t);
     } else if ([line hasPrefix:@"I|"]) {
-        CCUIDeliverRemoteOriginal([line substringFromIndex:2]);
+        NSString *t = [line substringFromIndex:2];
+        CCUIDeliverRemoteOriginal(t);
+        // Pro2.1.22：partial 只加速中文字幕，不触发 TTS；final 仍走 RQ|。
+        CCUIRemotePartialText(t);
     } else if ([line hasPrefix:@"RE|"]) {
         CCUIDeliverRemoteEngine([line substringFromIndex:3]);
     } else if ([line hasPrefix:@"LE|"]) {

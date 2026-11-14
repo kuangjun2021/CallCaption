@@ -85,13 +85,14 @@ jobs:
       - name: Build model resource package (installed once)
         run: |
           mkdir -p model-package/DEBIAN \
-                   model-package/var/mobile/Library/CallCaptionPro/models/x-asr-480ms
+                   model-package/var/mobile/Library/CallCaptionPro/models/x-asr-480ms \
+                   model-package/var/mobile/Library/CallCaptionPro/models/zh-14m
           printf '%s\n' \
             'Package: net.user.callcaptionpro.models' \
             'Name: CallCaption Pro Models' \
-            'Version: 1.0.0' \
+            'Version: 1.0.1' \
             'Architecture: iphoneos-arm64' \
-            'Description: X-ASR 480ms zh-en int8 streaming model for CallCaption Pro.' \
+            'Description: X-ASR 480ms remote model + zh-14M local Chinese model for CallCaption Pro.' \
             'Maintainer: user <user@localhost>' \
             'Author: user' \
             'Section: Tweaks' \
@@ -114,7 +115,23 @@ jobs:
           cp "$SRC/encoder.int8.onnx" "$SRC/decoder.onnx" "$SRC/joiner.int8.onnx" \
              "$SRC/tokens.txt" "$SRC/bpe.model" \
              model-package/var/mobile/Library/CallCaptionPro/models/x-asr-480ms/
-          dpkg-deb --root-owner-group -Zxz -b model-package out/net.user.callcaptionpro.models_1.0.0_iphoneos-arm64.deb
+          # Pro2.1.23：本机中文专用 zh-14M（25MB int8），远端仍用 x-asr。
+          curl -L --fail -o /tmp/zh14m.tar.bz2 \
+            https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23.tar.bz2
+          rm -rf /tmp/zh14m && mkdir -p /tmp/zh14m
+          tar -xjf /tmp/zh14m.tar.bz2 -C /tmp/zh14m
+          ZH=$(find /tmp/zh14m -maxdepth 1 -type d -name "sherpa-onnx-streaming-zipformer-zh-14M-*" | head -1)
+          echo "zh model src=$ZH"
+          test -n "$ZH"
+          cp "$ZH/encoder-epoch-99-avg-1.int8.onnx" \
+             model-package/var/mobile/Library/CallCaptionPro/models/zh-14m/encoder.int8.onnx
+          cp "$ZH/decoder-epoch-99-avg-1.int8.onnx" \
+             model-package/var/mobile/Library/CallCaptionPro/models/zh-14m/decoder.onnx
+          cp "$ZH/joiner-epoch-99-avg-1.int8.onnx" \
+             model-package/var/mobile/Library/CallCaptionPro/models/zh-14m/joiner.int8.onnx
+          cp "$ZH/tokens.txt" \
+             model-package/var/mobile/Library/CallCaptionPro/models/zh-14m/tokens.txt
+          dpkg-deb --root-owner-group -Zxz -b model-package out/net.user.callcaptionpro.models_1.0.1_iphoneos-arm64.deb
           ls -lh out/
 
       - name: Upload deb

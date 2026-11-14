@@ -1,7 +1,10 @@
 # Pro 2.1.22：远端 partial 即时翻译（仅字幕，不播报）
 
 - 日期：2026-11-14
-- 包：待构建 `net.user.callcaptionpro_1.0.0-pro2.1.22_arm64e.deb`
+- 包：`net.user.callcaptionpro_1.0.0-pro2.1.22_arm64e.deb`
+- 大小：6,520,772 字节
+- SHA-256：`e129db8259bc594984378e4e7e21621a256e468a663c92710c0406d5914cf18c`
+- 构建：GitHub Actions run `43577158984`，commit `84b6656`
 - 基础：2.1.21（`2c01cb2`）
 
 ## 1. 这是什么

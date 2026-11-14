@@ -164,6 +164,7 @@ static void ASRConfidence(const SherpaOnnxOnlineRecognizerResult *r,
 
 @interface CCASRStream : NSObject
 @property (nonatomic, assign) const SherpaOnnxOnlineStream *stream;
+@property (nonatomic, assign) const SherpaOnnxOnlineRecognizer *rec;
 @property (nonatomic, copy) NSString *path;
 @property (nonatomic, assign) BOOL isLocal;
 @property (nonatomic, assign) FILE *fp;
@@ -181,6 +182,7 @@ static void ASRConfidence(const SherpaOnnxOnlineRecognizerResult *r,
                               path:(NSString *)path
                            isLocal:(BOOL)isLocal {
     if ((self = [super init])) {
+        _rec = rec;
         _stream = SherpaOnnxCreateOnlineStream(rec);
         if (!_stream) return nil;
         _path = [path copy];
@@ -195,7 +197,7 @@ static void ASRConfidence(const SherpaOnnxOnlineRecognizerResult *r,
     if (_stream) SherpaOnnxDestroyOnlineStream(_stream);
 }
 - (NSString *)tag { return _isLocal ? @"L" : @"R"; }
-- (void)resetForNextCall:(const SherpaOnnxOnlineRecognizer *)rec {
+- (void)resetForNextCall {
     if (_fp) { fclose(_fp); _fp = NULL; }
     _offset = 44;
     _lastText = @"";
@@ -204,7 +206,7 @@ static void ASRConfidence(const SherpaOnnxOnlineRecognizerResult *r,
     _finals = 0;
     _samples = 0;
     _mutedForTTS = NO;
-    if (_stream) SherpaOnnxOnlineStreamReset(rec, _stream);
+    if (_stream && _rec) SherpaOnnxOnlineStreamReset(_rec, _stream);
 }
 - (BOOL)ensureOpen {
     if (_fp) return YES;
@@ -219,7 +221,6 @@ static void ASRConfidence(const SherpaOnnxOnlineRecognizerResult *r,
     return YES;
 }
 - (void)handleResult:(NSString *)text
-        recognizer:(const SherpaOnnxOnlineRecognizer *)rec
                 now:(CFAbsoluteTime)now
                  t0:(CFAbsoluteTime)t0
             confAvg:(double)confAvg
@@ -241,7 +242,7 @@ static void ASRConfidence(const SherpaOnnxOnlineRecognizerResult *r,
         Log(@"%@ partial suppressed conf avg=%.2f min=%.2f text=%@",
             self.tag, confAvg, confMin, text);
     }
-    BOOL endpoint = SherpaOnnxOnlineStreamIsEndpoint(rec, _stream) ? YES : NO;
+    BOOL endpoint = SherpaOnnxOnlineStreamIsEndpoint(_rec, _stream) ? YES : NO;
     if (endpoint) {
         BOOL drop = (!_isLocal && text.length && confN > 0 &&
                      (confAvg < -1.4 ||
@@ -257,13 +258,12 @@ static void ASRConfidence(const SherpaOnnxOnlineRecognizerResult *r,
             Log(@"%@ final DROPPED conf avg=%.2f min=%.2f text=%@",
                 self.tag, confAvg, confMin, text);
         }
-        SherpaOnnxOnlineStreamReset(rec, _stream);
+        SherpaOnnxOnlineStreamReset(_rec, _stream);
         _lastText = @"";
         _lastPartialAt = 0;
     }
 }
-- (BOOL)feedRecognizer:(const SherpaOnnxOnlineRecognizer *)rec
-                    t0:(CFAbsoluteTime)t0 {
+- (BOOL)feedRecognizer:(CFAbsoluteTime)t0 {
     // 先打开再判断 TTS 静音：这样 TTS 期间出现的 remote WAV 也会被直接推到文件尾，
     // 不会等 TTS 结束再从 44 字节处把整段 TTS 重新识别一遍。
     if (![self ensureOpen]) return NO;
@@ -275,7 +275,7 @@ static void ASRConfidence(const SherpaOnnxOnlineRecognizerResult *r,
                 _mutedForTTS = YES;
                 _lastText = @"";
                 _lastPartialAt = 0;
-                SherpaOnnxOnlineStreamReset(rec, _stream);
+                SherpaOnnxOnlineStreamReset(_rec, _stream);
                 AppendSpool(@"RC|");
                 Log(@"R muted for remote TTS %.2fs", until - nowE);
             }
@@ -313,17 +313,17 @@ static void ASRConfidence(const SherpaOnnxOnlineRecognizerResult *r,
     for (int i = 0; i < n; i++) flt[i] = (float)pcm[i] / 32768.0f;
 
     SherpaOnnxOnlineStreamAcceptWaveform(_stream, 16000, flt, n);
-    while (SherpaOnnxIsOnlineStreamReady(rec, _stream)) {
-        SherpaOnnxDecodeOnlineStream(rec, _stream);
+    while (SherpaOnnxIsOnlineStreamReady(_rec, _stream)) {
+        SherpaOnnxDecodeOnlineStream(_rec, _stream);
     }
     const SherpaOnnxOnlineRecognizerResult *r =
-        SherpaOnnxGetOnlineStreamResult(rec, _stream);
+        SherpaOnnxGetOnlineStreamResult(_rec, _stream);
     NSString *text = r && r->text ? @(r->text) : @"";
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     double confAvg = NAN, confMin = NAN;
     int confN = 0;
     if (!_isLocal && text.length) ASRConfidence(r, &confAvg, &confMin, &confN);
-    [self handleResult:text recognizer:rec now:now t0:t0
+    [self handleResult:text now:now t0:t0
                confAvg:confAvg confMin:confMin confN:confN];
     if (r) SherpaOnnxDestroyOnlineRecognizerResult(r);
     return YES;
@@ -370,21 +370,23 @@ static void ASRConfidence(const SherpaOnnxOnlineRecognizerResult *r,
     if (count) *count = n;
 }
 
-static int RunLive(const SherpaOnnxOnlineRecognizer *rec,
+static int RunLive(const SherpaOnnxOnlineRecognizer *remoteRec,
+                   const SherpaOnnxOnlineRecognizer *localRec,
                    BOOL localOn, BOOL remoteOn,
                    NSString *localWav, NSString *remoteWav,
                    BOOL waitArm, BOOL resident,
                    CFAbsoluteTime t0) {
     NSMutableArray<CCASRStream *> *streams = [NSMutableArray array];
     if (localOn) {
-        CCASRStream *s = [[CCASRStream alloc] initWithRecognizer:rec
+        // Pro2.1.23：本机中文走 zh-14M（独立 recognizer），远端走 x-asr。
+        CCASRStream *s = [[CCASRStream alloc] initWithRecognizer:(localRec ?: remoteRec)
                                                             path:localWav
                                                          isLocal:YES];
         if (!s) { Log(@"create local stream failed"); return 4; }
         [streams addObject:s];
     }
     if (remoteOn) {
-        CCASRStream *s = [[CCASRStream alloc] initWithRecognizer:rec
+        CCASRStream *s = [[CCASRStream alloc] initWithRecognizer:remoteRec
                                                             path:remoteWav
                                                          isLocal:NO];
         if (!s) { Log(@"create remote stream failed"); return 4; }
@@ -438,7 +440,7 @@ static int RunLive(const SherpaOnnxOnlineRecognizer *rec,
             BOOL did = NO;
             for (CCASRStream *s in streams) {
                 @autoreleasepool {
-                    if ([s feedRecognizer:rec t0:t0]) did = YES;
+                    if ([s feedRecognizer:t0]) did = YES;
                 }
             }
             if (!did) usleep(100000);
@@ -451,10 +453,58 @@ static int RunLive(const SherpaOnnxOnlineRecognizer *rec,
         if (!resident || g_stop) break;
 
         // 常驻模式：清掉本通状态，等下一通 arm。
-        for (CCASRStream *s in streams) [s resetForNextCall:rec];
+        for (CCASRStream *s in streams) [s resetForNextCall];
         Log(@"resident: call ended, waiting next arm");
     }
     return 0;
+}
+
+// Pro2.1.23：远端 x-asr 与本机 zh-14M 各自一个 recognizer。
+// 两边都用 greedy：远端避免 modified_beam 把 how much 压成“五百”；
+// 本机 zh-14M 的 greedy 也比 beam+热词更干净（PC 实测）。
+static const SherpaOnnxOnlineRecognizer *CCCreateRecognizer(NSString *modelDir,
+                                                            BOOL isLocal,
+                                                            NSString *tag) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *encoder = Join(modelDir, @"encoder.int8.onnx");
+    NSString *decoder = Join(modelDir, @"decoder.onnx");
+    NSString *joiner = Join(modelDir, @"joiner.int8.onnx");
+    NSString *tokens = Join(modelDir, @"tokens.txt");
+    for (NSString *p in @[encoder, decoder, joiner, tokens]) {
+        if (![fm fileExistsAtPath:p]) {
+            Log(@"missing %@ model file %@", tag, p);
+            return NULL;
+        }
+    }
+    SherpaOnnxOnlineRecognizerConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.feat_config.sample_rate = 16000;
+    cfg.feat_config.feature_dim = 80;
+    cfg.model_config.transducer.encoder = encoder.UTF8String;
+    cfg.model_config.transducer.decoder = decoder.UTF8String;
+    cfg.model_config.transducer.joiner = joiner.UTF8String;
+    cfg.model_config.tokens = tokens.UTF8String;
+    cfg.model_config.num_threads = 2;
+    cfg.model_config.provider = "cpu";
+    // 显式指定模型类型，避免 sherpa 为探测类型把 encoder 加载两遍：
+    // 远端 x-asr 元数据是 zipformer2，本机 zh-14M 是 zipformer。
+    cfg.model_config.model_type = isLocal ? "zipformer" : "zipformer2";
+    cfg.decoding_method = "greedy_search";
+    cfg.max_active_paths = 4;
+    cfg.enable_endpoint = 1;
+    cfg.rule1_min_trailing_silence = 1.2f;
+    cfg.rule2_min_trailing_silence = 0.8f;
+    cfg.rule3_min_utterance_length = 10.0f;
+
+    CFAbsoluteTime t = CFAbsoluteTimeGetCurrent();
+    const SherpaOnnxOnlineRecognizer *rec = SherpaOnnxCreateOnlineRecognizer(&cfg);
+    if (!rec) {
+        Log(@"create %@ recognizer failed", tag);
+        return NULL;
+    }
+    Log(@"%@ model loaded in %.2fs (%@, greedy)",
+        tag, CFAbsoluteTimeGetCurrent() - t, modelDir.lastPathComponent);
+    return rec;
 }
 
 int main(int argc, char **argv) {
@@ -484,7 +534,7 @@ int main(int argc, char **argv) {
         NSString *localWav = [CC_DIR stringByAppendingPathComponent:@"local16k.wav"];
         NSString *remoteWav = [CC_DIR stringByAppendingPathComponent:@"remote16k.wav"];
         NSString *modelDir = [CC_DIR stringByAppendingPathComponent:@"models/x-asr-480ms"];
-        NSString *hotwordsPath = [CC_DIR stringByAppendingPathComponent:@"asr_hotwords.txt"];
+        NSString *localModelDir = [CC_DIR stringByAppendingPathComponent:@"models/zh-14m"];
         double maxSec = 0;
         BOOL fast = NO;
         BOOL localOn = YES;
@@ -496,7 +546,7 @@ int main(int argc, char **argv) {
             else if (!strcmp(argv[i], "--wav") && i + 1 < argc) wav = @(argv[++i]);
             else if (!strcmp(argv[i], "--local-wav") && i + 1 < argc) localWav = @(argv[++i]);
             else if (!strcmp(argv[i], "--remote-wav") && i + 1 < argc) remoteWav = @(argv[++i]);
-            else if (!strcmp(argv[i], "--hotwords") && i + 1 < argc) hotwordsPath = @(argv[++i]);
+            else if (!strcmp(argv[i], "--local-model-dir") && i + 1 < argc) localModelDir = @(argv[++i]);
             else if (!strcmp(argv[i], "--tts-mute") && i + 1 < argc) g_ttsMute = atoi(argv[++i]) != 0;
             else if (!strcmp(argv[i], "--local") && i + 1 < argc) localOn = atoi(argv[++i]) != 0;
             else if (!strcmp(argv[i], "--remote") && i + 1 < argc) remoteOn = atoi(argv[++i]) != 0;
@@ -507,80 +557,41 @@ int main(int argc, char **argv) {
             else if (!strcmp(argv[i], "--resident")) { resident = YES; waitArm = YES; }
         }
         BOOL live = [mode isEqualToString:@"live"];
-        NSString *encoder = Join(modelDir, @"encoder.int8.onnx");
-        NSString *decoder = Join(modelDir, @"decoder.onnx");
-        NSString *joiner = Join(modelDir, @"joiner.int8.onnx");
-        NSString *tokens = Join(modelDir, @"tokens.txt");
-        NSFileManager *fm = [NSFileManager defaultManager];
-        for (NSString *p in @[encoder, decoder, joiner, tokens]) {
-            if (![fm fileExistsAtPath:p]) {
-                Log(@"missing model file %@", p);
-                return 2;
-            }
-        }
         if (live) {
-            Log(@"start mode=live local=%d remote=%d ttsMute=%d localWav=%@ remoteWav=%@ model=%@ threads=2",
+            Log(@"start mode=live local=%d remote=%d ttsMute=%d localWav=%@ remoteWav=%@ remoteModel=%@ localModel=%@",
                 localOn, remoteOn, g_ttsMute, localWav.lastPathComponent,
-                remoteWav.lastPathComponent, modelDir.lastPathComponent);
+                remoteWav.lastPathComponent, modelDir.lastPathComponent,
+                localModelDir.lastPathComponent);
         } else {
             Log(@"start mode=offline wav=%@ model=%@ threads=2",
                 wav.lastPathComponent, modelDir.lastPathComponent);
         }
 
-        SherpaOnnxOnlineRecognizerConfig cfg;
-        memset(&cfg, 0, sizeof(cfg));
-        cfg.feat_config.sample_rate = 16000;
-        cfg.feat_config.feature_dim = 80;
-        cfg.model_config.transducer.encoder = encoder.UTF8String;
-        cfg.model_config.transducer.decoder = decoder.UTF8String;
-        cfg.model_config.transducer.joiner = joiner.UTF8String;
-        cfg.model_config.tokens = tokens.UTF8String;
-        cfg.model_config.num_threads = 2;
-        cfg.model_config.provider = "cpu";
-        // 官方模型 encoder 元数据就是 zipformer2；显式指定可避免 sherpa
-        // 为探测模型类型而把 169MB 模型加载两遍（首包延迟翻倍）。
-        cfg.model_config.model_type = "zipformer2";
-        // 热词只在 modified_beam_search 下生效；这个模型用 SentencePiece BPE，
-        // bpe.vocab 由 bpe.model 导出（空格分隔），modeling_unit 必须是 bpe。
-        NSDictionary *hwAttrs = [fm attributesOfItemAtPath:hotwordsPath error:nil];
-        BOOL hasHotwords = [hwAttrs[NSFileSize] unsignedLongLongValue] > 0;
-        NSString *bpeVocab = Join(modelDir, @"bpe.vocab");
-        BOOL hotwordsOK = hasHotwords && [fm fileExistsAtPath:bpeVocab];
-        if (hotwordsOK) {
-            cfg.decoding_method = "modified_beam_search";
-            cfg.max_active_paths = 4;
-            cfg.hotwords_file = hotwordsPath.UTF8String;
-            cfg.hotwords_score = 1.5f;
-            cfg.model_config.modeling_unit = "bpe";
-            cfg.model_config.bpe_vocab = bpeVocab.UTF8String;
-        } else {
-            cfg.decoding_method = "greedy_search";
-            cfg.max_active_paths = 4;
-        }
-        cfg.enable_endpoint = 1;
-        cfg.rule1_min_trailing_silence = 1.2f;
-        cfg.rule2_min_trailing_silence = 0.8f;
-        cfg.rule3_min_utterance_length = 10.0f;
-
         CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
-        const SherpaOnnxOnlineRecognizer *rec = SherpaOnnxCreateOnlineRecognizer(&cfg);
-        if (!rec) {
-            Log(@"create recognizer failed");
-            return 3;
+        const SherpaOnnxOnlineRecognizer *remoteRec =
+            CCCreateRecognizer(modelDir, NO, @"R");
+        if (!remoteRec) return 2;
+
+        const SherpaOnnxOnlineRecognizer *localRec = NULL;
+        if (live) {
+            localRec = CCCreateRecognizer(localModelDir, YES, @"L");
+            if (!localRec) {
+                Log(@"local model unavailable, fallback to remote recognizer");
+                localRec = remoteRec;
+            }
         }
-        NSString *decodeName = cfg.decoding_method
-            ? [NSString stringWithUTF8String:cfg.decoding_method] : @"?";
-        Log(@"model loaded in %.2fs (hotwords=%d decode=%@)",
-            CFAbsoluteTimeGetCurrent() - t0, hotwordsOK, decodeName);
 
         if (live) {
-            int rc = RunLive(rec, localOn, remoteOn, localWav, remoteWav,
-                             waitArm, resident, t0);
-            SherpaOnnxDestroyOnlineRecognizer(rec);
+            int rc = RunLive(remoteRec, localRec, localOn, remoteOn,
+                             localWav, remoteWav, waitArm, resident, t0);
+            if (localRec && localRec != remoteRec)
+                SherpaOnnxDestroyOnlineRecognizer(localRec);
+            SherpaOnnxDestroyOnlineRecognizer(remoteRec);
             Log(@"exit rc=%d", rc);
             return rc;
         }
 
+        const SherpaOnnxOnlineRecognizer *rec = remoteRec;
         const SherpaOnnxOnlineStream *stream = SherpaOnnxCreateOnlineStream(rec);
         if (!stream) {
             Log(@"create stream failed");

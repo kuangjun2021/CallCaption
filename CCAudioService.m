@@ -1682,6 +1682,9 @@ static NSString *CCASRHelperPath(void) {
 static NSString *CCASRModelDir(void) {
     return [CC_DIR stringByAppendingPathComponent:@"models/x-asr-480ms"];
 }
+static NSString *CCASRLocalModelDir(void) {
+    return [CC_DIR stringByAppendingPathComponent:@"models/zh-14m"];
+}
 static void CCStopASRHelper(void) {
     if (g_asrPid > 0) {
         kill(g_asrPid, SIGTERM);
@@ -1782,6 +1785,7 @@ static void CCStartASRHelper(void) {
     argv[n++] = "--local-wav"; argv[n++] = localWav.UTF8String;
     argv[n++] = "--remote-wav"; argv[n++] = remoteWav.UTF8String;
     argv[n++] = "--model-dir"; argv[n++] = CCASRModelDir().UTF8String;
+    argv[n++] = "--local-model-dir"; argv[n++] = CCASRLocalModelDir().UTF8String;
     argv[n++] = "--hotwords"; argv[n++] = hotwords.UTF8String;
     argv[n++] = "--tts-mute"; argv[n++] = ttsMute ? "1" : "0";
     if (waitArm) argv[n++] = "--wait-arm";
@@ -1913,7 +1917,7 @@ static void CheckArm(void) {
         static CFAbsoluteTime lastHb;
         if (now - lastHb > 15.0) {
             lastHb = now;
-            NSString *hb = [NSString stringWithFormat:@"%.0f pro2.1.22\n",
+            NSString *hb = [NSString stringWithFormat:@"%.0f pro2.1.23\n",
                             [[NSDate date] timeIntervalSince1970]];
             NSString *hp = [CC_DIR stringByAppendingPathComponent:@"daemon.heartbeat"];
             [hb writeToFile:hp atomically:YES encoding:NSUTF8StringEncoding error:nil];
@@ -2393,7 +2397,7 @@ int main(int argc, char *argv[]) {
         }
         CCPrefsReload();
 #ifdef CC_PRO
-        CCLogLine(@"audioservice started (pro2.1.22)");
+        CCLogLine(@"audioservice started (pro2.1.23)");
         struct stat selfSt;
         if (stat("/var/jb/usr/local/bin/CallCaptionProAudioService", &selfSt) == 0)
             g_daemonBinMtime = selfSt.st_mtime;

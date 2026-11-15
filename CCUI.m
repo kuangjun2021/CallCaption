@@ -1294,13 +1294,42 @@ static NSArray<NSString *> *CCIncProtectedPhrases(void) {
     static NSArray *a;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        a = @[@"chinese subtitles", @"chinese subtitle",
+        a = @[@"chinese subtitles complete", @"chinese subtitles",
+              @"chinese subtitle", @"subtitles complete",
               @"beef noodles", @"hot tea", @"fifteen dollars",
-              @"thirty minutes", @"two hours", @"going shopping",
+              @"thirty minutes", @"two hours",
+              @"going shopping with my sister", @"going shopping",
               @"short passage", @"another city", @"train station",
-              @"a little late", @"for the meeting"];
+              @"a little late", @"for the meeting",
+              @"bought some fruit and tea"];
     });
     return a;
+}
+
+static NSUInteger CCIncTrimFunctionTail(NSString *text, NSUInteger start,
+                                        NSUInteger b) {
+    NSCharacterSet *ws = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+    NSCharacterSet *punct = [NSCharacterSet punctuationCharacterSet];
+
+    // 句号/问号/感叹号结尾是完整句，不要因为最后一个词是功能词就回退。
+    NSUInteger q = b;
+    while (q > start && [ws characterIsMember:[text characterAtIndex:q - 1]]) q--;
+    if (q > start) {
+        unichar c = [text characterAtIndex:q - 1];
+        if (c == '.' || c == '?' || c == '!') return b;
+    }
+
+    while (b > start) {
+        NSUInteger e = b;
+        while (e > start && [ws characterIsMember:[text characterAtIndex:e - 1]]) e--;
+        NSUInteger w = e;
+        while (w > start && ![ws characterIsMember:[text characterAtIndex:w - 1]]) w--;
+        NSString *last = [[text substringWithRange:NSMakeRange(w, e - w)]
+                          stringByTrimmingCharactersInSet:punct];
+        if (!last.length || !CCIncIsFunctionWord(last)) break;
+        b = w;
+    }
+    return b;
 }
 
 static NSUInteger CCIncAdjustPhrase(NSString *text, NSUInteger start, NSUInteger b) {
@@ -1385,8 +1414,14 @@ static NSUInteger CCIncNextBoundary(NSString *text, NSUInteger start, BOOL stabl
         if (cut > start + 4) return CCIncSecureBoundary(text, start, cut, YES);
     }
 
-    // partial 已稳定 0.8s：整段剩余部分可播。
-    if (stable && len - start >= 4) return len;
+    // partial 已稳定 0.8s：整段剩余部分可播；
+    // 但末尾是功能词时回退，避免 "with my""that the" 这种半截。
+    if (stable && len - start >= 4) {
+        NSUInteger b = CCIncSecureBoundary(text, start, len, NO);
+        b = CCIncTrimFunctionTail(text, start, b);
+        if (b > start + 4) return b;
+        return len;
+    }
     return start;
 }
 

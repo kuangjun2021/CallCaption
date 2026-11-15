@@ -2,9 +2,9 @@
 
 - 日期：2026-11-15
 - 包：`net.user.callcaptionpro_1.0.0-pro2.1.24_arm64e.deb`
-- 大小：6,521,600 字节
-- SHA-256：`ddca333d29265760fbdd33a6a46cc00e0930e9f24ed51cf48852662fc1c42036`
-- 构建：GitHub Actions run `43670219679`，commit `b17e05a`
+- 大小：6,521,728 字节
+- SHA-256：`d530b6be0798dc46150e201abf855ce596bf7e39c51cce1df81ec52578859e28`
+- 构建：GitHub Actions run `43670813435`，commit `9a030ba`
 - 模型包：不需要更新，继续用 `models_1.0.1`
 - 设计稿：`docs/pro2.1.24-incremental-tts-design.md`
 
@@ -63,7 +63,7 @@ x-asr final RQ|
 
 - 优先从句标点 `, . ? ! ;`；
 - partial 稳定 0.8 秒后，整段剩余部分可播；
-- 超长兜底 80 字符，在空格处切，不切断单词；
+- 超长兜底 50 字符，在空格处切，不切断单词；
 - 不改变翻译内容，不做简版。
 
 ### 4.2 不丢句

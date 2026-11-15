@@ -2,9 +2,9 @@
 
 - 日期：2026-11-15
 - 包：`net.user.callcaptionpro_1.0.0-pro2.1.26_arm64e.deb`
-- 大小：6,523,428 字节
-- SHA-256：`00a2c09fc76ca5ea32ed029efb10a4b747eec12d81ef9fde2c72a8640bc65f79`
-- 构建：GitHub Actions run `43718389927`，commit `38657af`
+- 大小：6,523,648 字节
+- SHA-256：`771de406678952d45f0e3ba1da6ded752a7b0ec23fd148c95320a7f646e580df`
+- 构建：GitHub Actions run `43719574971`，commit `31e1ea7`
 - 模型包：不变，继续 `models_1.0.1`
 
 ## 1. 2.1.25 的问题

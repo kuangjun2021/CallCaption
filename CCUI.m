@@ -90,6 +90,22 @@ static NSUInteger g_remotePartialGen;
 static CFAbsoluteTime g_remotePartialAt;
 static NSString *g_remotePartialLast;
 
+// Pro2.1.24：LCT 式增量播报。
+// 按 stable partial/从句翻译，只把新增后缀送 TTS；final 只补尾段。
+// 全部状态只在 SpringBoard 主线程访问。
+static NSMutableArray<NSString *> *g_incClauseQ;
+static BOOL g_incTranslating;
+static NSString *g_incSentenceSource;
+static NSUInteger g_incCommittedLen;
+static CFAbsoluteTime g_incLastChange;
+static NSString *g_incSpokenText;
+static NSUInteger g_incGen;
+static NSUInteger g_incCallSeq;
+static void CCIncReset(void);
+static void CCIncStartNext(void);
+static void CCUIRemoteIncrementalFinalText(NSString *text);
+static void CCZhTTSEnqueue(NSString *text);
+
 static NSString *g_texts[4];            // 0 对方原文 / 1 对方译文 / 2 我方原文 / 3 我方译文
 static NSString *g_engines[2];          // 0 对方引擎 / 1 我方引擎
 static CFAbsoluteTime g_textAt[4];
@@ -1054,6 +1070,7 @@ static void CCUIHandleCallActive(BOOL active) {
         g_remotePartialGen++;
         g_remotePartialLast = nil;
         g_remotePartialAt = 0;
+        CCIncReset();
         g_graceActive = NO;
         [g_graceTimer invalidate];
         g_graceTimer = nil;
@@ -1080,6 +1097,7 @@ static void CCUIHandleCallActive(BOOL active) {
         CCLogf(@"call seq=%lu armed=1", (unsigned long)g_callSeq);
     } else {
         CCSetPrepared(NO);
+        CCIncReset();
         if (g_sessionActive) {
             g_sessionActive = NO;
             CCSetArmed(NO);
@@ -1206,6 +1224,209 @@ static BOOL CCRemoteTextIsMostlyChinese(NSString *text) {
     return cjk > 0 && cjk >= latin;
 }
 
+// Pro2.1.24：LCT 式增量播报。
+// partial 稳定/遇到标点后切成短段，全量翻译，立即送 TTS；final 只补未播尾段。
+// 不做简版、不改语速、不丢句；AI 仍只作为 CCTranslateWithEngine 的兜底。
+
+static NSString *CCIncTrim(NSString *s) {
+    return [s stringByTrimmingCharactersInSet:
+            [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+static BOOL CCIncrementalTTSEnabled(void) {
+    if (!CCPrefBool(CC_K_INCREMENTAL_TTS, NO)) return NO;
+    // 当前增量链路只接 CPU ASR（I|/RQ|）；腾讯路径走 R|，避免双播。
+    NSString *backend = [CCPrefStr(CC_K_REMOTE_ASR, @"cpu") lowercaseString];
+    return [backend isEqualToString:@"cpu"];
+}
+
+static void CCIncResetSentence(void) {
+    g_incSentenceSource = nil;
+    g_incCommittedLen = 0;
+    g_incLastChange = 0;
+}
+
+static void CCIncReset(void) {
+    g_incGen++;
+    g_incCallSeq = g_callSeq;
+    g_incClauseQ = [NSMutableArray array];
+    g_incTranslating = NO;
+    g_incSentenceSource = nil;
+    g_incCommittedLen = 0;
+    g_incLastChange = 0;
+    g_incSpokenText = nil;
+    CCLogf(@"inc tts reset seq=%lu", (unsigned long)g_callSeq);
+}
+
+static NSUInteger CCIncNextBoundary(NSString *text, NSUInteger start, BOOL stable) {
+    NSUInteger len = text.length;
+    if (start >= len) return start;
+
+    static NSCharacterSet *punct;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        punct = [NSCharacterSet characterSetWithCharactersInString:
+                 @",.?!;。，？；："];
+    });
+
+    // 优先从句标点；至少 4 个字符，避免把 "Hi." 之外的碎片切得太碎。
+    NSUInteger minEnd = MIN(len, start + 4);
+    for (NSUInteger i = minEnd; i < len; i++) {
+        if ([punct characterIsMember:[text characterAtIndex:i]])
+            return i + 1;
+    }
+
+    // 超长兜底：在最后一个空格处切，绝不切断单词。
+    // 80 字符约 12–15 个英文词，中文 TTS 约 3–4 秒，符合短段目标。
+    NSUInteger maxLen = 80;
+    if (len - start >= maxLen) {
+        NSUInteger cut = start + maxLen;
+        NSCharacterSet *ws = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+        while (cut > start && ![ws characterIsMember:[text characterAtIndex:cut]])
+            cut--;
+        if (cut > start + 4) return cut;
+    }
+
+    // partial 已稳定 0.8s：整段剩余部分可播。
+    if (stable && len - start >= 4) return len;
+    return start;
+}
+
+static void CCIncEnqueueClause(NSString *source) {
+    NSString *s = CCIncTrim(source);
+    if (s.length < 2) return;
+    if (!g_incClauseQ) g_incClauseQ = [NSMutableArray array];
+    [g_incClauseQ addObject:s];
+    CCLogf(@"inc tts clause pending=%lu: %@",
+           (unsigned long)g_incClauseQ.count, s);
+    if (!g_incTranslating) CCIncStartNext();
+}
+
+static void CCIncStartNext(void) {
+    if (!g_callActive) {
+        g_incClauseQ = nil;
+        g_incTranslating = NO;
+        return;
+    }
+    if (!g_incClauseQ.count) {
+        g_incTranslating = NO;
+        return;
+    }
+
+    NSString *source = g_incClauseQ[0];
+    [g_incClauseQ removeObjectAtIndex:0];
+    g_incTranslating = YES;
+    NSUInteger gen = g_incGen;
+    NSUInteger seq = g_incCallSeq;
+    NSString *eng = CCPrefStr(CC_K_REMOTE_TRANSLATE_ENGINE, @"google");
+
+    CCLogf(@"inc tts translate: %@", source);
+    CCTranslateWithEngine(source, @"en", @"zh", eng,
+                          ^(NSString *out, NSString *used) {
+        if (gen != g_incGen || seq != g_callSeq) return;
+        if (!g_callActive) {
+            g_incTranslating = NO;
+            return;
+        }
+        NSString *t = CCIncTrim(out);
+        if (t.length) {
+            if (!g_incSpokenText) g_incSpokenText = t;
+            else g_incSpokenText = [g_incSpokenText stringByAppendingString:t];
+            CCLogf(@"inc tts commit[%@]: %@", used ?: @"?", t);
+            if (CCPrefBool(CC_K_TTS_ENABLED, YES)) CCZhTTSEnqueue(t);
+        } else {
+            CCLogf(@"inc tts translate failed: %@", source);
+        }
+        g_incTranslating = NO;
+        CCIncStartNext();
+    });
+}
+
+// 每个 I| partial 调用一次；只构建从句，不直接改字幕。
+void CCUIRemoteIncrementalPartial(NSString *text) {
+    if (!CCIncrementalTTSEnabled()) return;
+    if (!CCPrefBool(CC_K_TTS_ENABLED, YES)) return;
+    if (!CCPrefBool(CC_K_REMOTE_ENABLED, YES)) return;
+    if (!g_callActive) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CCUIRemoteIncrementalPartial(text);
+        });
+        return;
+    }
+
+    NSString *trim = CCIncTrim(text);
+    if (trim.length < 4) return;
+    if (CCRemoteTextIsMostlyChinese(trim)) {
+        CCIncResetSentence();
+        return;
+    }
+
+    NSUInteger seq = g_callSeq;
+    if (seq != g_incCallSeq) CCIncReset();
+    if (g_incCommittedLen > trim.length) CCIncResetSentence();
+
+    BOOL changed = ![trim isEqualToString:g_incSentenceSource];
+    if (changed) {
+        g_incSentenceSource = trim;
+        g_incLastChange = CFAbsoluteTimeGetCurrent();
+    }
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    BOOL stable = (g_incLastChange > 0 && now - g_incLastChange >= 0.8);
+
+    NSUInteger boundary = CCIncNextBoundary(trim, g_incCommittedLen, stable);
+    if (boundary > g_incCommittedLen && boundary <= trim.length) {
+        NSString *clause = [trim substringWithRange:
+                            NSMakeRange(g_incCommittedLen,
+                                        boundary - g_incCommittedLen)];
+        g_incCommittedLen = boundary;
+        CCIncEnqueueClause(clause);
+    }
+}
+
+// final 到达：只补当前句未提交的尾段，然后重置句内状态；
+// 已排队/在途的从句不丢，继续按顺序翻译和播报。
+static void CCUIRemoteIncrementalFinalText(NSString *text) {
+    if (!CCIncrementalTTSEnabled()) return;
+    if (!CCPrefBool(CC_K_TTS_ENABLED, YES)) {
+        CCIncResetSentence();
+        return;
+    }
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CCUIRemoteIncrementalFinalText(text);
+        });
+        return;
+    }
+    if (!g_callActive) {
+        CCIncResetSentence();
+        return;
+    }
+
+    NSString *trim = CCIncTrim(text);
+    if (!trim.length || CCRemoteTextIsMostlyChinese(trim)) {
+        CCIncResetSentence();
+        return;
+    }
+
+    NSString *low = [[trim lowercaseString]
+        stringByTrimmingCharactersInSet:[NSCharacterSet punctuationCharacterSet]];
+    NSSet *fillers = [NSSet setWithObjects:
+                      @"hmm", @"um", @"uh", @"er", @"ah", @"oh", @"huh", @"mm", nil];
+    if (low.length <= 2 || [fillers containsObject:low]) {
+        CCIncResetSentence();
+        return;
+    }
+
+    NSUInteger start = MIN(g_incCommittedLen, trim.length);
+    if (start < trim.length) {
+        NSString *tail = [trim substringFromIndex:start];
+        CCLogf(@"inc tts final tail: %@", tail);
+        CCIncEnqueueClause(tail);
+    }
+    CCIncResetSentence();
+}
+
 // Pro2.1.22：远端 ASR partial -> 翻译引擎 -> 临时中文字幕。
 // 只更新字幕，不触发 TTS；final 到达后 gen++，晚到的 partial 不会覆盖 final。
 void CCUIRemotePartialText(NSString *text) {
@@ -1254,6 +1475,12 @@ void CCUIRemoteFinalText(NSString *text) {
     g_remotePartialGen++;
     g_remotePartialLast = nil;
     g_remotePartialAt = 0;
+
+    // Pro2.1.24：增量模式下，final 只补本句未提交的尾段；
+    // 完整 final 翻译仍用于字幕，但不再触发整句 TTS。
+    BOOL incremental = CCIncrementalTTSEnabled();
+    if (incremental) CCUIRemoteIncrementalFinalText(text);
+
     if (CCRemoteTextIsMostlyChinese(text)) {
         // 对方本来就说中文：直接显示，不翻译、不做中文 TTS（避免回声）
         CCUIDeliverRemoteTranslated(text);
@@ -1272,6 +1499,7 @@ void CCUIRemoteFinalText(NSString *text) {
         CCUIDeliverRemoteTranslated(out);
         if (used.length) CCUIDeliverRemoteEngine(used);
         if (!live) return;   // 挂断后绝不 TTS
+        if (incremental) return;  // 2.1.24：整句 TTS 由增量链路负责
         if (!CCPrefBool(CC_K_TTS_ENABLED, YES)) return;
         NSString *low = [[text lowercaseString]
             stringByTrimmingCharactersInSet:[NSCharacterSet punctuationCharacterSet]];
@@ -1693,28 +1921,33 @@ static void CCZhTTSEnqueue(NSString *text) {
     [g_zhTTSQ addObject:text];
     double total = CCZhTTSTotal();
 
-    // 双闸：最多 3 条，或待播总时长 3 秒。先合并最老两条；仍超才丢最老。
-    // v0.19.2：从 6 秒收紧到 3 秒，宁可少播一句也不让中文播报越拖越晚。
-    while ((g_zhTTSQ.count > 3 || total > 3.0) && g_zhTTSQ.count >= 2) {
-        NSString *a = g_zhTTSQ[0];
-        NSString *b = g_zhTTSQ[1];
-        NSString *m = [NSString stringWithFormat:@"%@。%@", a, b];
-        [g_zhTTSQ removeObjectsInRange:NSMakeRange(0, 2)];
-        [g_zhTTSQ insertObject:m atIndex:0];
-        total = CCZhTTSTotal();
-        CCLogf(@"tts zh merge %lu+%lu -> %lu chars, pending=%lu",
-               (unsigned long)a.length, (unsigned long)b.length,
-               (unsigned long)m.length, (unsigned long)g_zhTTSQ.count);
+    // Pro2.1.24：增量播报模式不丢句、不合并；FIFO 按顺序播。
+    // 关闭增量时保持 2.1.23 的双闸行为。
+    BOOL inc = CCIncrementalTTSEnabled();
+    if (!inc) {
+        // 双闸：最多 3 条，或待播总时长 3 秒。先合并最老两条；仍超才丢最老。
+        // v0.19.2：从 6 秒收紧到 3 秒，宁可少播一句也不让中文播报越拖越晚。
+        while ((g_zhTTSQ.count > 3 || total > 3.0) && g_zhTTSQ.count >= 2) {
+            NSString *a = g_zhTTSQ[0];
+            NSString *b = g_zhTTSQ[1];
+            NSString *m = [NSString stringWithFormat:@"%@。%@", a, b];
+            [g_zhTTSQ removeObjectsInRange:NSMakeRange(0, 2)];
+            [g_zhTTSQ insertObject:m atIndex:0];
+            total = CCZhTTSTotal();
+            CCLogf(@"tts zh merge %lu+%lu -> %lu chars, pending=%lu",
+                   (unsigned long)a.length, (unsigned long)b.length,
+                   (unsigned long)m.length, (unsigned long)g_zhTTSQ.count);
+        }
+        while (g_zhTTSQ.count > 3 || (total > 6.0 && g_zhTTSQ.count > 1)) {
+            NSString *d = g_zhTTSQ[0];
+            [g_zhTTSQ removeObjectAtIndex:0];
+            total = CCZhTTSTotal();
+            CCLogf(@"tts zh drop %lu chars, pending=%lu",
+                   (unsigned long)d.length, (unsigned long)g_zhTTSQ.count);
+        }
     }
-    while (g_zhTTSQ.count > 3 || (total > 6.0 && g_zhTTSQ.count > 1)) {
-        NSString *d = g_zhTTSQ[0];
-        [g_zhTTSQ removeObjectAtIndex:0];
-        total = CCZhTTSTotal();
-        CCLogf(@"tts zh drop %lu chars, pending=%lu",
-               (unsigned long)d.length, (unsigned long)g_zhTTSQ.count);
-    }
-    CCLogf(@"tts zh enqueue %lu chars, pending=%lu, est=%.1fs",
-           (unsigned long)text.length, (unsigned long)g_zhTTSQ.count, total);
+    CCLogf(@"tts zh enqueue %lu chars, pending=%lu, est=%.1fs inc=%d",
+           (unsigned long)text.length, (unsigned long)g_zhTTSQ.count, total, inc ? 1 : 0);
 
     if (!g_zhTTSBusy) {
         g_zhTTSBusy = YES;

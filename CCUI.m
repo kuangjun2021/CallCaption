@@ -1276,80 +1276,48 @@ static void CCIncSpeakChineseTranslation(NSString *full, BOOL final) {
     }
 
     NSString *spoken = g_incSpokenText ?: @"";
-    NSUInteger offset = 0;
-    if ([text hasPrefix:spoken]) {
-        offset = spoken.length;
-    } else if (final) {
-        // final 译文可能改写：按已播长度跳过，避免整句重播；剩余全部补播。
-        offset = MIN(spoken.length, text.length);
-    } else {
-        // partial 译文改写：这一拍不播，等下一拍稳定或 final 补齐。
-        g_incPrevChinese = text;
-        CCLogf(@"inc tts hold rewrite: %@", text);
-        return;
-    }
-    if (offset >= text.length) {
-        g_incPrevChinese = text;
-        if (final) CCIncResetSpoken();
-        return;
-    }
-
     NSString *prev = g_incPrevChinese;
-    NSString *newText = [text substringFromIndex:offset];
     NSMutableString *committed = [NSMutableString string];
     NSMutableString *cur = [NSMutableString string];
+    BOOL stopped = NO;
 
-    for (NSUInteger i = 0; i < newText.length; i++) {
-        unichar c = [newText characterAtIndex:i];
+    // 按块顺序播：已经播过的块跳过；遇到第一个还不稳定的未播块就停，
+    // 不越序播后面的块。final 时全部块都允许播。
+    for (NSUInteger i = 0; i < text.length; i++) {
+        unichar c = [text characterAtIndex:i];
         [cur appendFormat:@"%C", c];
-        if (CCIncIsChinesePunct(c)) {
-            NSString *chunk = CCIncTrim(cur);
-            if (chunk.length >= 2) {
-                BOOL stable = final ||
-                    (prev.length > 0 &&
-                     [prev rangeOfString:chunk].location != NSNotFound);
-                if (stable) {
-                    CCZhTTSEnqueue(chunk);
-                    [committed appendString:chunk];
-                    CCLogf(@"inc tts zh chunk: %@", chunk);
-                } else {
-                    CCLogf(@"inc tts hold unstable: %@", chunk);
-                }
-            }
-            [cur setString:@""];
+        if (!CCIncIsChinesePunct(c)) continue;
+
+        NSString *chunk = CCIncTrim(cur);
+        [cur setString:@""];
+        if (chunk.length < 2) continue;
+        if ([spoken rangeOfString:chunk].location != NSNotFound) continue;
+
+        BOOL stable = final ||
+            (prev.length > 0 &&
+             [prev rangeOfString:chunk].location != NSNotFound);
+        if (!stable) {
+            CCLogf(@"inc tts hold unstable: %@", chunk);
+            stopped = YES;
+            break;
         }
+        CCZhTTSEnqueue(chunk);
+        [committed appendString:chunk];
+        spoken = [spoken stringByAppendingString:chunk];
+        CCLogf(@"inc tts zh chunk: %@", chunk);
     }
 
-    NSString *tail = CCIncTrim(cur);
-    if (final) {
-        if (tail.length) {
-            CCZhTTSEnqueue(tail);
-            [committed appendString:tail];
-            CCLogf(@"inc tts final tail: %@", tail);
-        }
-    } else if (tail.length >= 24) {
-        // 译文长期没有标点：按 24 字切，保证不会一直不播；final 仍以全文为准。
-        for (NSUInteger p = 0; p < tail.length; p += 24) {
-            NSUInteger n = MIN((NSUInteger)24, tail.length - p);
-            NSString *chunk = [tail substringWithRange:NSMakeRange(p, n)];
-            if (chunk.length >= 2) {
-                BOOL stable = prev.length > 0 &&
-                    [prev rangeOfString:chunk].location != NSNotFound;
-                if (stable) {
-                    CCZhTTSEnqueue(chunk);
-                    [committed appendString:chunk];
-                    CCLogf(@"inc tts long tail chunk: %@", chunk);
-                } else {
-                    CCLogf(@"inc tts hold long unstable: %@", chunk);
-                }
-            }
-        }
+    NSString *tail = stopped ? @"" : CCIncTrim(cur);
+    if (final && tail.length) {
+        // final 不再要求稳定，剩余尾巴必须播完。
+        CCZhTTSEnqueue(tail);
+        [committed appendString:tail];
+        spoken = [spoken stringByAppendingString:tail];
+        CCLogf(@"inc tts final tail: %@", tail);
     }
 
     g_incPrevChinese = text;
-    if (committed.length) {
-        g_incSpokenText = [spoken stringByAppendingString:committed];
-    }
+    if (committed.length) g_incSpokenText = spoken;
     if (final) CCIncResetSpoken();
 }
 

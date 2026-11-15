@@ -101,8 +101,11 @@ static CFAbsoluteTime g_incLastChange;
 static NSString *g_incSpokenText;
 static NSUInteger g_incGen;
 static NSUInteger g_incCallSeq;
+static NSString *g_incPendingSource;
+static NSUInteger g_incPendingToken;
 static void CCIncReset(void);
 static void CCIncStartNext(void);
+static void CCIncFlushPending(void);
 static void CCUIRemoteIncrementalFinalText(NSString *text);
 static void CCZhTTSEnqueue(NSString *text);
 
@@ -1255,7 +1258,100 @@ static void CCIncReset(void) {
     g_incCommittedLen = 0;
     g_incLastChange = 0;
     g_incSpokenText = nil;
+    g_incPendingSource = nil;
+    g_incPendingToken++;
     CCLogf(@"inc tts reset seq=%lu", (unsigned long)g_callSeq);
+}
+
+static NSUInteger CCIncWordCount(NSString *s) {
+    NSArray *a = [s componentsSeparatedByCharactersInSet:
+                  [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSUInteger n = 0;
+    for (NSString *w in a) if (w.length) n++;
+    return n;
+}
+
+static BOOL CCIncIsFunctionWord(NSString *w) {
+    static NSSet *set;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        set = [NSSet setWithObjects:
+               @"a", @"an", @"the", @"and", @"or", @"but", @"so",
+               @"to", @"of", @"in", @"on", @"at", @"for", @"with",
+               @"that", @"which", @"who", @"whom", @"whose", @"when",
+               @"where", @"while", @"if", @"because", @"as", @"than",
+               @"then", @"will", @"would", @"can", @"could", @"should",
+               @"be", @"is", @"are", @"was", @"were", @"been", @"being",
+               @"have", @"has", @"had", @"do", @"does", @"did",
+               @"not", @"no", @"my", @"your", @"his", @"her", @"its",
+               @"our", @"their", @"this", @"these", @"those",
+               @"it", @"we", @"you", @"they", @"he", @"she", @"i", nil];
+    });
+    return [set containsObject:[w lowercaseString]];
+}
+
+static NSArray<NSString *> *CCIncProtectedPhrases(void) {
+    static NSArray *a;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        a = @[@"chinese subtitles", @"chinese subtitle",
+              @"beef noodles", @"hot tea", @"fifteen dollars",
+              @"thirty minutes", @"two hours", @"going shopping",
+              @"short passage", @"another city", @"train station",
+              @"a little late", @"for the meeting"];
+    });
+    return a;
+}
+
+static NSUInteger CCIncAdjustPhrase(NSString *text, NSUInteger start, NSUInteger b) {
+    if (b <= start || b >= text.length) return b;
+    NSString *lower = [text lowercaseString];
+    for (NSString *p in CCIncProtectedPhrases()) {
+        NSRange search = NSMakeRange(0, lower.length);
+        while (search.length > 0) {
+            NSRange r = [lower rangeOfString:p options:0 range:search];
+            if (r.location == NSNotFound) break;
+            NSUInteger end = NSMaxRange(r);
+            if (b > r.location && b < end) return end;
+            if (end >= lower.length) break;
+            search = NSMakeRange(end, lower.length - end);
+        }
+    }
+    return b;
+}
+
+static NSUInteger CCIncAdjustFunctionWord(NSString *text, NSUInteger start,
+                                          NSUInteger b) {
+    if (b <= start || b > text.length) return b;
+    NSString *clause = [text substringWithRange:NSMakeRange(start, b - start)];
+    NSArray *words = [clause componentsSeparatedByCharactersInSet:
+                      [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSString *last = nil;
+    for (NSString *w in [words reverseObjectEnumerator]) {
+        if (w.length) { last = w; break; }
+    }
+    if (!last || !CCIncIsFunctionWord(last)) return b;
+
+    // 末尾是 the/a/that/so 等功能词：把下一个词一起带上，避免 "that the""so I"。
+    NSCharacterSet *ws = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+    NSUInteger i = b;
+    while (i < text.length && ![ws characterIsMember:[text characterAtIndex:i]]) i++;
+    while (i < text.length && [ws characterIsMember:[text characterAtIndex:i]]) i++;
+    NSUInteger j = i;
+    while (j < text.length && ![ws characterIsMember:[text characterAtIndex:j]]) j++;
+    return (j > start && j <= text.length) ? j : b;
+}
+
+static NSUInteger CCIncSecureBoundary(NSString *text, NSUInteger start, NSUInteger b) {
+    if (b <= start) return b;
+    for (int i = 0; i < 3; i++) {
+        NSUInteger nb = CCIncAdjustPhrase(text, start, b);
+        nb = CCIncAdjustFunctionWord(text, start, nb);
+        if (nb == b) break;
+        b = nb;
+        if (b >= text.length) break;
+    }
+    return MIN(b, text.length);
 }
 
 static NSUInteger CCIncNextBoundary(NSString *text, NSUInteger start, BOOL stable) {
@@ -1273,18 +1369,18 @@ static NSUInteger CCIncNextBoundary(NSString *text, NSUInteger start, BOOL stabl
     NSUInteger minEnd = MIN(len, start + 4);
     for (NSUInteger i = minEnd; i < len; i++) {
         if ([punct characterIsMember:[text characterAtIndex:i]])
-            return i + 1;
+            return CCIncSecureBoundary(text, start, i + 1);
     }
 
     // 超长兜底：在最后一个空格处切，绝不切断单词。
-    // 50 字符约 8–10 个英文词，中文 TTS 约 3–5 秒，避免又积成 10 秒长句。
-    NSUInteger maxLen = 50;
+    // 60 字符约 10–12 个英文词；短语保护和功能词回退会再修正边界。
+    NSUInteger maxLen = 60;
     if (len - start >= maxLen) {
         NSUInteger cut = MIN(start + maxLen, len - 1);
         NSCharacterSet *ws = [NSCharacterSet whitespaceAndNewlineCharacterSet];
         while (cut > start && ![ws characterIsMember:[text characterAtIndex:cut]])
             cut--;
-        if (cut > start + 4) return cut;
+        if (cut > start + 4) return CCIncSecureBoundary(text, start, cut);
     }
 
     // partial 已稳定 0.8s：整段剩余部分可播。
@@ -1300,6 +1396,44 @@ static void CCIncEnqueueClause(NSString *source) {
     CCLogf(@"inc tts clause pending=%lu: %@",
            (unsigned long)g_incClauseQ.count, s);
     if (!g_incTranslating) CCIncStartNext();
+}
+
+static void CCIncFlushPending(void) {
+    if (!g_incPendingSource.length) return;
+    NSString *s = g_incPendingSource;
+    g_incPendingSource = nil;
+    g_incPendingToken++;
+    if (!g_callActive) return;
+    CCLogf(@"inc tts pending flush: %@", s);
+    CCIncEnqueueClause(s);
+}
+
+static void CCIncSchedulePendingFlush(void) {
+    NSUInteger token = ++g_incPendingToken;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (token != g_incPendingToken) return;
+        CCIncFlushPending();
+    });
+}
+
+static void CCIncOfferClause(NSString *clause, BOOL final) {
+    NSString *s = CCIncTrim(clause);
+    if (!s.length) return;
+
+    // 短碎片先压 0.6 秒，等下一段/final 合并；避免 "tea."、"that the" 单独播。
+    if (g_incPendingSource.length) {
+        s = [g_incPendingSource stringByAppendingFormat:@" %@", s];
+        g_incPendingSource = nil;
+        g_incPendingToken++;
+    }
+    BOOL shortClause = (CCIncWordCount(s) < 3 || s.length < 12);
+    if (!final && shortClause) {
+        g_incPendingSource = s;
+        CCIncSchedulePendingFlush();
+        return;
+    }
+    CCIncEnqueueClause(s);
 }
 
 static void CCIncStartNext(void) {
@@ -1380,7 +1514,7 @@ void CCUIRemoteIncrementalPartial(NSString *text) {
                             NSMakeRange(g_incCommittedLen,
                                         boundary - g_incCommittedLen)];
         g_incCommittedLen = boundary;
-        CCIncEnqueueClause(clause);
+        CCIncOfferClause(clause, NO);
     }
 }
 
@@ -1389,6 +1523,8 @@ void CCUIRemoteIncrementalPartial(NSString *text) {
 static void CCUIRemoteIncrementalFinalText(NSString *text) {
     if (!CCIncrementalTTSEnabled()) return;
     if (!CCPrefBool(CC_K_TTS_ENABLED, YES)) {
+        g_incPendingSource = nil;
+        g_incPendingToken++;
         CCIncResetSentence();
         return;
     }
@@ -1399,12 +1535,15 @@ static void CCUIRemoteIncrementalFinalText(NSString *text) {
         return;
     }
     if (!g_callActive) {
+        g_incPendingSource = nil;
+        g_incPendingToken++;
         CCIncResetSentence();
         return;
     }
 
     NSString *trim = CCIncTrim(text);
     if (!trim.length || CCRemoteTextIsMostlyChinese(trim)) {
+        CCIncFlushPending();
         CCIncResetSentence();
         return;
     }
@@ -1414,6 +1553,7 @@ static void CCUIRemoteIncrementalFinalText(NSString *text) {
     NSSet *fillers = [NSSet setWithObjects:
                       @"hmm", @"um", @"uh", @"er", @"ah", @"oh", @"huh", @"mm", nil];
     if (low.length <= 2 || [fillers containsObject:low]) {
+        CCIncFlushPending();
         CCIncResetSentence();
         return;
     }
@@ -1422,7 +1562,10 @@ static void CCUIRemoteIncrementalFinalText(NSString *text) {
     if (start < trim.length) {
         NSString *tail = [trim substringFromIndex:start];
         CCLogf(@"inc tts final tail: %@", tail);
-        CCIncEnqueueClause(tail);
+        CCIncOfferClause(tail, YES);
+    } else {
+        // 该句没有新尾巴，但可能有被压住的短碎片，必须补播。
+        CCIncFlushPending();
     }
     CCIncResetSentence();
 }
@@ -1994,6 +2137,25 @@ static void CCTTSBuffer(NSString *text, NSString *lang, NSString *fileName) {
     CCTTSBufferNow(text, lang, fileName, nil);
 }
 
+// Pro2.1.26：裁掉每段 TTS 开头/结尾的静音，减少播放队列里的无效时长。
+// 只裁首尾，不改语速、不改文本；阈值约 -42 dBFS，保留 50ms 余量。
+static NSData *CCTrimTTS48k(NSData *data) {
+    if (data.length < 8) return data;
+    const int16_t *p = (const int16_t *)data.bytes;
+    NSUInteger n = data.length / 2;
+    const int threshold = 260;
+    NSUInteger first = 0;
+    while (first < n && abs((int)p[first]) <= threshold) first++;
+    if (first >= n) return data;           // 整段静音，保持原样
+    NSUInteger last = n;
+    while (last > first && abs((int)p[last - 1]) <= threshold) last--;
+    NSUInteger margin = 2400;               // 50ms @ 48k
+    NSUInteger s = (first > margin) ? first - margin : 0;
+    NSUInteger e = (last + margin < n) ? last + margin : n;
+    if (e <= s) return data;
+    return [data subdataWithRange:NSMakeRange(s * 2, (e - s) * 2)];
+}
+
 static void CCTTSBufferNow(NSString *text, NSString *lang, NSString *fileName,
                            void (^completion)(void)) {
     if (!text.length) {
@@ -2038,7 +2200,8 @@ static void CCTTSBufferNow(NSString *text, NSString *lang, NSString *fileName,
         if (!out.length) return;
         NSString *p = [CC_DIR stringByAppendingPathComponent:fileName];
         NSString *tmp = [p stringByAppendingString:@".tmp"];
-        CCWriteWav48kFile(tmp, out);
+        NSData *pcm = CCTrimTTS48k(out);
+        CCWriteWav48kFile(tmp, pcm);
         if (rename(tmp.fileSystemRepresentation, p.fileSystemRepresentation) != 0)
             CCLogf(@"tts rename fail %@", fileName);
     };

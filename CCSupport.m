@@ -427,9 +427,8 @@ static void SBDeliverLine(NSString *line) {
     } else if ([line hasPrefix:@"I|"]) {
         NSString *t = [line substringFromIndex:2];
         CCUIDeliverRemoteOriginal(t);
-        // Pro2.1.22：partial 只加速中文字幕；Pro2.1.24 增量播报单独走 TTS。
+        // Pro2.1.22：partial 更新中文字幕；Pro2.1.27 增量 TTS 复用这次译文。
         CCUIRemotePartialText(t);
-        CCUIRemoteIncrementalPartial(t);
     } else if ([line hasPrefix:@"RE|"]) {
         CCUIDeliverRemoteEngine([line substringFromIndex:3]);
     } else if ([line hasPrefix:@"LE|"]) {

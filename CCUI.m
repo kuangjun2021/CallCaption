@@ -90,23 +90,10 @@ static NSUInteger g_remotePartialGen;
 static CFAbsoluteTime g_remotePartialAt;
 static NSString *g_remotePartialLast;
 
-// Pro2.1.24：LCT 式增量播报。
-// 按 stable partial/从句翻译，只把新增后缀送 TTS；final 只补尾段。
-// 全部状态只在 SpringBoard 主线程访问。
-static NSMutableArray<NSString *> *g_incClauseQ;
-static BOOL g_incTranslating;
-static NSString *g_incSentenceSource;
-static NSUInteger g_incCommittedLen;
-static CFAbsoluteTime g_incLastChange;
+// Pro2.1.27：LCT 式增量播报（中文侧切块）。
+// 英文 partial 不切，整段翻译；中文按标点切 TTS，只播新增后缀；final 补尾。
 static NSString *g_incSpokenText;
-static NSUInteger g_incGen;
-static NSUInteger g_incCallSeq;
-static NSString *g_incPendingSource;
-static NSUInteger g_incPendingToken;
 static void CCIncReset(void);
-static void CCIncStartNext(void);
-static void CCIncFlushPending(void);
-static void CCUIRemoteIncrementalFinalText(NSString *text);
 static void CCZhTTSEnqueue(NSString *text);
 
 static NSString *g_texts[4];            // 0 对方原文 / 1 对方译文 / 2 我方原文 / 3 我方译文
@@ -1227,13 +1214,21 @@ static BOOL CCRemoteTextIsMostlyChinese(NSString *text) {
     return cjk > 0 && cjk >= latin;
 }
 
-// Pro2.1.24：LCT 式增量播报。
-// partial 稳定/遇到标点后切成短段，全量翻译，立即送 TTS；final 只补未播尾段。
-// 不做简版、不改语速、不丢句；AI 仍只作为 CCTranslateWithEngine 的兜底。
+// Pro2.1.27：LCT 式增量播报（中文侧切块）。
+// 英文 partial 不按字符切；整段交给翻译，拿到完整中文后按中文标点切 TTS。
+// 只播新增后缀；final 补尾段；不做简版、不加速、不丢句。
 
 static NSString *CCIncTrim(NSString *s) {
     return [s stringByTrimmingCharactersInSet:
             [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+static BOOL CCIncIsChinesePunct(unichar c) {
+    // 只按中文标点和 ASCII 的 ? ! ; 切；不要按 . 和 , 切，
+    // 否则 "15.5"、"1,000" 会被拆坏。
+    return (c == 0xFF0C || c == 0x3002 || c == 0xFF01 || c == 0xFF1F ||
+            c == 0xFF1B || c == 0x3001 || c == 0xFF1A ||
+            c == '?' || c == '!' || c == ';');
 }
 
 static BOOL CCIncrementalTTSEnabled(void) {
@@ -1243,368 +1238,99 @@ static BOOL CCIncrementalTTSEnabled(void) {
     return [backend isEqualToString:@"cpu"];
 }
 
-static void CCIncResetSentence(void) {
-    g_incSentenceSource = nil;
-    g_incCommittedLen = 0;
-    g_incLastChange = 0;
+static void CCIncResetSpoken(void) {
+    g_incSpokenText = nil;
 }
 
 static void CCIncReset(void) {
-    g_incGen++;
-    g_incCallSeq = g_callSeq;
-    g_incClauseQ = [NSMutableArray array];
-    g_incTranslating = NO;
-    g_incSentenceSource = nil;
-    g_incCommittedLen = 0;
-    g_incLastChange = 0;
-    g_incSpokenText = nil;
-    g_incPendingSource = nil;
-    g_incPendingToken++;
+    CCIncResetSpoken();
     CCLogf(@"inc tts reset seq=%lu", (unsigned long)g_callSeq);
 }
 
-static NSUInteger CCIncWordCount(NSString *s) {
-    NSArray *a = [s componentsSeparatedByCharactersInSet:
-                  [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    NSUInteger n = 0;
-    for (NSString *w in a) if (w.length) n++;
-    return n;
-}
-
-static BOOL CCIncIsFunctionWord(NSString *w) {
-    static NSSet *set;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        set = [NSSet setWithObjects:
-               @"a", @"an", @"the", @"and", @"or", @"but", @"so",
-               @"to", @"of", @"in", @"on", @"at", @"for", @"with",
-               @"that", @"which", @"who", @"whom", @"whose", @"when",
-               @"where", @"while", @"if", @"because", @"as", @"than",
-               @"then", @"will", @"would", @"can", @"could", @"should",
-               @"be", @"is", @"are", @"was", @"were", @"been", @"being",
-               @"have", @"has", @"had", @"do", @"does", @"did",
-               @"not", @"no", @"my", @"your", @"his", @"her", @"its",
-               @"our", @"their", @"this", @"these", @"those",
-               @"it", @"we", @"you", @"they", @"he", @"she", @"i", nil];
-    });
-    return [set containsObject:[w lowercaseString]];
-}
-
-static NSArray<NSString *> *CCIncProtectedPhrases(void) {
-    static NSArray *a;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        a = @[@"chinese subtitles complete", @"chinese subtitles",
-              @"chinese subtitle", @"subtitles complete",
-              @"beef noodles", @"hot tea", @"fifteen dollars",
-              @"thirty minutes", @"two hours",
-              @"going shopping with my sister", @"going shopping",
-              @"short passage", @"another city", @"train station",
-              @"a little late", @"for the meeting",
-              @"bought some fruit and tea"];
-    });
-    return a;
-}
-
-static NSUInteger CCIncTrimFunctionTail(NSString *text, NSUInteger start,
-                                        NSUInteger b) {
-    NSCharacterSet *ws = [NSCharacterSet whitespaceAndNewlineCharacterSet];
-    NSCharacterSet *punct = [NSCharacterSet punctuationCharacterSet];
-
-    // 句号/问号/感叹号结尾是完整句，不要因为最后一个词是功能词就回退。
-    NSUInteger q = b;
-    while (q > start && [ws characterIsMember:[text characterAtIndex:q - 1]]) q--;
-    if (q > start) {
-        unichar c = [text characterAtIndex:q - 1];
-        if (c == '.' || c == '?' || c == '!') return b;
-    }
-
-    while (b > start) {
-        NSUInteger e = b;
-        while (e > start && [ws characterIsMember:[text characterAtIndex:e - 1]]) e--;
-        NSUInteger w = e;
-        while (w > start && ![ws characterIsMember:[text characterAtIndex:w - 1]]) w--;
-        NSString *last = [[text substringWithRange:NSMakeRange(w, e - w)]
-                          stringByTrimmingCharactersInSet:punct];
-        if (!last.length || !CCIncIsFunctionWord(last)) break;
-        b = w;
-    }
-    return b;
-}
-
-static NSUInteger CCIncAdjustPhrase(NSString *text, NSUInteger start, NSUInteger b) {
-    if (b <= start || b >= text.length) return b;
-    NSString *lower = [text lowercaseString];
-    for (NSString *p in CCIncProtectedPhrases()) {
-        NSRange search = NSMakeRange(0, lower.length);
-        while (search.length > 0) {
-            NSRange r = [lower rangeOfString:p options:0 range:search];
-            if (r.location == NSNotFound) break;
-            NSUInteger end = NSMaxRange(r);
-            if (b > r.location && b < end) return end;
-            if (end >= lower.length) break;
-            search = NSMakeRange(end, lower.length - end);
-        }
-    }
-    return b;
-}
-
-static NSUInteger CCIncAdjustFunctionWord(NSString *text, NSUInteger start,
-                                          NSUInteger b) {
-    if (b <= start || b > text.length) return b;
-    NSString *clause = [text substringWithRange:NSMakeRange(start, b - start)];
-    NSArray *words = [clause componentsSeparatedByCharactersInSet:
-                      [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    NSString *last = nil;
-    for (NSString *w in [words reverseObjectEnumerator]) {
-        if (w.length) { last = w; break; }
-    }
-    if (!last || !CCIncIsFunctionWord(last)) return b;
-
-    // 末尾是 the/a/that/so 等功能词：把下一个词一起带上，避免 "that the""so I"。
-    NSCharacterSet *ws = [NSCharacterSet whitespaceAndNewlineCharacterSet];
-    NSUInteger i = b;
-    while (i < text.length && ![ws characterIsMember:[text characterAtIndex:i]]) i++;
-    while (i < text.length && [ws characterIsMember:[text characterAtIndex:i]]) i++;
-    NSUInteger j = i;
-    while (j < text.length && ![ws characterIsMember:[text characterAtIndex:j]]) j++;
-    return (j > start && j <= text.length) ? j : b;
-}
-
-static NSUInteger CCIncSecureBoundary(NSString *text, NSUInteger start,
-                                      NSUInteger b, BOOL allowFunctionWord) {
-    if (b <= start) return b;
-    for (int i = 0; i < 3; i++) {
-        NSUInteger nb = CCIncAdjustPhrase(text, start, b);
-        if (allowFunctionWord)
-            nb = CCIncAdjustFunctionWord(text, start, nb);
-        if (nb == b) break;
-        b = nb;
-        if (b >= text.length) break;
-    }
-    return MIN(b, text.length);
-}
-
-static NSUInteger CCIncNextBoundary(NSString *text, NSUInteger start, BOOL stable) {
-    NSUInteger len = text.length;
-    if (start >= len) return start;
-
-    static NSCharacterSet *punct;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        punct = [NSCharacterSet characterSetWithCharactersInString:
-                 @",.?!;。，？；："];
-    });
-
-    // 优先从句标点；至少 4 个字符，避免把 "Hi." 之外的碎片切得太碎。
-    NSUInteger minEnd = MIN(len, start + 4);
-    for (NSUInteger i = minEnd; i < len; i++) {
-        if ([punct characterIsMember:[text characterAtIndex:i]])
-            return CCIncSecureBoundary(text, start, i + 1, NO);
-    }
-
-    // 超长兜底：在最后一个空格处切，绝不切断单词。
-    // 60 字符约 10–12 个英文词；短语保护和功能词回退会再修正边界。
-    NSUInteger maxLen = 60;
-    if (len - start >= maxLen) {
-        NSUInteger cut = MIN(start + maxLen, len - 1);
-        NSCharacterSet *ws = [NSCharacterSet whitespaceAndNewlineCharacterSet];
-        while (cut > start && ![ws characterIsMember:[text characterAtIndex:cut]])
-            cut--;
-        if (cut > start + 4) return CCIncSecureBoundary(text, start, cut, YES);
-    }
-
-    // partial 已稳定 0.8s：整段剩余部分可播；
-    // 但末尾是功能词时回退，避免 "with my""that the" 这种半截。
-    if (stable && len - start >= 4) {
-        NSUInteger b = CCIncSecureBoundary(text, start, len, NO);
-        b = CCIncTrimFunctionTail(text, start, b);
-        if (b > start + 4) return b;
-        return len;
-    }
-    return start;
-}
-
-static void CCIncEnqueueClause(NSString *source) {
-    NSString *s = CCIncTrim(source);
-    if (s.length < 2) return;
-    if (!g_incClauseQ) g_incClauseQ = [NSMutableArray array];
-    [g_incClauseQ addObject:s];
-    CCLogf(@"inc tts clause pending=%lu: %@",
-           (unsigned long)g_incClauseQ.count, s);
-    if (!g_incTranslating) CCIncStartNext();
-}
-
-static void CCIncFlushPending(void) {
-    if (!g_incPendingSource.length) return;
-    NSString *s = g_incPendingSource;
-    g_incPendingSource = nil;
-    g_incPendingToken++;
-    if (!g_callActive) return;
-    CCLogf(@"inc tts pending flush: %@", s);
-    CCIncEnqueueClause(s);
-}
-
-static void CCIncSchedulePendingFlush(void) {
-    NSUInteger token = ++g_incPendingToken;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        if (token != g_incPendingToken) return;
-        CCIncFlushPending();
-    });
-}
-
-static void CCIncOfferClause(NSString *clause, BOOL final) {
-    NSString *s = CCIncTrim(clause);
-    if (!s.length) return;
-
-    // 短碎片先压 0.6 秒，等下一段/final 合并；避免 "tea."、"that the" 单独播。
-    if (g_incPendingSource.length) {
-        s = [g_incPendingSource stringByAppendingFormat:@" %@", s];
-        g_incPendingSource = nil;
-        g_incPendingToken++;
-    }
-    BOOL shortClause = (CCIncWordCount(s) < 3 || s.length < 12);
-    if (!final && shortClause) {
-        g_incPendingSource = s;
-        CCIncSchedulePendingFlush();
-        return;
-    }
-    CCIncEnqueueClause(s);
-}
-
-static void CCIncStartNext(void) {
-    if (!g_callActive) {
-        g_incClauseQ = nil;
-        g_incTranslating = NO;
-        return;
-    }
-    if (!g_incClauseQ.count) {
-        g_incTranslating = NO;
-        return;
-    }
-
-    NSString *source = g_incClauseQ[0];
-    [g_incClauseQ removeObjectAtIndex:0];
-    g_incTranslating = YES;
-    NSUInteger gen = g_incGen;
-    NSUInteger seq = g_incCallSeq;
-    NSString *eng = CCPrefStr(CC_K_REMOTE_TRANSLATE_ENGINE, @"google");
-
-    CCLogf(@"inc tts translate: %@", source);
-    CCTranslateWithEngine(source, @"en", @"zh", eng,
-                          ^(NSString *out, NSString *used) {
-        if (gen != g_incGen || seq != g_callSeq) return;
-        if (!g_callActive) {
-            g_incTranslating = NO;
-            return;
-        }
-        NSString *t = CCIncTrim(out);
-        if (t.length) {
-            if (!g_incSpokenText) g_incSpokenText = t;
-            else g_incSpokenText = [g_incSpokenText stringByAppendingString:t];
-            CCLogf(@"inc tts commit[%@]: %@", used ?: @"?", t);
-            if (CCPrefBool(CC_K_TTS_ENABLED, YES)) CCZhTTSEnqueue(t);
-        } else {
-            CCLogf(@"inc tts translate failed: %@", source);
-        }
-        g_incTranslating = NO;
-        CCIncStartNext();
-    });
-}
-
-// 每个 I| partial 调用一次；只构建从句，不直接改字幕。
-void CCUIRemoteIncrementalPartial(NSString *text) {
-    if (!CCIncrementalTTSEnabled()) return;
-    if (!CCPrefBool(CC_K_TTS_ENABLED, YES)) return;
-    if (!CCPrefBool(CC_K_REMOTE_ENABLED, YES)) return;
-    if (!g_callActive) return;
-    if (![NSThread isMainThread]) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            CCUIRemoteIncrementalPartial(text);
-        });
-        return;
-    }
-
-    NSString *trim = CCIncTrim(text);
-    if (trim.length < 4) return;
-    if (CCRemoteTextIsMostlyChinese(trim)) {
-        CCIncResetSentence();
-        return;
-    }
-
-    NSUInteger seq = g_callSeq;
-    if (seq != g_incCallSeq) CCIncReset();
-    if (g_incCommittedLen > trim.length) CCIncResetSentence();
-
-    BOOL changed = ![trim isEqualToString:g_incSentenceSource];
-    if (changed) {
-        g_incSentenceSource = trim;
-        g_incLastChange = CFAbsoluteTimeGetCurrent();
-    }
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    BOOL stable = (g_incLastChange > 0 && now - g_incLastChange >= 0.8);
-
-    NSUInteger boundary = CCIncNextBoundary(trim, g_incCommittedLen, stable);
-    if (boundary > g_incCommittedLen && boundary <= trim.length) {
-        NSString *clause = [trim substringWithRange:
-                            NSMakeRange(g_incCommittedLen,
-                                        boundary - g_incCommittedLen)];
-        g_incCommittedLen = boundary;
-        CCIncOfferClause(clause, NO);
-    }
-}
-
-// final 到达：只补当前句未提交的尾段，然后重置句内状态；
-// 已排队/在途的从句不丢，继续按顺序翻译和播报。
-static void CCUIRemoteIncrementalFinalText(NSString *text) {
+// full: 当前 partial/final 的中文译文（整段，不切英文）。
+// final=NO：只播中文标点前的完整块，标点后的尾巴留给下一次/final。
+// final=YES：把剩余尾巴也播完，然后清空本句已播状态。
+static void CCIncSpeakChineseTranslation(NSString *full, BOOL final) {
     if (!CCIncrementalTTSEnabled()) return;
     if (!CCPrefBool(CC_K_TTS_ENABLED, YES)) {
-        g_incPendingSource = nil;
-        g_incPendingToken++;
-        CCIncResetSentence();
+        if (final) CCIncResetSpoken();
+        return;
+    }
+    if (!g_callActive) {
+        if (final) CCIncResetSpoken();
         return;
     }
     if (![NSThread isMainThread]) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            CCUIRemoteIncrementalFinalText(text);
+            CCIncSpeakChineseTranslation(full, final);
         });
         return;
     }
-    if (!g_callActive) {
-        g_incPendingSource = nil;
-        g_incPendingToken++;
-        CCIncResetSentence();
+
+    NSString *text = CCIncTrim(full);
+    if (!text.length) {
+        if (final) CCIncResetSpoken();
         return;
     }
 
-    NSString *trim = CCIncTrim(text);
-    if (!trim.length || CCRemoteTextIsMostlyChinese(trim)) {
-        CCIncFlushPending();
-        CCIncResetSentence();
+    NSString *spoken = g_incSpokenText ?: @"";
+    NSUInteger offset = 0;
+    if ([text hasPrefix:spoken]) {
+        offset = spoken.length;
+    } else if (spoken.length >= text.length) {
+        if (final) CCIncResetSpoken();
         return;
-    }
-
-    NSString *low = [[trim lowercaseString]
-        stringByTrimmingCharactersInSet:[NSCharacterSet punctuationCharacterSet]];
-    NSSet *fillers = [NSSet setWithObjects:
-                      @"hmm", @"um", @"uh", @"er", @"ah", @"oh", @"huh", @"mm", nil];
-    if (low.length <= 2 || [fillers containsObject:low]) {
-        CCIncFlushPending();
-        CCIncResetSentence();
-        return;
-    }
-
-    NSUInteger start = MIN(g_incCommittedLen, trim.length);
-    if (start < trim.length) {
-        NSString *tail = [trim substringFromIndex:start];
-        CCLogf(@"inc tts final tail: %@", tail);
-        CCIncOfferClause(tail, YES);
     } else {
-        // 该句没有新尾巴，但可能有被压住的短碎片，必须补播。
-        CCIncFlushPending();
+        // 译文改写：按已播长度跳过，避免整句重播；final 会补齐剩余。
+        offset = MIN(spoken.length, text.length);
     }
-    CCIncResetSentence();
+    if (offset >= text.length) {
+        if (final) CCIncResetSpoken();
+        return;
+    }
+
+    NSString *newText = [text substringFromIndex:offset];
+    NSMutableString *committed = [NSMutableString string];
+    NSMutableString *cur = [NSMutableString string];
+
+    for (NSUInteger i = 0; i < newText.length; i++) {
+        unichar c = [newText characterAtIndex:i];
+        [cur appendFormat:@"%C", c];
+        if (CCIncIsChinesePunct(c)) {
+            NSString *chunk = CCIncTrim(cur);
+            if (chunk.length >= 2) {
+                CCZhTTSEnqueue(chunk);
+                [committed appendString:chunk];
+                CCLogf(@"inc tts zh chunk: %@", chunk);
+            }
+            [cur setString:@""];
+        }
+    }
+
+    NSString *tail = CCIncTrim(cur);
+    if (final) {
+        if (tail.length) {
+            CCZhTTSEnqueue(tail);
+            [committed appendString:tail];
+            CCLogf(@"inc tts final tail: %@", tail);
+        }
+    } else if (tail.length >= 24) {
+        // 译文长期没有标点：按 24 字切，保证不会一直不播；final 仍以全文为准。
+        for (NSUInteger p = 0; p < tail.length; p += 24) {
+            NSUInteger n = MIN((NSUInteger)24, tail.length - p);
+            NSString *chunk = [tail substringWithRange:NSMakeRange(p, n)];
+            if (chunk.length >= 2) {
+                CCZhTTSEnqueue(chunk);
+                [committed appendString:chunk];
+                CCLogf(@"inc tts long tail chunk: %@", chunk);
+            }
+        }
+    }
+
+    if (committed.length) {
+        g_incSpokenText = [spoken stringByAppendingString:committed];
+    }
+    if (final) CCIncResetSpoken();
 }
 
 // Pro2.1.22：远端 ASR partial -> 翻译引擎 -> 临时中文字幕。
@@ -1615,11 +1341,13 @@ void CCUIRemotePartialText(NSString *text) {
     if (!CCPrefBool(CC_K_REMOTE_ENABLED, YES)) return;
     NSUInteger seq = g_callSeq;
     if (!g_callActive && !(g_graceActive && g_graceSeq == seq)) return;
+    BOOL incremental = CCIncrementalTTSEnabled();
     NSString *trim = [text stringByTrimmingCharactersInSet:
                       [NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (trim.length < 4) return;
     if (CCRemoteTextIsMostlyChinese(trim)) {
-        // 对方说中文：partial 直接上中文字幕，不翻译。
+        // 对方说中文：partial 直接上中文字幕，不翻译；增量 TTS 也清掉本句状态。
+        if (CCIncrementalTTSEnabled()) CCIncResetSpoken();
         CCUIDeliverRemoteTranslated(trim);
         return;
     }
@@ -1642,7 +1370,8 @@ void CCUIRemotePartialText(NSString *text) {
         CCLogf(@"R partial trans[%@]: %@", used ?: @"?", out);
         CCUIDeliverRemoteTranslated(out);
         if (used.length) CCUIDeliverRemoteEngine(used);
-        // 不 TTS：partial 只做字幕，final 才播报。
+        // Pro2.1.27：复用这次 partial 全文翻译，中文按标点切 TTS、只播新增后缀。
+        if (incremental) CCIncSpeakChineseTranslation(out, NO);
     });
 }
 
@@ -1656,13 +1385,13 @@ void CCUIRemoteFinalText(NSString *text) {
     g_remotePartialLast = nil;
     g_remotePartialAt = 0;
 
-    // Pro2.1.24：增量模式下，final 只补本句未提交的尾段；
+    // Pro2.1.27：增量模式下，final 只补中文未播尾段；
     // 完整 final 翻译仍用于字幕，但不再触发整句 TTS。
     BOOL incremental = CCIncrementalTTSEnabled();
-    if (incremental) CCUIRemoteIncrementalFinalText(text);
 
     if (CCRemoteTextIsMostlyChinese(text)) {
         // 对方本来就说中文：直接显示，不翻译、不做中文 TTS（避免回声）
+        if (incremental) CCIncResetSpoken();
         CCUIDeliverRemoteTranslated(text);
         return;
     }
@@ -1679,13 +1408,18 @@ void CCUIRemoteFinalText(NSString *text) {
         CCUIDeliverRemoteTranslated(out);
         if (used.length) CCUIDeliverRemoteEngine(used);
         if (!live) return;   // 挂断后绝不 TTS
-        if (incremental) return;  // 2.1.24：整句 TTS 由增量链路负责
-        if (!CCPrefBool(CC_K_TTS_ENABLED, YES)) return;
         NSString *low = [[text lowercaseString]
             stringByTrimmingCharactersInSet:[NSCharacterSet punctuationCharacterSet]];
         NSSet *fillers = [NSSet setWithObjects:
                           @"hmm", @"um", @"uh", @"er", @"ah", @"oh", @"huh", @"mm", nil];
-        if (low.length <= 2 || [fillers containsObject:low]) return;
+        BOOL filler = (low.length <= 2 || [fillers containsObject:low]);
+        if (incremental) {
+            if (filler) CCIncResetSpoken();
+            else CCIncSpeakChineseTranslation(out, YES);
+            return;
+        }
+        if (!CCPrefBool(CC_K_TTS_ENABLED, YES)) return;
+        if (filler) return;
         CCTTSBuffer(out, @"zh-CN", @"cc_tts_zh.wav");
     });
 }

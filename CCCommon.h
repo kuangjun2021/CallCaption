@@ -107,7 +107,6 @@ void CCUIEnqueueRemoteTTS(NSString *text);          // v0.19.1：把腾讯译文
 void CCUIEnqueueLocalEnglishTTS(NSString *text);    // v0.19.2：本机英文 TTS，写入 cc_tts.wav 供上行混音
 void CCUIRemoteFinalText(NSString *text);           // v0.20.0 B1：来电 ASR 最终文本 -> Google/DeepL -> 中文字幕/TTS
 void CCUIRemotePartialText(NSString *text);         // Pro2.1.22：来电 ASR partial -> 即时中文字幕（不 TTS）
-void CCUIRemoteIncrementalPartial(NSString *text);  // Pro2.1.24：LCT 式增量播报（partial -> 短段翻译 -> TTS）
 void CCUILocalFinalText(NSString *text);            // v0.20.0 B1：去电 ASR 最终文本 -> DeepL/Google -> 英文字幕/TTS
 NSString *CCFindWhatsAppDocs(void);                 // v0.19.1：守护进程/腾讯模块共用
 // 兼容旧接口

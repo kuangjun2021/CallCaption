@@ -93,6 +93,7 @@ static NSString *g_remotePartialLast;
 // Pro2.1.27：LCT 式增量播报（中文侧切块）。
 // 英文 partial 不切，整段翻译；中文按标点切 TTS，只播新增后缀；final 补尾。
 static NSString *g_incSpokenText;
+static NSString *g_incPrevChinese;
 static void CCIncReset(void);
 static void CCZhTTSEnqueue(NSString *text);
 
@@ -1240,6 +1241,7 @@ static BOOL CCIncrementalTTSEnabled(void) {
 
 static void CCIncResetSpoken(void) {
     g_incSpokenText = nil;
+    g_incPrevChinese = nil;
 }
 
 static void CCIncReset(void) {
@@ -1277,18 +1279,22 @@ static void CCIncSpeakChineseTranslation(NSString *full, BOOL final) {
     NSUInteger offset = 0;
     if ([text hasPrefix:spoken]) {
         offset = spoken.length;
-    } else if (spoken.length >= text.length) {
-        if (final) CCIncResetSpoken();
-        return;
-    } else {
-        // 译文改写：按已播长度跳过，避免整句重播；final 会补齐剩余。
+    } else if (final) {
+        // final 译文可能改写：按已播长度跳过，避免整句重播；剩余全部补播。
         offset = MIN(spoken.length, text.length);
+    } else {
+        // partial 译文改写：这一拍不播，等下一拍稳定或 final 补齐。
+        g_incPrevChinese = text;
+        CCLogf(@"inc tts hold rewrite: %@", text);
+        return;
     }
     if (offset >= text.length) {
+        g_incPrevChinese = text;
         if (final) CCIncResetSpoken();
         return;
     }
 
+    NSString *prev = g_incPrevChinese;
     NSString *newText = [text substringFromIndex:offset];
     NSMutableString *committed = [NSMutableString string];
     NSMutableString *cur = [NSMutableString string];
@@ -1299,9 +1305,16 @@ static void CCIncSpeakChineseTranslation(NSString *full, BOOL final) {
         if (CCIncIsChinesePunct(c)) {
             NSString *chunk = CCIncTrim(cur);
             if (chunk.length >= 2) {
-                CCZhTTSEnqueue(chunk);
-                [committed appendString:chunk];
-                CCLogf(@"inc tts zh chunk: %@", chunk);
+                BOOL stable = final ||
+                    (prev.length > 0 &&
+                     [prev rangeOfString:chunk].location != NSNotFound);
+                if (stable) {
+                    CCZhTTSEnqueue(chunk);
+                    [committed appendString:chunk];
+                    CCLogf(@"inc tts zh chunk: %@", chunk);
+                } else {
+                    CCLogf(@"inc tts hold unstable: %@", chunk);
+                }
             }
             [cur setString:@""];
         }
@@ -1320,13 +1333,20 @@ static void CCIncSpeakChineseTranslation(NSString *full, BOOL final) {
             NSUInteger n = MIN((NSUInteger)24, tail.length - p);
             NSString *chunk = [tail substringWithRange:NSMakeRange(p, n)];
             if (chunk.length >= 2) {
-                CCZhTTSEnqueue(chunk);
-                [committed appendString:chunk];
-                CCLogf(@"inc tts long tail chunk: %@", chunk);
+                BOOL stable = prev.length > 0 &&
+                    [prev rangeOfString:chunk].location != NSNotFound;
+                if (stable) {
+                    CCZhTTSEnqueue(chunk);
+                    [committed appendString:chunk];
+                    CCLogf(@"inc tts long tail chunk: %@", chunk);
+                } else {
+                    CCLogf(@"inc tts hold long unstable: %@", chunk);
+                }
             }
         }
     }
 
+    g_incPrevChinese = text;
     if (committed.length) {
         g_incSpokenText = [spoken stringByAppendingString:committed];
     }

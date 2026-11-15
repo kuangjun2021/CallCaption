@@ -1342,11 +1342,13 @@ static NSUInteger CCIncAdjustFunctionWord(NSString *text, NSUInteger start,
     return (j > start && j <= text.length) ? j : b;
 }
 
-static NSUInteger CCIncSecureBoundary(NSString *text, NSUInteger start, NSUInteger b) {
+static NSUInteger CCIncSecureBoundary(NSString *text, NSUInteger start,
+                                      NSUInteger b, BOOL allowFunctionWord) {
     if (b <= start) return b;
     for (int i = 0; i < 3; i++) {
         NSUInteger nb = CCIncAdjustPhrase(text, start, b);
-        nb = CCIncAdjustFunctionWord(text, start, nb);
+        if (allowFunctionWord)
+            nb = CCIncAdjustFunctionWord(text, start, nb);
         if (nb == b) break;
         b = nb;
         if (b >= text.length) break;
@@ -1369,7 +1371,7 @@ static NSUInteger CCIncNextBoundary(NSString *text, NSUInteger start, BOOL stabl
     NSUInteger minEnd = MIN(len, start + 4);
     for (NSUInteger i = minEnd; i < len; i++) {
         if ([punct characterIsMember:[text characterAtIndex:i]])
-            return CCIncSecureBoundary(text, start, i + 1);
+            return CCIncSecureBoundary(text, start, i + 1, NO);
     }
 
     // 超长兜底：在最后一个空格处切，绝不切断单词。
@@ -1380,7 +1382,7 @@ static NSUInteger CCIncNextBoundary(NSString *text, NSUInteger start, BOOL stabl
         NSCharacterSet *ws = [NSCharacterSet whitespaceAndNewlineCharacterSet];
         while (cut > start && ![ws characterIsMember:[text characterAtIndex:cut]])
             cut--;
-        if (cut > start + 4) return CCIncSecureBoundary(text, start, cut);
+        if (cut > start + 4) return CCIncSecureBoundary(text, start, cut, YES);
     }
 
     // partial 已稳定 0.8s：整段剩余部分可播。

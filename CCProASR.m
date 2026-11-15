@@ -175,6 +175,9 @@ static void ASRConfidence(const SherpaOnnxOnlineRecognizerResult *r,
 @property (nonatomic, assign) unsigned long finals;
 @property (nonatomic, assign) unsigned long samples;
 @property (nonatomic, assign) BOOL mutedForTTS;
+// Pro2.1.25：远端识别副本自动增益（只影响 ASR，不改 remote16k.wav / 播放）
+@property (nonatomic, assign) float agcGain;
+@property (nonatomic, assign) CFAbsoluteTime agcLogAt;
 @end
 
 @implementation CCASRStream
@@ -189,6 +192,7 @@ static void ASRConfidence(const SherpaOnnxOnlineRecognizerResult *r,
         _isLocal = isLocal;
         _offset = 44;
         _lastText = @"";
+        _agcGain = 1.0f;
     }
     return self;
 }
@@ -206,6 +210,8 @@ static void ASRConfidence(const SherpaOnnxOnlineRecognizerResult *r,
     _finals = 0;
     _samples = 0;
     _mutedForTTS = NO;
+    _agcGain = 1.0f;
+    _agcLogAt = 0;
     if (_stream && _rec) SherpaOnnxOnlineStreamReset(_rec, _stream);
 }
 - (BOOL)ensureOpen {
@@ -311,6 +317,40 @@ static void ASRConfidence(const SherpaOnnxOnlineRecognizerResult *r,
     int n = (int)(got / 2);
     _samples += (unsigned long)n;
     for (int i = 0; i < n; i++) flt[i] = (float)pcm[i] / 32768.0f;
+
+    // Pro2.1.25：远端识别副本 AGC。
+    // 只作用于送进 Sherpa 的 flt，不改 remote16k.wav/播放；目标是补低声/音量不稳。
+    if (!_isLocal && n > 0) {
+        double sum2 = 0;
+        for (int i = 0; i < n; i++) sum2 += (double)flt[i] * (double)flt[i];
+        double rms = sqrt(sum2 / (double)n);
+        if (rms > 0.00002) {
+            double target = 0.06;
+            double desired = target / rms;
+            if (desired < 1.0) desired = 1.0;
+            if (desired > 24.0) desired = 24.0;
+            if (desired > (double)_agcGain)
+                _agcGain = _agcGain * 0.4f + (float)desired * 0.6f;
+            else
+                _agcGain = _agcGain * 0.75f + (float)desired * 0.25f;
+            if (_agcGain < 1.0f) _agcGain = 1.0f;
+            if (_agcGain > 24.0f) _agcGain = 24.0f;
+        } else {
+            // 数字静音：缓慢回到 1，避免静音后第一句被过度放大。
+            _agcGain = _agcGain * 0.95f + 0.05f;
+        }
+        for (int i = 0; i < n; i++) {
+            float v = flt[i] * _agcGain;
+            if (v > 1.0f) v = 1.0f;
+            if (v < -1.0f) v = -1.0f;
+            flt[i] = v;
+        }
+        CFAbsoluteTime agcNow = CFAbsoluteTimeGetCurrent();
+        if (agcNow - _agcLogAt > 1.0) {
+            _agcLogAt = agcNow;
+            Log(@"R agc rms=%.4f gain=%.1f", rms, _agcGain);
+        }
+    }
 
     SherpaOnnxOnlineStreamAcceptWaveform(_stream, 16000, flt, n);
     while (SherpaOnnxIsOnlineStreamReady(_rec, _stream)) {

@@ -1277,10 +1277,10 @@ static NSUInteger CCIncNextBoundary(NSString *text, NSUInteger start, BOOL stabl
     }
 
     // 超长兜底：在最后一个空格处切，绝不切断单词。
-    // 80 字符约 12–15 个英文词，中文 TTS 约 3–4 秒，符合短段目标。
-    NSUInteger maxLen = 80;
+    // 50 字符约 8–10 个英文词，中文 TTS 约 3–5 秒，避免又积成 10 秒长句。
+    NSUInteger maxLen = 50;
     if (len - start >= maxLen) {
-        NSUInteger cut = start + maxLen;
+        NSUInteger cut = MIN(start + maxLen, len - 1);
         NSCharacterSet *ws = [NSCharacterSet whitespaceAndNewlineCharacterSet];
         while (cut > start && ![ws characterIsMember:[text characterAtIndex:cut]])
             cut--;

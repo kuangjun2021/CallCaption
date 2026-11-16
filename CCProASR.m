@@ -178,6 +178,10 @@ static void ASRConfidence(const SherpaOnnxOnlineRecognizerResult *r,
 // Pro2.1.25：远端识别副本自动增益（只影响 ASR，不改 remote16k.wav / 播放）
 @property (nonatomic, assign) float agcGain;
 @property (nonatomic, assign) CFAbsoluteTime agcLogAt;
+// Pro2.1.31：挂断/停流前把最后一段没等到 endpoint 的文本 flush 成 final
+@property (nonatomic, copy) NSString *lastFinalText;
+@property (nonatomic, assign) BOOL tailFlushed;
+- (void)flushTail;
 @end
 
 @implementation CCASRStream
@@ -192,6 +196,8 @@ static void ASRConfidence(const SherpaOnnxOnlineRecognizerResult *r,
         _isLocal = isLocal;
         _offset = 44;
         _lastText = @"";
+        _lastFinalText = @"";
+        _tailFlushed = NO;
         _agcGain = 1.0f;
     }
     return self;
@@ -210,6 +216,8 @@ static void ASRConfidence(const SherpaOnnxOnlineRecognizerResult *r,
     _finals = 0;
     _samples = 0;
     _mutedForTTS = NO;
+    _lastFinalText = @"";
+    _tailFlushed = NO;
     _agcGain = 1.0f;
     _agcLogAt = 0;
     if (_stream && _rec) SherpaOnnxOnlineStreamReset(_rec, _stream);
@@ -232,7 +240,11 @@ static void ASRConfidence(const SherpaOnnxOnlineRecognizerResult *r,
             confAvg:(double)confAvg
             confMin:(double)confMin
               confN:(int)confN {
-    BOOL lowPartial = (!_isLocal && confN > 0 && confAvg < -1.4);
+    // Pro2.1.31：低声段 AGC 增益会升高；此时置信度天然偏低，
+    // 把远端门限从 -1.4 放宽到 -1.8，避免把有效轻声误杀。
+    double confLimit = -1.4;
+    if (!_isLocal && _agcGain >= 12.0f) confLimit = -1.8;
+    BOOL lowPartial = (!_isLocal && confN > 0 && confAvg < confLimit);
     if (text.length && !_firstAt && !lowPartial) {
         _firstAt = now;
         Log(@"%@ first +%.2fs: %@", self.tag, now - t0, text);
@@ -251,10 +263,15 @@ static void ASRConfidence(const SherpaOnnxOnlineRecognizerResult *r,
     BOOL endpoint = SherpaOnnxOnlineStreamIsEndpoint(_rec, _stream) ? YES : NO;
     if (endpoint) {
         BOOL drop = (!_isLocal && text.length && confN > 0 &&
-                     (confAvg < -1.4 ||
-                      (text.length <= 2 && confAvg < -1.3)));
+                     (confAvg < confLimit ||
+                      (text.length <= 2 && confAvg < confLimit + 0.1)));
+        if (text.length && !_isLocal && confN > 0 &&
+            confAvg < -1.4 && confAvg >= confLimit) {
+            Log(@"R conf relaxed avg=%.2f gain=%.1f", confAvg, _agcGain);
+        }
         if (text.length && !drop) {
             _finals++;
+            _lastFinalText = text;
             AppendSpool([(_isLocal ? @"LI|" : @"I|") stringByAppendingString:text]);
             AppendSpool([(_isLocal ? @"LQ|" : @"RQ|") stringByAppendingString:text]);
             Log(@"%@ final +%.2fs: %@", self.tag, now - t0, text);
@@ -269,6 +286,37 @@ static void ASRConfidence(const SherpaOnnxOnlineRecognizerResult *r,
         _lastPartialAt = 0;
     }
 }
+// Pro2.1.31：live 模式退出前把尾部音频 decode 完，补发最后一句 final。
+// 之前只在 !live 路径做 InputFinished；挂断前没等到 endpoint 的轻声尾句会丢。
+- (void)flushTail {
+    if (!_stream || !_rec || _tailFlushed) return;
+    _tailFlushed = YES;
+    SherpaOnnxOnlineStreamInputFinished(_stream);
+    while (SherpaOnnxIsOnlineStreamReady(_rec, _stream)) {
+        SherpaOnnxDecodeOnlineStream(_rec, _stream);
+    }
+    const SherpaOnnxOnlineRecognizerResult *r =
+        SherpaOnnxGetOnlineStreamResult(_rec, _stream);
+    NSString *text = r && r->text ? @(r->text) : @"";
+    if (text.length) {
+        double avg = 0, minp = 0;
+        int n = 0;
+        ASRConfidence(r, &avg, &minp, &n);
+        if (_lastFinalText.length && [text isEqualToString:_lastFinalText]) {
+            Log(@"%@ tail flush duplicate skipped: %@", self.tag, text);
+        } else {
+            _finals++;
+            _lastFinalText = text;
+            AppendSpool([(_isLocal ? @"LI|" : @"I|") stringByAppendingString:text]);
+            AppendSpool([(_isLocal ? @"LQ|" : @"RQ|") stringByAppendingString:text]);
+            Log(@"%@ tail flush conf=%.2f: %@", self.tag, avg, text);
+        }
+    } else {
+        Log(@"%@ tail flush empty", self.tag);
+    }
+    if (r) SherpaOnnxDestroyOnlineRecognizerResult(r);
+}
+
 - (BOOL)feedRecognizer:(CFAbsoluteTime)t0 {
     // 先打开再判断 TTS 静音：这样 TTS 期间出现的 remote WAV 也会被直接推到文件尾，
     // 不会等 TTS 结束再从 44 字节处把整段 TTS 重新识别一遍。
@@ -320,6 +368,7 @@ static void ASRConfidence(const SherpaOnnxOnlineRecognizerResult *r,
 
     // Pro2.1.25：远端识别副本 AGC。
     // 只作用于送进 Sherpa 的 flt，不改 remote16k.wav/播放；目标是补低声/音量不稳。
+    // Pro2.1.31：上限 24→32，给极低声多一点余量；不盲目拉高，避免放大底噪。
     if (!_isLocal && n > 0) {
         double sum2 = 0;
         for (int i = 0; i < n; i++) sum2 += (double)flt[i] * (double)flt[i];
@@ -328,13 +377,13 @@ static void ASRConfidence(const SherpaOnnxOnlineRecognizerResult *r,
             double target = 0.06;
             double desired = target / rms;
             if (desired < 1.0) desired = 1.0;
-            if (desired > 24.0) desired = 24.0;
+            if (desired > 32.0) desired = 32.0;
             if (desired > (double)_agcGain)
                 _agcGain = _agcGain * 0.4f + (float)desired * 0.6f;
             else
                 _agcGain = _agcGain * 0.75f + (float)desired * 0.25f;
             if (_agcGain < 1.0f) _agcGain = 1.0f;
-            if (_agcGain > 24.0f) _agcGain = 24.0f;
+            if (_agcGain > 32.0f) _agcGain = 32.0f;
         } else {
             // 数字静音：缓慢回到 1，避免静音后第一句被过度放大。
             _agcGain = _agcGain * 0.95f + 0.05f;
@@ -486,6 +535,8 @@ static int RunLive(const SherpaOnnxOnlineRecognizer *remoteRec,
             if (!did) usleep(100000);
         }
 
+        // Pro2.1.31：先 flush 尾部，再打印 done；挂断前最后一句不再丢。
+        for (CCASRStream *s in streams) [s flushTail];
         for (CCASRStream *s in streams) {
             Log(@"%@ done samples=%lu finals=%lu", s.tag,
                 s.samples, s.finals);

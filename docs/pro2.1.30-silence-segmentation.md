@@ -162,6 +162,30 @@ inc tts reset seq=...
 7. `tts zh enqueue` 是否仍 `pending=1`；
 8. 5 段是否完整，第 5 段低声是否仍出字幕。
 
+## 4.1 离线验证结果（2026-11-16，非真机）
+
+用 2.1.29 的 `asr.log` 按 2.1.30 逻辑回放，得到约 22 段；再把关键短句直接送 Google 免费接口验证中文：
+
+| 英文短句 | Google 中文 |
+|---|---|
+| `The agent told me that the flight would be delayed by thirty minutes,` | `代理人告诉我航班将延误三十分钟，` |
+| `The agent told me that the flight would be de layed by thirty minutes,` | `代理人告诉我航班将延误三十分钟，` |
+| `layed by thirty minutes,`（单独） | `三十分钟后，` |
+| `took a train to the airport and arrived about two hours before my flight.` | `乘坐火车前往机场，在航班起飞前大约两个小时到达。` |
+| `Yesterday I went to a small restaurant near my office.` | `昨天我去了办公室附近的一家小餐馆。` |
+| `so I called my colleague and said I would be a little late for the meeting.` | `所以我打电话给我的同事说我开会会迟到一点。` |
+| `Hello, I am a Chinese speaker.` | `你好，我是一个说中文的人。` |
+| `Can you still hear me clearly` | `你还能听清楚我说话吗` |
+| `and are the Chinese subtitles complete?` | `中文字幕完整吗？` |
+
+关键结论：
+
+- 只要把完整从句送到翻译，`delayed` 的语义就是“延误三十分钟”，不会再出现“取消”；
+- `de layed` 即使在完整从句里，Google 也能按上下文翻对；断词修复是额外保险；
+- 单独送 `layed by thirty minutes,` 会变成“三十分钟后”，这正是 2.1.29 46 字符硬切造成的问题；2.1.30 已不允许这种半词单独成句。
+
+**这是离线切句 + 翻译验证，不是真机通话验证。** 实际 TTS 启动等待、音色、回声、混音仍需要老爹的两台手机 + 微信 Pro 才能确认。
+
 ## 5. 预期与风险
 
 - 语义错误应消失：不再有 46 字符硬切，断词先修；

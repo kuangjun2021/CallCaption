@@ -100,6 +100,7 @@ static NSMutableString *g_incPending; // 已收、尚未送翻译的英文
 static NSUInteger g_incGen;
 static NSUInteger g_incCallSeq;
 static NSUInteger g_incIdleToken;     // 静音收尾令牌
+static NSUInteger g_incIdleHolds;     // 静音点落在虚词/半词上时，最多再等两拍
 static void CCIncReset(void);
 static void CCIncStartNext(void);
 static void CCZhTTSEnqueue(NSString *text);
@@ -1222,9 +1223,9 @@ static BOOL CCRemoteTextIsMostlyChinese(NSString *text) {
     return cjk > 0 && cjk >= latin;
 }
 
-// Pro2.1.29：LCT 式短语增量播报。
-// 收到新增英文 -> 在自然标点/短语长度处切开 -> 立即翻译 -> 立即 TTS。
-// 不要求 partial 译文稳定，不维护短语表，不做简版，不加速，不丢句。
+// Pro2.1.30：LCT 式短句增量播报（0.65 秒静音 + 新词尾段）。
+// 收到新增英文 -> 句号/逗号切，或 0.65 秒静音收尾 -> 立即翻译 -> 立即 TTS。
+// 不按字符硬切，不要求译文稳定，不维护短语表，不做简版，不加速，不丢句。
 // final 只补齐当前 ASR 分段最后没送出的部分。
 
 static NSString *CCIncTrim(NSString *s) {
@@ -1261,16 +1262,129 @@ static BOOL CCIncIsFiller(NSString *s) {
     return [fillers containsObject:key];
 }
 
-// 只在跨分段补断词时使用，正常路径不查词典。
+static NSString *CCIncLastToken(NSString *s);
+
+// 只在修断词时查词典；结果缓存，避免每个短语反复初始化 UITextChecker。
 static BOOL CCIncIsValidEnglishWord(NSString *w) {
     if (w.length < 2) return NO;
+    static NSMutableDictionary<NSString *, NSNumber *> *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSMutableDictionary dictionary]; });
+    NSString *key = [w lowercaseString];
+    NSNumber *hit = cache[key];
+    if (hit) return hit.boolValue;
     UITextChecker *checker = [[UITextChecker alloc] init];
     NSRange bad = [checker rangeOfMisspelledWordInString:w
                                                    range:NSMakeRange(0, w.length)
                                               startingAt:0
                                                     wrap:NO
                                                 language:@"en_US"];
-    return bad.location == NSNotFound;
+    BOOL ok = (bad.location == NSNotFound);
+    if (cache.count > 512) [cache removeAllObjects];
+    cache[key] = @(ok);
+    return ok;
+}
+
+static BOOL CCIncIsAlphaToken(NSString *s) {
+    if (!s.length) return NO;
+    NSCharacterSet *letters = [NSCharacterSet letterCharacterSet];
+    for (NSUInteger i = 0; i < s.length; i++) {
+        if (![letters characterIsMember:[s characterAtIndex:i]]) return NO;
+    }
+    return YES;
+}
+
+// x-asr 偶尔把 delayed 吐成 "de layed"、coffee 吐成 "coffe e"。
+// 只有“两个都不是词、拼起来是词”才合并，不碰正常词对。
+static NSString *CCIncRepairSplitWords(NSString *text) {
+    if (!text.length) return text;
+    NSArray<NSString *> *tokens = [text componentsSeparatedByString:@" "];
+    if (tokens.count < 2) return text;
+
+    NSMutableArray<NSString *> *out = [NSMutableArray array];
+    for (NSString *tok in tokens) {
+        if (!tok.length) continue;
+        if (out.count) {
+            NSString *prev = out.lastObject;
+            if (CCIncIsAlphaToken(prev) && CCIncIsAlphaToken(tok)) {
+                NSString *joined = [prev stringByAppendingString:tok];
+                if (!CCIncIsValidEnglishWord(prev) &&
+                    !CCIncIsValidEnglishWord(tok) &&
+                    CCIncIsValidEnglishWord(joined)) {
+                    [out removeLastObject];
+                    [out addObject:joined];
+                    CCLogf(@"inc tts word repair: %@ + %@ -> %@",
+                           prev, tok, joined);
+                    continue;
+                }
+            }
+        }
+        [out addObject:tok];
+    }
+    return [out componentsJoinedByString:@" "];
+}
+
+static BOOL CCIncIsFunctionWord(NSString *w) {
+    static NSSet *words;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        words = [NSSet setWithObjects:
+                 @"a", @"an", @"the", @"and", @"or", @"but", @"if", @"because",
+                 @"so", @"that", @"this", @"these", @"those", @"of", @"to",
+                 @"in", @"on", @"at", @"for", @"with", @"from", @"by", @"as",
+                 @"about", @"before", @"after", @"over", @"under", @"between",
+                 @"into", @"through", @"during", @"without", @"within",
+                 @"against", @"among", @"around", @"is", @"am", @"are", @"was",
+                 @"were", @"be", @"been", @"being", @"do", @"does", @"did",
+                 @"have", @"has", @"had", @"will", @"would", @"shall", @"should",
+                 @"can", @"could", @"may", @"might", @"must", @"not", @"no",
+                 @"i", @"you", @"he", @"she", @"it", @"we", @"they", @"me",
+                 @"him", @"her", @"us", @"them", @"my", @"your", @"his", @"its",
+                 @"our", @"their", @"who", @"whom", @"whose", @"which", @"what",
+                 @"when", @"where", @"why", @"how", @"there", @"here", @"some",
+                 @"any", @"all", @"both", @"each", @"every", @"either",
+                 @"neither", @"more", @"most", @"less", @"least", @"very",
+                 @"just", @"also", @"too", @"only", @"than", @"then", @"now",
+                 @"up", @"down", @"out", @"off", @"again", @"once", nil];
+    });
+    return [words containsObject:w];
+}
+
+// 静音点如果落在虚词或明显的半词上，先不结句；最多再等两拍（2×0.65s）。
+// 这不是译文稳定门，只是防止 x-asr 的 partial 抖动把 “delayed by / thirty minutes”
+// 或 “Hello, I am / a Chinese speaker” 切成两句。
+static BOOL CCIncShouldHoldAtSilence(NSString *p) {
+    p = CCIncTrim(p);
+    if (!p.length) return NO;
+    unichar last = [p characterAtIndex:p.length - 1];
+    if (CCIncIsSentencePunct(last) || last == ',') return NO;
+    NSString *tok = CCIncLastToken(p);
+    NSString *key = [[tok lowercaseString]
+        stringByTrimmingCharactersInSet:[NSCharacterSet punctuationCharacterSet]];
+    if (!key.length) return NO;
+    if (CCIncIsFunctionWord(key)) return YES;
+
+    BOOL hasDigit = NO, numeric = YES;
+    NSCharacterSet *digits = [NSCharacterSet decimalDigitCharacterSet];
+    for (NSUInteger i = 0; i < key.length; i++) {
+        unichar c = [key characterAtIndex:i];
+        if ([digits characterIsMember:c]) { hasDigit = YES; continue; }
+        if (c != '.' && c != ',') { numeric = NO; break; }
+    }
+    if (hasDigit && numeric) return NO;
+    if (key.length <= 5 && !CCIncIsValidEnglishWord(key)) return YES;
+    return NO;
+}
+
+// 取走 pending：先修断词，再清空。用于静音收尾/分段收尾/中文切换。
+static NSString *CCIncTakePending(void) {
+    if (!g_incPending.length) return @"";
+    NSString *p = CCIncRepairSplitWords(g_incPending);
+    p = CCIncTrim(p);
+    [g_incPending setString:@""];
+    g_incIdleToken++;
+    g_incIdleHolds = 0;
+    return p;
 }
 
 static NSString *CCIncLastToken(NSString *s) {
@@ -1360,7 +1474,8 @@ static void CCIncStartNext(void) {
 // 从 pending 中切出已经成句/足够长的短语，按出现顺序立即送翻译。
 static void CCIncFlushNatural(void) {
     if (!g_incPending.length) return;
-    NSString *p = CCIncTrim(g_incPending);
+    NSString *p = CCIncRepairSplitWords(g_incPending);
+    p = CCIncTrim(p);
     [g_incPending setString:p];
 
     // 1) 句末标点：每个完整句单独送，不攒到最后。
@@ -1403,38 +1518,32 @@ static void CCIncFlushNatural(void) {
             break;
         }
     }
-
-    // 3) 没有标点的长句：到 46 字符就在词边界切，绝不切半个词。
-    if (p.length > 46) {
-        NSRange head = NSMakeRange(0, 46);
-        NSRange sp = [p rangeOfCharacterFromSet:
-                      [NSCharacterSet whitespaceAndNewlineCharacterSet]
-                                       options:NSBackwardsSearch
-                                         range:head];
-        NSUInteger at = (sp.location != NSNotFound) ? sp.location : 46;
-        NSString *body = CCIncTrim([p substringToIndex:at]);
-        NSString *rest = CCIncTrim([p substringFromIndex:at]);
-        if (body.length >= 2 && rest.length) {
-            CCLogf(@"inc tts max cut: %@", body);
-            CCIncEnqueuePhrase(body);
-            [g_incPending setString:rest];
-        }
-    }
 }
 
-// pending 连续 1.2 秒没有新增，说明说话停住了；把剩余短语收尾，不丢。
+// 2.1.30：不再按 46 字符硬切。没有标点时留给 0.65 秒静音收尾，
+// 避免把 delayed 切成 de、把 about/be 这类虚词留在句尾。
+
+// pending 连续 0.65 秒没有新增，说明说话停住了；把剩余短语收尾，不丢。
+// 0.65s 是 LCT timerFired 的静音阈值（dylib 0xA000+0xAF8），不是译文稳定门。
 static void CCIncScheduleIdleFlush(void) {
     NSUInteger token = ++g_incIdleToken;
     NSUInteger gen = g_incGen;
     NSUInteger seq = g_incCallSeq;
     if (!g_incPending.length) return;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                 (int64_t)(1.2 * NSEC_PER_SEC)),
+                                 (int64_t)(0.65 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         if (token != g_incIdleToken || gen != g_incGen || seq != g_callSeq) return;
         if (!g_callActive || !g_incPending.length) return;
-        NSString *p = CCIncTrim(g_incPending);
-        [g_incPending setString:@""];
+        NSString *raw = CCIncTrim(g_incPending);
+        if (CCIncShouldHoldAtSilence(raw) && g_incIdleHolds < 2) {
+            g_incIdleHolds++;
+            CCLogf(@"inc tts hold incomplete(%lu): %@",
+                   (unsigned long)g_incIdleHolds, raw);
+            CCIncScheduleIdleFlush();
+            return;
+        }
+        NSString *p = CCIncTakePending();
         if (!p.length) return;
         CCLogf(@"inc tts idle flush: %@", p);
         CCIncEnqueuePhrase(p);
@@ -1442,6 +1551,7 @@ static void CCIncScheduleIdleFlush(void) {
 }
 
 static void CCIncAfterAppend(void) {
+    g_incIdleHolds = 0;
     CCLogf(@"inc tts pending len=%lu: %@",
            (unsigned long)g_incPending.length, g_incPending);
     CCIncFlushNatural();
@@ -1480,6 +1590,7 @@ static void CCIncReset(void) {
     g_incSegmentText = nil;
     g_incPending = [NSMutableString string];
     g_incIdleToken++;
+    g_incIdleHolds = 0;
     CCLogf(@"inc tts reset seq=%lu", (unsigned long)g_callSeq);
 }
 
@@ -1510,9 +1621,8 @@ void CCUIRemoteIncrementalPartial(NSString *text) {
     if (CCRemoteTextIsMostlyChinese(raw)) {
         // 对方改说中文：把之前未送的英文短句收尾，然后清掉句内指针。
         if (g_incPending.length) {
-            NSString *p = CCIncTrim(g_incPending);
-            [g_incPending setString:@""];
-            CCIncEnqueuePhrase(p);
+            NSString *p = CCIncTakePending();
+            if (p.length) CCIncEnqueuePhrase(p);
         }
         g_incSegmentText = nil;
         g_incIdleToken++;
@@ -1542,10 +1652,11 @@ void CCUIRemoteIncrementalPartial(NSString *text) {
             return;
         }
         if (g_incPending.length) {
-            NSString *p = CCIncTrim(g_incPending);
-            [g_incPending setString:@""];
-            CCLogf(@"inc tts segment flush: %@", p);
-            CCIncEnqueuePhrase(p);
+            NSString *p = CCIncTakePending();
+            if (p.length) {
+                CCLogf(@"inc tts segment flush: %@", p);
+                CCIncEnqueuePhrase(p);
+            }
         }
         g_incSegmentText = raw;
         CCIncAppendNewSegment(raw, NO);
@@ -1571,9 +1682,8 @@ void CCUIRemoteIncrementalPartial(NSString *text) {
     g_incSegmentText = raw;
     if (cpl == 0) {
         if (g_incPending.length) {
-            NSString *p = CCIncTrim(g_incPending);
-            [g_incPending setString:@""];
-            CCIncEnqueuePhrase(p);
+            NSString *p = CCIncTakePending();
+            if (p.length) CCIncEnqueuePhrase(p);
         }
         CCIncAppendNewSegment(raw, NO);
         return;
@@ -1622,9 +1732,8 @@ static void CCUIRemoteIncrementalFinalText(NSString *text) {
 
     if (CCRemoteTextIsMostlyChinese(raw)) {
         if (g_incPending.length) {
-            NSString *p = CCIncTrim(g_incPending);
-            [g_incPending setString:@""];
-            CCIncEnqueuePhrase(p);
+            NSString *p = CCIncTakePending();
+            if (p.length) CCIncEnqueuePhrase(p);
         }
         g_incSegmentText = nil;
         g_incIdleToken++;
